@@ -5905,6 +5905,10 @@ pub(crate) async fn respond_to_user_input_internal(
         let _ = window.emit("ChatLogStatus", (&task_id, "Answered", "running"));
     }
 
+    if let Some(main_window) = app.get_webview_window("main") {
+        let _ = main_window.emit("StatusUpdate", (&task_id, "Continuing...", "yellow", "running"));
+    }
+
     Ok(())
 }
 
