@@ -281,7 +281,6 @@ impl CodexAppServerClient {
             Err(_) => json!(request_id),
         };
         let resp = json!({
-            "jsonrpc": "2.0",
             "id": id_value,
             "result": result,
         });

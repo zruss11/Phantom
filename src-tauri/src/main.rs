@@ -5899,6 +5899,11 @@ pub(crate) async fn respond_to_user_input_internal(
         .await
         .map_err(|e| format!("Failed to send user input response: {}", e))?;
 
+    tracing::info!(
+        "[Harness] respond_to_user_input sent for request_id={}",
+        request_id
+    );
+
     {
         let mut pending = state.pending_user_inputs.lock().await;
         pending.remove(&task_id);
