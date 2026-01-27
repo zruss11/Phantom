@@ -1,0 +1,153 @@
+version = 1
+
+# Max concurrent sessions; UI should also enforce this.
+max_parallel = 5
+
+[name_generation]
+provider = "anthropic"
+model = "claude-3-haiku-20240307"
+prompt_path = "backend/prompts/namegen.md"
+
+[[agents]]
+id = "claude-code"
+display_name = "Claude Code"
+command = "claude"
+# YOLO: bypass permission prompts in CLI
+args = ["--output-format", "stream-json", "--permission-mode", "bypassPermissions"]
+# Claude Code supports OAuth/subscription login (via `claude setup-token`), so an API key
+# is not strictly required for local usage.
+required_env = []
+cwd_mode = "process"
+supports_plan = true
+# Model aliases auto-resolve to latest versions; full names also supported
+model_source = "config"
+models = [
+    "default",
+    "sonnet",
+    "opus",
+    "haiku",
+    "opusplan",
+    "claude-sonnet-4-5-20250929",
+    "claude-opus-4-5-20251101",
+    "claude-haiku-4-5-20251001",
+    "claude-sonnet-4-20250514"
+]
+default_plan_model = "sonnet"
+default_exec_model = "sonnet"
+
+[[agents]]
+id = "codex"
+display_name = "Codex"
+command = "codex"
+# Codex uses `codex app-server` (JSON-RPC over stdio).
+args = []
+# Codex supports ChatGPT OAuth login; do not require API keys by default.
+required_env = []
+cwd_mode = "process"
+supports_plan = true
+# Use app-server to dynamically fetch available models
+model_source = "app-server"
+# Fallback models if dynamic fetch fails
+models = []
+default_plan_model = "gpt-5.2-codex"
+default_exec_model = "gpt-5.2-codex"
+
+[[agents]]
+id = "factory-droid"
+display_name = "Factory Droid"
+command = "droid"
+# Droid uses --output-format stream-json for NDJSON streaming
+# Note: --skip-permissions-unsafe added dynamically in cli.rs when bypassPermissions is set
+args = ["--output-format", "stream-json"]
+required_env = []  # CLI handles its own auth via ~/.factory/auth.encrypted
+cwd_mode = "process"
+supports_plan = true
+model_source = "config"
+# Models from https://docs.factory.ai/pricing
+models = [
+    "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
+    "gpt-5.2",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex",
+    "gpt-5.1",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+    "glm-4.6"
+]
+default_plan_model = "claude-sonnet-4-5-20250929"
+default_exec_model = "claude-sonnet-4-5-20250929"
+
+# Provider-style aliases (match Emdash2 / tauri wiring)
+[[agents]]
+id = "droid"
+display_name = "Droid"
+command = "droid"
+# Droid uses --output-format stream-json for NDJSON streaming
+# Note: --skip-permissions-unsafe added dynamically in cli.rs when bypassPermissions is set
+args = ["--output-format", "stream-json"]
+required_env = []  # CLI handles its own auth via ~/.factory/auth.encrypted
+cwd_mode = "process"
+supports_plan = true
+model_source = "config"
+# Models from https://docs.factory.ai/pricing
+models = [
+    "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
+    "gpt-5.2",
+    "gpt-5.1-codex-max",
+    "gpt-5.1-codex",
+    "gpt-5.1",
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+    "glm-4.6"
+]
+default_plan_model = "claude-sonnet-4-5-20250929"
+default_exec_model = "claude-sonnet-4-5-20250929"
+
+[[agents]]
+id = "amp"
+display_name = "Amp"
+command = "amp"
+# Amp's programmatic CLI mode: --stream-json outputs NDJSON, --stream-json-thinking includes reasoning
+# Note: --execute and the prompt are added dynamically in cli.rs
+args = ["--stream-json", "--stream-json-thinking"]
+required_env = []  # AMP_API_KEY optional (OAuth also works)
+cwd_mode = "process"
+supports_plan = true
+# Note: Amp uses "modes" (smart/rush) not "models" - these select different model tiers
+model_source = "config"
+models = ["default", "smart", "rush"]
+default_plan_model = "smart"
+default_exec_model = "smart"
+
+[[agents]]
+id = "opencode"
+display_name = "OpenCode"
+command = "opencode"
+# OpenCode uses `run --format json` for programmatic output
+args = []
+required_env = []
+cwd_mode = "process"
+supports_plan = true
+model_source = "config"
+# Models use provider/model format
+models = [
+    "default",
+    "anthropic/claude-sonnet-4-20250514",
+    "anthropic/claude-opus-4-5-20251101",
+    "anthropic/claude-haiku-4-5-20251001",
+    "openai/gpt-5.1",
+    "openai/gpt-5.1-codex",
+    "openai/gpt-5.2",
+    "google/gemini-3-pro",
+    "google/gemini-3-flash"
+]
+# OpenCode agents: build (default), plan (restricted), general (multipurpose), explore (read-only)
+# These are passed via --agent flag
+agents = ["build", "plan", "general", "explore"]
+default_plan_model = "default"
+default_exec_model = "default"
+default_agent = "build"

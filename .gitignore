@@ -1,0 +1,40 @@
+.DS_Store
+
+# Rust build artifacts
+**/target/
+Cargo.lock
+
+# Node
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+
+# Build outputs
+dist/
+*.log
+
+# Local env files
+.env
+.env.*
+!.env.example
+# Claude Code local settings (contains user-specific paths)
+.claude/
+
+# Agent skills folders (symlinks to user's global skills)
+.agents/
+.codex/
+.factory/
+
+# Tool-generated folders
+.playwright-mcp/
+.superdesign/
+
+# Development docs and plans (except screenshots for README)
+docs/*
+!docs/screenshots/
+spec.md
+
+# GitHub workflows (not needed for open source)
+.github/

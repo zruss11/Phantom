@@ -1,0 +1,1541 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Phantom</title>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css?family=Roboto:300,400,700,900i"
+    />
+    <script>
+      if (typeof module === "object") {
+        window.module = module;
+        module = undefined;
+      }
+    </script>
+
+    <script src="js/vendor/jquery.js"></script>
+    <script src="js/vendor/jquery_ui.js"></script>
+    <link rel="stylesheet" href="fonts/fonts.css" />
+
+    <link rel="stylesheet" type="text/css" href="main.css" />
+    <link rel="stylesheet" href="vendor/bootstrap.min.css" />
+    <link rel="stylesheet" href="fontawesome/fontawesome-all.css" />
+    <script>
+      if (window.module) module = window.module;
+    </script>
+  </head>
+
+  <body id="app">
+    <div id="particles-js"></div>
+    <div class="top-titlebar" id="top-titlebar">
+      <!--Main Navbar Underlay-->
+      <nav
+        class="navbar navbar-expand-sm navbar-dark pink draggable"
+        data-tauri-drag-region
+      >
+        <div class="collapse navbar-collapse"></div>
+      </nav>
+
+      <!--Main Navbar-->
+      <nav
+        class="navbar navbar-expand-sm navbar-dark z-index-top absolute-position draggable"
+        data-tauri-drag-region
+      >
+        <div class="collapse navbar-collapse">
+          <ul class="navbar-nav z-index-top">
+            <li class="nav-item active">
+              <a class="nav-link" data-page="createTasksPage">
+                <i class="fal fa-tasks"></i> Create Tasks
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" data-page="viewTasksPage">
+                <i class="fal fa-bars"></i> View Tasks
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" data-page="accountsPage">
+                <i class="fal fa-key"></i> Accounts
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" data-page="skillsPage">
+                <i class="fal fa-magic"></i> Skills
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" data-page="analyticsPage">
+                <i class="fal fa-clipboard-check"></i> Analytics
+              </a>
+            </li>
+          </ul>
+          <ul class="navbar-nav ml-auto">
+            <li class="nav-item mt-2 mr-0">
+              <a
+                class="nav-link pb-0 pr-0 pt-2 mt-1 white-text"
+                id="minimize-icon"
+              >
+                <i class="fal fa-fw fa-lg fa-minus"></i>
+              </a>
+            </li>
+            <li class="nav-item mr-0">
+              <a class="nav-link mt-1 pb-0 white-text" data-page="settingsPage">
+                <i class="fal fa-cog"></i>
+              </a>
+            </li>
+            <li class="nav-item mt-1 ml-2 mr-0">
+              <a class="nav-link white-text pl-0" id="close-icon">
+                <i class="fal fa-fw fa-lg fa-times"></i>
+              </a>
+            </li>
+          </ul>
+        </div>
+      </nav>
+    </div>
+    <div class="content-container">
+      <!--Create Tasks Page-->
+      <section
+        id="createTasksPage"
+        class="create-tasks-page page container-fluid"
+      >
+        <div class="row no-gutters">
+          <!--Upcoming Releases-->
+          <div class="col-12">
+            <div class="card mt-4 mr-4 ml-4">
+              <div class="card-body pb-3">
+                <div class="container-fluid p-0">
+                  <div class="row">
+                    <div class="col-12">
+                      <h5 class="mb-3">Select an agent</h5>
+                    </div>
+                    <div class="col-12">
+                      <div class="agent-select-grid">
+                        <button
+                          class="agent-card selected"
+                          data-agent-id="codex"
+                          data-agent-name="Codex"
+                          type="button"
+                        >
+                          <svg class="agent-icon" role="img" aria-label="Codex">
+                            <use
+                              href="images/chatgpt-sprites-core.svg#55180d"
+                            ></use>
+                          </svg>
+                        </button>
+                        <button
+                          class="agent-card"
+                          data-agent-id="claude-code"
+                          data-agent-name="Claude Code"
+                          type="button"
+                        >
+                          <img src="images/claude-color.png" alt="Claude Code" />
+                        </button>
+                        <button
+                          class="agent-card"
+                          data-agent-id="amp"
+                          data-agent-name="Amp"
+                          type="button"
+                        >
+                          <img src="images/ampcode.png" alt="Amp" />
+                        </button>
+                        <button
+                          class="agent-card"
+                          data-agent-id="droid"
+                          data-agent-name="Droid"
+                          type="button"
+                        >
+                          <img src="images/factorydroid.png" alt="Droid" />
+                        </button>
+                        <button
+                          class="agent-card"
+                          data-agent-id="opencode"
+                          data-agent-name="OpenCode"
+                          type="button"
+                        >
+                          <img src="images/opencode.png" alt="OpenCode" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!--Create Task-->
+          <div class="col-12">
+            <div class="card mt-0 mr-4 mb-0 ml-4">
+              <div class="card-body pb-3">
+                <div class="container-fluid p-0">
+                  <div class="row">
+                    <div class="col-12">
+                      <h5 class="mb-3">Create tasks</h5>
+                    </div>
+                    <div class="col-7">
+                      <div class="form-group mb-3 prompt-container">
+                        <div
+                          class="form-control agent-prompt"
+                          id="initialPrompt"
+                          contenteditable="true"
+                          data-placeholder="New task"
+                          autofocus
+                        ></div>
+                        <div class="prompt-hint text-muted">
+                          <kbd>CMD+V</kbd> to paste images inline
+                        </div>
+                        <!-- Image attachments toolbar -->
+                        <div class="attachment-toolbar mt-2">
+                          <input
+                            type="file"
+                            id="attachmentInput"
+                            accept="image/jpeg,image/png,image/gif,image/webp"
+                            multiple
+                            style="display: none"
+                          />
+                          <button
+                            type="button"
+                            class="btn btn-sm btn-outline-secondary"
+                            id="attachImageBtn"
+                            title="Attach images (JPEG, PNG, GIF, WebP)"
+                          >
+                            <i class="fas fa-image"></i> Attach Image
+                          </button>
+                          <span class="attachment-hint text-muted ml-2">
+                            or paste from clipboard
+                          </span>
+                        </div>
+                        <!-- Hidden container for storing attachment metadata -->
+                        <div
+                          id="attachmentPreview"
+                          class="attachment-preview mt-2"
+                          style="display: none;"
+                        ></div>
+                      </div>
+                      <div class="form-row">
+                        <div class="form-group col-4" id="permissionModeGroup">
+                          <label class="muted-label">Permission Mode</label>
+                          <div id="permissionModeDropdown" class="custom-dropdown-wrapper"></div>
+                        </div>
+                        <div class="form-group col-4">
+                          <label class="muted-label">Model</label>
+                          <div id="execModelDropdown" class="custom-dropdown-wrapper"></div>
+                        </div>
+                        <div class="form-group col-4" id="reasoningEffortGroup" style="display: none;">
+                          <label class="muted-label">Thinking Level</label>
+                          <div id="reasoningEffortDropdown" class="custom-dropdown-wrapper"></div>
+                        </div>
+                        <div class="form-group col-4" id="agentModeGroup" style="display: none;">
+                          <label class="muted-label">Agent</label>
+                          <div id="agentModeDropdown" class="custom-dropdown-wrapper"></div>
+                        </div>
+                      </div>
+                    </div>
+                    <div class="col-5">
+                      <div class="form-group mb-3">
+                        <label class="muted-label" for="projectPath"
+                          >Project</label
+                        >
+                        <div class="input-group project-picker">
+                          <input
+                            type="text"
+                            class="form-control"
+                            id="projectPath"
+                            placeholder="/path/to/project"
+                          />
+                          <div class="input-group-append">
+                            <button
+                              class="btn btn-default btn-brand btn-sm"
+                              id="pickProjectPath"
+                            >
+                              Browse
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="form-group mb-3">
+                        <label class="muted-label">Base Branch</label>
+                        <div id="baseBranchDropdown" class="custom-dropdown-wrapper"></div>
+                      </div>
+                      <div class="settings-stack">
+                        <div class="setting-row">
+                          <div class="setting-label">
+                            Use Worktree
+                          </div>
+                          <div
+                            class="toggle-buttons"
+                            data-toggle="use-worktree"
+                          >
+                            <button
+                              class="toggle-button"
+                              type="button"
+                              data-value="false"
+                            >
+                              Off
+                            </button>
+                            <button
+                              class="toggle-button"
+                              type="button"
+                              data-value="true"
+                            >
+                              On
+                            </button>
+                            <input
+                              type="checkbox"
+                              id="useWorktreeToggle"
+                              checked
+                            />
+                          </div>
+                        </div>
+                        <div id="worktreeMultiHint" class="worktree-multi-hint text-muted" style="display: none;">
+                          Multi-agent runs always use a worktree.
+                        </div>
+                      </div>
+                      <div class="form-group mb-0 mt-3">
+                        <a
+                          id="createAgentButton"
+                          class="btn btn-default btn-sm btn-brand btn-fill"
+                        >
+                          Create Task
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <!--View Tasks Page-->
+      <section
+        id="viewTasksPage"
+        class="view-tasks-page page container-fluid"
+        hidden
+      >
+        <div class="row no-gutters">
+          <!-- Global Actions -->
+          <div class="col-12">
+            <div class="card mt-4 mr-4 ml-4">
+              <div class="card-body pb-3">
+                <div class="container-fluid p-0">
+                  <div class="row no-gutters">
+                    <div class="col-12">
+                      <h5 class="mb-3">Global actions</h5>
+                    </div>
+                    <div class="col-12 mb-2 mt-2">
+                      <a
+                        id="globalStartTasks"
+                        class="btn btn-success btn-sm mr-2"
+                        >Start all</a
+                      >
+                      <a
+                        id="globalStopTasks"
+                        class="btn btn-warning btn-sm mr-2"
+                        >Stop all</a
+                      >
+                      <a
+                        id="globalDeleteTasks"
+                        class="btn btn-danger btn-sm mr-2"
+                        >Delete all</a
+                      >
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- View Tasks -->
+          <div class="col-12">
+            <div class="card mt-0 mr-4 mb-0 ml-4">
+              <div class="card-body pb-3">
+                <div class="container-fluid p-0">
+                  <div class="row">
+                    <div class="col-12 view-tasks-table-container scrollable">
+                      <table class="table table-sm borderless sortable-table">
+                        <colgroup>
+                          <col width="5%" />
+                          <!--ID-->
+                          <col width="5%" />
+                          <!--AGENT-->
+                          <col width="16%" />
+                          <!--MODEL-->
+                          <col width="16%" />
+                          <!--WORKTREE-->
+                          <col width="28%" />
+                          <!--STATUS-->
+                          <col width="5%" />
+                          <!--CTX-->
+                          <col width="8%" />
+                          <!--COST-->
+                          <col width="17%" />
+                          <!--ACTIONS-->
+                        </colgroup>
+                        <thead>
+                          <tr>
+                            <th scope="col" class="sortable" data-sort="id">
+                              ID
+                            </th>
+                            <th scope="col" class="sortable" data-sort="agent">
+                              AGENT
+                            </th>
+                            <th scope="col" class="sortable" data-sort="model">
+                              MODEL
+                            </th>
+                            <th scope="col" class="sortable" data-sort="worktree">
+                              WORKTREE
+                            </th>
+                            <th scope="col" class="sortable" data-sort="status">
+                              STATUS
+                            </th>
+                            <th scope="col" title="Context window usage">
+                              CTX
+                            </th>
+                            <th scope="col" class="sortable" data-sort="cost">
+                              COST
+                            </th>
+                            <th scope="col">ACTIONS</th>
+                          </tr>
+                        </thead>
+                        <tbody id="tasks-table"></tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <!-- Account Lists -->
+      <section
+        id="accountsPage"
+        class="accounts-page page container-fluid"
+        hidden
+      >
+        <div class="row no-gutters">
+          <div class="col-12">
+            <div class="card mt-4 mr-4 mb-4 ml-4 account-shell">
+              <div class="card-body">
+                <div class="accounts-header">
+                  <div>
+                    <h5 class="mb-1">Agent Accounts</h5>
+                    <p class="muted-text">
+                      Connect Codex and Claude Code with subscription login or
+                      API keys.
+                    </p>
+                  </div>
+                  <div class="accounts-actions">
+                    <button
+                      class="btn btn-default btn-brand btn-sm"
+                      data-auth-save
+                    >
+                      Save Credentials
+                    </button>
+                  </div>
+                </div>
+                <div class="accounts-grid">
+                  <div class="auth-card codex">
+                    <div class="auth-card-header">
+                      <div class="auth-brand">
+                        <svg class="auth-icon" role="img" aria-label="Codex">
+                          <use
+                            href="images/chatgpt-sprites-core.svg#55180d"
+                          ></use>
+                        </svg>
+                        <div>
+                          <div class="auth-title">ChatGPT Codex</div>
+                          <div class="auth-sub" data-auth-status="codex">
+                            Not connected
+                          </div>
+                          <div
+                            class="auth-email-wrapper"
+                            hidden
+                            data-auth-email-wrapper="codex"
+                          >
+                            <span
+                              class="auth-email redacted"
+                              data-auth-email="codex"
+                            ></span>
+                            <button
+                              type="button"
+                              class="auth-email-toggle"
+                              data-toggle-email="codex"
+                              title="Show email"
+                            >
+                              <svg
+                                class="eye-icon"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                              >
+                                <path
+                                  class="eye-open"
+                                  d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"
+                                ></path>
+                                <circle
+                                  class="eye-open"
+                                  cx="12"
+                                  cy="12"
+                                  r="3"
+                                ></circle>
+                                <path
+                                  class="eye-closed"
+                                  d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"
+                                  style="display: none"
+                                ></path>
+                                <line
+                                  class="eye-closed"
+                                  x1="1"
+                                  y1="1"
+                                  x2="23"
+                                  y2="23"
+                                  style="display: none"
+                                ></line>
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <!-- Inline Usage Tracker -->
+                      <div
+                        class="usage-inline"
+                        data-usage-tracker="codex"
+                        hidden
+                      >
+                        <div
+                          class="usage-inline-meter"
+                          data-usage-meter="session"
+                        >
+                          <div class="usage-inline-label">
+                            <span class="usage-inline-name">Session</span>
+                            <span
+                              class="usage-inline-percent"
+                              data-usage-percent="session"
+                              >--%</span
+                            >
+                          </div>
+                          <div class="usage-inline-bar">
+                            <div
+                              class="usage-inline-fill"
+                              data-usage-fill="session"
+                              style="width: 0%"
+                            ></div>
+                          </div>
+                          <span
+                            class="usage-inline-reset"
+                            data-usage-reset="session"
+                            >5h window</span
+                          >
+                        </div>
+                        <div
+                          class="usage-inline-meter"
+                          data-usage-meter="weekly"
+                        >
+                          <div class="usage-inline-label">
+                            <span class="usage-inline-name">Weekly</span>
+                            <span
+                              class="usage-inline-percent"
+                              data-usage-percent="weekly"
+                              >--%</span
+                            >
+                          </div>
+                          <div class="usage-inline-bar">
+                            <div
+                              class="usage-inline-fill weekly"
+                              data-usage-fill="weekly"
+                              style="width: 0%"
+                            ></div>
+                          </div>
+                          <span
+                            class="usage-inline-reset"
+                            data-usage-reset="weekly"
+                            >7d window</span
+                          >
+                        </div>
+                      </div>
+                    </div>
+                    <div class="auth-body">
+                      <label class="muted-label"
+                        >OpenAI API key (OPENAI_API_KEY)</label
+                      >
+                      <input
+                        type="password"
+                        class="form-control auth-input"
+                        data-auth-key="openaiApiKey"
+                        placeholder="sk-..."
+                      />
+                      <div class="auth-footer">
+                        <p class="auth-help">
+                          ChatGPT subscription login uses your existing ChatGPT
+                          plan.
+                        </p>
+                        <button
+                          class="btn btn-default btn-sm btn-brand auth-login"
+                          data-auth-action="codex-login"
+                        >
+                          Sign in with ChatGPT
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="auth-card claude">
+                    <div class="auth-card-header">
+                      <div class="auth-brand">
+                        <img src="images/claude-color.png" alt="Claude Code" />
+                        <div>
+                          <div class="auth-title">Claude Code</div>
+                          <div class="auth-sub" data-auth-status="claude">
+                            Not connected
+                          </div>
+                          <div
+                            class="auth-email-wrapper"
+                            hidden
+                            data-auth-email-wrapper="claude"
+                          >
+                            <span
+                              class="auth-email redacted"
+                              data-auth-email="claude"
+                            ></span>
+                            <button
+                              type="button"
+                              class="auth-email-toggle"
+                              data-toggle-email="claude"
+                              title="Show email"
+                            >
+                              <svg
+                                class="eye-icon"
+                                viewBox="0 0 24 24"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="2"
+                              >
+                                <path
+                                  class="eye-open"
+                                  d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"
+                                ></path>
+                                <circle
+                                  class="eye-open"
+                                  cx="12"
+                                  cy="12"
+                                  r="3"
+                                ></circle>
+                                <path
+                                  class="eye-closed"
+                                  d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"
+                                  style="display: none"
+                                ></path>
+                                <line
+                                  class="eye-closed"
+                                  x1="1"
+                                  y1="1"
+                                  x2="23"
+                                  y2="23"
+                                  style="display: none"
+                                ></line>
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <!-- Keychain Permission Button (shown when usage unavailable) -->
+                      <div
+                        class="usage-keychain-prompt"
+                        data-usage-keychain="claude"
+                      >
+                        <button
+                          class="btn btn-sm btn-outline-secondary"
+                          data-auth-action="claude-keychain"
+                        >
+                          <i class="fal fa-key"></i> Enable Usage Tracking
+                        </button>
+                        <span class="usage-keychain-hint"
+                          >Requires Claude Code login</span
+                        >
+                      </div>
+                      <!-- Inline Usage Tracker (hidden until permissions granted) -->
+                      <div
+                        class="usage-inline"
+                        data-usage-tracker="claude"
+                        hidden
+                      >
+                        <div
+                          class="usage-inline-meter"
+                          data-usage-meter-claude="session"
+                        >
+                          <div class="usage-inline-label">
+                            <span class="usage-inline-name">Session</span>
+                            <span
+                              class="usage-inline-percent"
+                              data-usage-percent-claude="session"
+                              >--%</span
+                            >
+                          </div>
+                          <div class="usage-inline-bar">
+                            <div
+                              class="usage-inline-fill"
+                              data-usage-fill-claude="session"
+                              style="width: 0%"
+                            ></div>
+                          </div>
+                          <span
+                            class="usage-inline-reset"
+                            data-usage-reset-claude="session"
+                            >5h window</span
+                          >
+                        </div>
+                        <div
+                          class="usage-inline-meter"
+                          data-usage-meter-claude="weekly"
+                        >
+                          <div class="usage-inline-label">
+                            <span class="usage-inline-name">Weekly</span>
+                            <span
+                              class="usage-inline-percent"
+                              data-usage-percent-claude="weekly"
+                              >--%</span
+                            >
+                          </div>
+                          <div class="usage-inline-bar">
+                            <div
+                              class="usage-inline-fill weekly"
+                              data-usage-fill-claude="weekly"
+                              style="width: 0%"
+                            ></div>
+                          </div>
+                          <span
+                            class="usage-inline-reset"
+                            data-usage-reset-claude="weekly"
+                            >7d window</span
+                          >
+                        </div>
+                      </div>
+                    </div>
+                    <div class="auth-body">
+                      <label class="muted-label"
+                        >Anthropic API key (ANTHROPIC_API_KEY)</label
+                      >
+                      <input
+                        type="password"
+                        class="form-control auth-input"
+                        data-auth-key="anthropicApiKey"
+                        placeholder="sk-ant-..."
+                      />
+                      <div class="auth-footer">
+                        <p class="auth-help">
+                          Use CLI login or an API key for Claude Code.
+                        </p>
+                        <button
+                          class="btn btn-default btn-sm btn-brand auth-login"
+                          data-auth-action="claude-login"
+                        >
+                          Sign in to Claude Code
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="auth-footnote">
+                  <span class="muted-text"
+                    >Keys are stored locally in app settings.</span
+                  >
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!--Skills-->
+      <section
+        id="skillsPage"
+        class="skills-page page container-fluid"
+        hidden
+      >
+        <div class="row no-gutters">
+          <!-- Header Card with Tabs -->
+          <div class="col-12">
+            <div class="card mt-4 mr-4 ml-4">
+              <div class="card-body pb-3">
+                <div class="skills-page-header">
+                  <div>
+                    <h5 class="mb-1">Agent Skills</h5>
+                    <p class="muted-text mb-0">
+                      Skills are reusable instructions that extend agent capabilities. They are loaded from SKILL.md files.
+                    </p>
+                  </div>
+                  <div class="skills-header-actions">
+                    <a href="skills-tree.html" class="btn btn-default btn-sm btn-skill-tree" title="Open Skill Tree View">
+                      <i class="fal fa-project-diagram"></i> Skill Tree
+                    </a>
+                    <button class="btn btn-default btn-brand btn-sm" id="refreshSkillsBtn">
+                      <i class="fal fa-sync-alt"></i> Refresh
+                    </button>
+                    <button class="btn btn-default btn-sm btn-apply-skills" id="applySkillChangesBtn" style="display: none;" title="Restart agents to apply skill changes. This may take a few seconds.">
+                      <i class="fal fa-bolt"></i> Apply Changes
+                    </button>
+                  </div>
+                </div>
+
+                <!-- Agent Skills Tabs -->
+                <div class="skills-tabs mb-0">
+                  <button class="skills-tab active" data-agent="codex">
+                    <img src="images/codex.svg" alt="Codex" class="skills-tab-icon" style="filter: brightness(0) invert(1);" />
+                    <span>Codex</span>
+                    <span class="skills-tab-count" data-count="codex">0</span>
+                  </button>
+                  <button class="skills-tab" data-agent="claude-code">
+                    <img src="images/claude-color.png" alt="Claude Code" class="skills-tab-icon" />
+                    <span>Claude Code</span>
+                    <span class="skills-tab-count" data-count="claude-code">0</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Personal Skills Card -->
+          <div class="col-12">
+            <div class="card mt-0 mr-4 ml-4">
+              <div class="card-body pb-3">
+                <div class="skills-content">
+                  <div class="skills-panel" data-panel="codex">
+                    <div class="skills-category mb-0">
+                      <div class="skills-category-header">
+                        <i class="fal fa-user"></i>
+                        <span>Personal Skills</span>
+                        <span class="skills-category-path">~/.codex/skills/</span>
+                      </div>
+                      <div class="skills-grid" data-skills="codex-personal"></div>
+                    </div>
+                  </div>
+                  <div class="skills-panel" data-panel="claude-code" hidden>
+                    <div class="skills-category mb-0">
+                      <div class="skills-category-header">
+                        <i class="fal fa-user"></i>
+                        <span>Personal Skills</span>
+                        <span class="skills-category-path">~/.claude/skills/, ~/.factory/skills/</span>
+                      </div>
+                      <div class="skills-grid" data-skills="claude-personal"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Project Skills Card -->
+          <div class="col-12">
+            <div class="card mt-0 mr-4 ml-4">
+              <div class="card-body pb-3">
+                <div class="skills-content">
+                  <div class="skills-panel" data-panel="codex">
+                    <div class="skills-category mb-0">
+                      <div class="skills-category-header">
+                        <i class="fal fa-folder"></i>
+                        <span>Project Skills</span>
+                        <span class="skills-category-path">.codex/skills/</span>
+                      </div>
+                      <div class="skills-grid" data-skills="codex-project"></div>
+                    </div>
+                  </div>
+                  <div class="skills-panel" data-panel="claude-code" hidden>
+                    <div class="skills-category mb-0">
+                      <div class="skills-category-header">
+                        <i class="fal fa-folder"></i>
+                        <span>Project Skills</span>
+                        <span class="skills-category-path">.claude/skills/, .factory/skills/</span>
+                      </div>
+                      <div class="skills-grid" data-skills="claude-project"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!--Analytics - Phantom Command Center-->
+      <section
+        id="analyticsPage"
+        class="analytics-page page container-fluid"
+        hidden
+      >
+        <div class="card mt-4 mr-4 mb-2 ml-4 analytics-header-card">
+          <div class="card-body pb-3">
+            <div class="container-fluid p-0">
+              <div class="row no-gutters">
+                <div class="col-12">
+                  <h5 class="mb-2 analytics-title">Command Center</h5>
+                </div>
+                <div class="col-12">
+                  <div class="phantom-time-range analytics-range">
+                    <button class="phantom-range-btn active" data-range="7">7D</button>
+                    <button class="phantom-range-btn" data-range="14">14D</button>
+                    <button class="phantom-range-btn" data-range="30">30D</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Comparison Overview Cards -->
+        <div class="phantom-comparison-grid">
+          <!-- Codex Summary Card -->
+          <div class="phantom-agent-card codex" data-agent="codex">
+            <div class="agent-card-header">
+              <div class="agent-identity">
+                <svg class="agent-logo-icon" role="img" aria-label="Codex">
+                  <use href="images/chatgpt-sprites-core.svg#55180d"></use>
+                </svg>
+                <div class="agent-name-group">
+                  <span class="agent-name">Codex</span>
+                  <span class="agent-source">~/.codex/sessions</span>
+                </div>
+              </div>
+              <div class="agent-status-indicator online">
+                <span class="status-dot"></span>
+                <span class="status-text">Active</span>
+              </div>
+            </div>
+            <div class="agent-stats-row" id="codexSummaryGrid">
+              <div class="agent-stat">
+                <span class="stat-value" data-stat="last7">--</span>
+                <span class="stat-label" data-stat-label="totalTokens">Total Tokens (7D)</span>
+              </div>
+              <div class="agent-stat">
+                <span class="stat-value" data-stat="last30">--</span>
+                <span class="stat-label" data-stat-label="outputTokens">Output Tokens (7D)</span>
+              </div>
+              <div class="agent-stat highlight">
+                <span class="stat-value" data-stat="cacheRate">--%</span>
+                <span class="stat-label">Cache Rate</span>
+              </div>
+              <div class="agent-stat cost">
+                <span class="stat-value" data-stat="totalCost">$--</span>
+                <span class="stat-label" data-stat-label="totalCost">Est. Cost (7D)</span>
+              </div>
+            </div>
+            <div class="agent-trend-indicator">
+              <i class="fal fa-arrow-trend-up"></i>
+              <span data-stat="peakDate">Peak: --</span>
+            </div>
+          </div>
+
+          <!-- Claude Summary Card -->
+          <div class="phantom-agent-card claude" data-agent="claude">
+            <div class="agent-card-header">
+              <div class="agent-identity">
+                <img src="images/claude-color.png" alt="Claude Code" class="agent-logo-img" />
+                <div class="agent-name-group">
+                  <span class="agent-name">Claude Code</span>
+                  <span class="agent-source">~/.claude/projects</span>
+                </div>
+              </div>
+              <div class="agent-status-indicator online">
+                <span class="status-dot"></span>
+                <span class="status-text">Active</span>
+              </div>
+            </div>
+            <div class="agent-stats-row" id="claudeSummaryGrid">
+              <div class="agent-stat">
+                <span class="stat-value" data-stat="last7">--</span>
+                <span class="stat-label" data-stat-label="totalTokens">Total Tokens (7D)</span>
+              </div>
+              <div class="agent-stat">
+                <span class="stat-value" data-stat="last30">--</span>
+                <span class="stat-label" data-stat-label="outputTokens">Output Tokens (7D)</span>
+              </div>
+              <div class="agent-stat highlight">
+                <span class="stat-value" data-stat="cacheRate">--%</span>
+                <span class="stat-label">Cache Rate</span>
+              </div>
+              <div class="agent-stat cost">
+                <span class="stat-value" data-stat="totalCost">$--</span>
+                <span class="stat-label" data-stat-label="totalCost">Est. Cost (7D)</span>
+              </div>
+            </div>
+            <div class="agent-trend-indicator">
+              <i class="fal fa-arrow-trend-up"></i>
+              <span data-stat="peakDate">Peak: --</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Detailed Stats Grid -->
+        <div class="phantom-details-grid">
+          <!-- Codex Detailed Stats -->
+          <div class="phantom-detail-card" data-agent="codex">
+            <div class="detail-card-header">
+              <div class="detail-agent-badge codex">
+                <svg class="detail-agent-icon" role="img"><use href="images/chatgpt-sprites-core.svg#55180d"></use></svg>
+                <span>Codex Details</span>
+              </div>
+              <button class="detail-refresh-btn" id="refreshCodexAnalytics">
+                <i class="fal fa-sync-alt"></i>
+              </button>
+            </div>
+
+            <!-- Mini Bar Chart -->
+            <div class="detail-mini-chart">
+              <div class="mini-chart-title">Daily Usage</div>
+              <div class="mini-bar-chart" id="codexBarChart">
+                <div class="bar-container"><div class="bar" data-day="0" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar" data-day="1" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar" data-day="2" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar" data-day="3" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar" data-day="4" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar" data-day="5" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container today"><div class="bar" data-day="6" style="--bar-height: 0%"></div><span class="bar-label">Today</span></div>
+              </div>
+            </div>
+
+            <!-- Model Breakdown -->
+            <div class="detail-breakdown">
+              <div class="breakdown-title">Model Distribution</div>
+              <div class="model-breakdown" id="codexModelBreakdown">
+                <div class="breakdown-item">
+                  <div class="breakdown-header">
+                    <span class="breakdown-model">Loading...</span>
+                    <span class="breakdown-percent">--%</span>
+                  </div>
+                  <div class="breakdown-bar"><div class="breakdown-fill" style="width: 0%"></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Claude Detailed Stats -->
+          <div class="phantom-detail-card" data-agent="claude">
+            <div class="detail-card-header">
+              <div class="detail-agent-badge claude">
+                <img src="images/claude-color.png" alt="Claude" class="detail-agent-img" />
+                <span>Claude Details</span>
+              </div>
+              <button class="detail-refresh-btn" id="refreshClaudeAnalytics">
+                <i class="fal fa-sync-alt"></i>
+              </button>
+            </div>
+
+            <!-- Mini Bar Chart -->
+            <div class="detail-mini-chart">
+              <div class="mini-chart-title">Daily Usage</div>
+              <div class="mini-bar-chart" id="claudeBarChart">
+                <div class="bar-container"><div class="bar claude" data-day="0" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar claude" data-day="1" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar claude" data-day="2" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar claude" data-day="3" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar claude" data-day="4" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container"><div class="bar claude" data-day="5" style="--bar-height: 0%"></div><span class="bar-label">--</span></div>
+                <div class="bar-container today"><div class="bar claude" data-day="6" style="--bar-height: 0%"></div><span class="bar-label">Today</span></div>
+              </div>
+            </div>
+
+            <!-- Model Breakdown -->
+            <div class="detail-breakdown">
+              <div class="breakdown-title">Model Distribution</div>
+              <div class="model-breakdown" id="claudeModelBreakdown">
+                <div class="breakdown-item">
+                  <div class="breakdown-header">
+                    <span class="breakdown-model">Loading...</span>
+                    <span class="breakdown-percent">--%</span>
+                  </div>
+                  <div class="breakdown-bar"><div class="breakdown-fill claude" style="width: 0%"></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Comparison Metrics -->
+          <div class="phantom-detail-card metrics-card">
+            <div class="detail-card-header">
+              <div class="detail-agent-badge metrics">
+                <i class="fal fa-chart-mixed"></i>
+                <span>Head-to-Head</span>
+              </div>
+            </div>
+
+            <div class="comparison-metrics" id="comparisonMetrics">
+              <div class="metric-row">
+                <span class="metric-label" data-metric-label="totalTokens">Total Tokens (7D)</span>
+                <div class="metric-bar-wrapper">
+                  <div class="metric-bar-track">
+                    <div class="metric-bar-fill codex" id="codex7dBar" style="width: 50%"></div>
+                    <div class="metric-bar-fill claude" id="claude7dBar" style="width: 50%"></div>
+                  </div>
+                </div>
+                <div class="metric-values">
+                  <span class="metric-val codex" id="codex7dVal">--</span>
+                  <span class="metric-vs">vs</span>
+                  <span class="metric-val claude" id="claude7dVal">--</span>
+                </div>
+              </div>
+
+              <div class="metric-row">
+                <span class="metric-label">Cache Efficiency</span>
+                <div class="metric-bar-wrapper">
+                  <div class="metric-bar-track">
+                    <div class="metric-bar-fill codex" id="codexCacheBar" style="width: 50%"></div>
+                    <div class="metric-bar-fill claude" id="claudeCacheBar" style="width: 50%"></div>
+                  </div>
+                </div>
+                <div class="metric-values">
+                  <span class="metric-val codex" id="codexCacheVal">--%</span>
+                  <span class="metric-vs">vs</span>
+                  <span class="metric-val claude" id="claudeCacheVal">--%</span>
+                </div>
+              </div>
+
+              <div class="metric-row">
+                <span class="metric-label">Daily Average</span>
+                <div class="metric-bar-wrapper">
+                  <div class="metric-bar-track">
+                    <div class="metric-bar-fill codex" id="codexAvgBar" style="width: 50%"></div>
+                    <div class="metric-bar-fill claude" id="claudeAvgBar" style="width: 50%"></div>
+                  </div>
+                </div>
+                <div class="metric-values">
+                  <span class="metric-val codex" id="codexAvgVal">--</span>
+                  <span class="metric-vs">vs</span>
+                  <span class="metric-val claude" id="claudeAvgVal">--</span>
+                </div>
+              </div>
+
+              <div class="winner-badge" id="winnerBadge">
+                <i class="fal fa-trophy"></i>
+                <span>Most Active: <strong id="winnerName">--</strong></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <!--Settings Page-->
+      <section
+        id="settingsPage"
+        class="settings-page page container-fluid"
+        hidden
+      >
+        <div class="row no-gutters">
+          <!-- Settings Cards Container -->
+          <div class="col-12">
+            <div class="settings-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px;">
+              
+              <!-- Notifications Card -->
+              <div class="card settings-card">
+                <div class="card-body">
+                  <h5 class="settings-card-title mb-3">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px; opacity: 0.7;">
+                      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                      <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+                    </svg>
+                    Notifications
+                  </h5>
+                  <div class="form-group mb-3">
+                    <label class="settings-label">Discord Bot Token</label>
+                    <div class="input-group">
+                      <input
+                        type="password"
+                        class="form-control"
+                        id="discordBotToken"
+                        placeholder="Bot token"
+                      />
+                      <div class="input-group-append">
+                        <a id="testDiscord" class="btn btn-outline-secondary btn-sm">Test</a>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="form-group mb-3">
+                    <label class="settings-label">Discord Channel ID</label>
+                    <div class="input-group">
+                      <input
+                        type="text"
+                        class="form-control"
+                        id="discordChannelId"
+                        placeholder="Channel ID for notifications"
+                      />
+                    </div>
+                  </div>
+                  <div class="settings-toggles">
+                    <div class="settings-toggle-row">
+                      <span class="settings-toggle-label">Enable Discord bot</span>
+                      <div class="toggle-buttons" data-toggle="discord-enabled">
+                        <button class="toggle-button" type="button" data-value="false">Off</button>
+                        <button class="toggle-button" type="button" data-value="true">On</button>
+                        <input type="checkbox" id="discordEnabled" />
+                      </div>
+                    </div>
+                    <div class="settings-toggle-row">
+                      <span class="settings-toggle-label">Enable agent notifications</span>
+                      <div class="toggle-buttons" data-toggle="agent-notifications">
+                        <button class="toggle-button" type="button" data-value="false">Off</button>
+                        <button class="toggle-button" type="button" data-value="true">On</button>
+                        <input type="checkbox" id="agentNotificationsEnabled" />
+                      </div>
+                    </div>
+                    <div class="settings-toggle-row">
+                      <span class="settings-toggle-label">Stack notifications</span>
+                      <div class="toggle-buttons" data-toggle="notification-stack">
+                        <button class="toggle-button" type="button" data-value="false">Off</button>
+                        <button class="toggle-button" type="button" data-value="true">On</button>
+                        <input type="checkbox" id="agentNotificationStack" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- AI Summaries & Agents Card -->
+              <div class="card settings-card">
+                <div class="card-body">
+                  <!-- AI Summaries Section -->
+                  <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h5 class="settings-card-title mb-0">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px; opacity: 0.7;">
+                        <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path>
+                        <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                        <line x1="12" y1="19" x2="12" y2="22"></line>
+                      </svg>
+                      AI Summaries
+                    </h5>
+                    <div class="toggle-buttons" data-toggle="ai-summaries">
+                      <button class="toggle-button" type="button" data-value="false">Off</button>
+                      <button class="toggle-button" type="button" data-value="true">On</button>
+                      <input type="checkbox" id="aiSummariesEnabled" />
+                    </div>
+                  </div>
+                  <small class="text-muted d-block mb-3">
+                    Generate smart task titles using AI (Claude Haiku / GPT-5.1-codex-mini)
+                  </small>
+
+                  <!-- Divider -->
+                  <hr style="border-color: rgba(255,255,255,0.1); margin: 1rem 0;">
+
+                  <!-- Agents Section -->
+                  <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h5 class="settings-card-title mb-0">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px; opacity: 0.7;">
+                        <path d="M3 7h18M3 12h18M3 17h18"></path>
+                        <circle cx="7" cy="7" r="2"></circle>
+                        <circle cx="7" cy="12" r="2"></circle>
+                        <circle cx="7" cy="17" r="2"></circle>
+                      </svg>
+                      Agents
+                    </h5>
+                    <button class="btn btn-outline-secondary btn-sm" id="refreshAgentsBtn">
+                      Refresh agents
+                    </button>
+                  </div>
+                  <small class="text-muted d-block mb-0">
+                    Re-check installed agent CLIs and update availability.
+                  </small>
+                </div>
+              </div>
+
+              <!-- Keyboard Shortcuts Card (Full Width) -->
+              <div class="card settings-card" style="grid-column: span 2;">
+                <div class="card-body">
+                  <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h5 class="settings-card-title mb-0">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px; opacity: 0.7;">
+                        <rect x="2" y="4" width="20" height="16" rx="2" ry="2"></rect>
+                        <path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10"></path>
+                      </svg>
+                      Keyboard Shortcuts
+                    </h5>
+                    <button class="btn btn-outline-secondary btn-sm" id="resetKeybindsBtn">
+                      Reset to Defaults
+                    </button>
+                  </div>
+                  <div class="keybinds-grid" id="keybindsGrid">
+                    <!-- Navigation -->
+                    <div class="keybinds-section">
+                      <div class="keybinds-section-title">Navigation</div>
+                      <div class="keybind-row" data-action="nav.createTasks">
+                        <span class="keybind-label">Create Tasks</span>
+                        <button class="keybind-input" data-keybind="nav.createTasks">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="nav.viewTasks">
+                        <span class="keybind-label">View Tasks</span>
+                        <button class="keybind-input" data-keybind="nav.viewTasks">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="nav.accounts">
+                        <span class="keybind-label">Accounts</span>
+                        <button class="keybind-input" data-keybind="nav.accounts">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="nav.skills">
+                        <span class="keybind-label">Skills</span>
+                        <button class="keybind-input" data-keybind="nav.skills">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="nav.analytics">
+                        <span class="keybind-label">Analytics</span>
+                        <button class="keybind-input" data-keybind="nav.analytics">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="nav.settings">
+                        <span class="keybind-label">Settings</span>
+                        <button class="keybind-input" data-keybind="nav.settings">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                    </div>
+                    <!-- Agent Selection -->
+                    <div class="keybinds-section">
+                      <div class="keybinds-section-title">Agent Selection</div>
+                      <div class="keybind-row" data-action="agent.codex">
+                        <span class="keybind-label">Select Codex</span>
+                        <button class="keybind-input" data-keybind="agent.codex">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="agent.claude">
+                        <span class="keybind-label">Select Claude Code</span>
+                        <button class="keybind-input" data-keybind="agent.claude">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="agent.amp">
+                        <span class="keybind-label">Select Amp</span>
+                        <button class="keybind-input" data-keybind="agent.amp">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="agent.droid">
+                        <span class="keybind-label">Select Droid</span>
+                        <button class="keybind-input" data-keybind="agent.droid">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="agent.opencode">
+                        <span class="keybind-label">Select OpenCode</span>
+                        <button class="keybind-input" data-keybind="agent.opencode">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="agent.factoryDroid">
+                        <span class="keybind-label">Select Factory Droid</span>
+                        <button class="keybind-input" data-keybind="agent.factoryDroid">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                    </div>
+                    <!-- Actions -->
+                    <div class="keybinds-section">
+                      <div class="keybinds-section-title">Actions</div>
+                      <div class="keybind-row" data-action="action.createTask">
+                        <span class="keybind-label">Create Task</span>
+                        <button class="keybind-input" data-keybind="action.createTask">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="action.focusPrompt">
+                        <span class="keybind-label">Focus Prompt</span>
+                        <button class="keybind-input" data-keybind="action.focusPrompt">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="action.pickProject">
+                        <span class="keybind-label">Pick Project Folder</span>
+                        <button class="keybind-input" data-keybind="action.pickProject">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="keybind-conflict-warning" id="keybindConflictWarning" style="display: none;">
+                    <i class="fal fa-exclamation-triangle"></i>
+                    <span id="keybindConflictText">This shortcut is already in use</span>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div
+        class="modal fade mt-5"
+        id="createInstanceModal"
+        tabindex="-1"
+        role="dialog"
+        aria-labelledby="exampleModalLabel"
+        aria-hidden="true"
+      >
+        <div class="modal-dialog mt-5" role="document">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="exampleModalLabel">
+                Single use invite
+              </h5>
+              <button
+                type="button"
+                class="close"
+                data-dismiss="modal"
+                aria-label="Close"
+              >
+                <span aria-hidden="true">&times;</span>
+              </button>
+            </div>
+            <div class="modal-body">
+              <div class="form-inline justify-content-center">
+                <div class="form-group">
+                  <input
+                    type="text"
+                    readonly
+                    class="form-control form-control-lg"
+                    id="singleUseInstanceCode"
+                    value="Unavailable"
+                  />
+                </div>
+                <button
+                  class="btn btn-brand btn-default btn-lg ml-2"
+                  id="copyInstanceCode"
+                  data-toggle="tooltip"
+                  data-placement="top"
+                  title="Copy to clipboard"
+                >
+                  <i class="fal fa-lg fa-copy"></i>
+                </button>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button
+                type="button"
+                class="btn btn-sm btn-secondary"
+                data-dismiss="modal"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skills Apply Changes Confirmation Modal -->
+    <div
+      class="modal fade mt-5"
+      id="applySkillChangesModal"
+      tabindex="-1"
+      role="dialog"
+      aria-labelledby="applySkillChangesModalLabel"
+      aria-hidden="true"
+    >
+      <div class="modal-dialog mt-5" role="document">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="applySkillChangesModalLabel">
+              <i class="fal fa-exclamation-triangle text-warning"></i> Agents Running
+            </h5>
+            <button
+              type="button"
+              class="close"
+              data-dismiss="modal"
+              aria-label="Close"
+            >
+              <span aria-hidden="true">&times;</span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <p>The following agents are currently running tasks:</p>
+            <ul id="runningAgentsList" class="list-unstyled mb-3">
+              <!-- Dynamically populated -->
+            </ul>
+            <p class="text-warning mb-0">
+              <strong>Restarting will interrupt these tasks.</strong> Are you sure you want to apply skill changes now?
+            </p>
+          </div>
+          <div class="modal-footer">
+            <button
+              type="button"
+              class="btn btn-sm btn-secondary"
+              data-dismiss="modal"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-danger"
+              id="confirmApplySkillChanges"
+            >
+              <i class="fal fa-bolt"></i> Restart Anyway
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!--Universal Footer-->
+    <footer class="footer">
+      <div class="container-fluid">
+        <div class="row">
+          <div class="col">
+            <h6 class="footer-text">
+              Status:
+              <span id="statusMessage" class="green-text">Connected</span>
+            </h6>
+          </div>
+          <div class="col text-right">
+            <h6 class="footer-text">
+              <div id="note" class="version-notes">Phantom</div>
+            </h6>
+          </div>
+        </div>
+      </div>
+    </footer>
+
+    <script src="js/gui.js"></script>
+    <!-- Mock Electron layer for browser compatibility -->
+    <script src="js/tauri-bridge.js"></script>
+    <!-- Slash command autocomplete -->
+    <script src="js/slash-commands-data.js"></script>
+    <script src="js/slash-commands.js"></script>
+    <script src="js/custom-dropdown.js"></script>
+    <script src="js/application.js"></script>
+
+    <script src="js/vendor/jquery.color-2.1.2.min.js"></script>
+
+    <script src="js/vendor/popper.min.js"></script>
+    <script src="js/vendor/bootstrap.min.js"></script>
+    <script>
+      // Window controls via tauri-bridge
+      $("#close-icon").click(() => {
+        if (window.tauriBridge && window.tauriBridge.remote) {
+          window.tauriBridge.remote.getCurrentWindow().close();
+        }
+      });
+
+      $("#minimize-icon").click(() => {
+        if (window.tauriBridge && window.tauriBridge.remote) {
+          window.tauriBridge.remote.getCurrentWindow().minimize();
+        }
+      });
+
+      // Window dragging for custom titlebar
+      $(".draggable").on("mousedown", function (e) {
+        // Don't drag if clicking on interactive elements
+        if (
+          $(e.target).closest(".nav-item, .nav-link, button, a, input, select")
+            .length
+        ) {
+          return;
+        }
+        if (window.tauriBridge && window.tauriBridge.remote) {
+          window.tauriBridge.remote.getCurrentWindow().startDragging();
+        }
+      });
+    </script>
+  </body>
+</html>

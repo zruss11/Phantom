@@ -1,0 +1,252 @@
+<!doctype html>
+<html>
+
+<head>
+  <title>Phantom</title>
+  <link href="https://fonts.googleapis.com/css?family=Roboto:300,400,700,900i" rel="stylesheet">
+  <script>
+    if (typeof module === 'object') {
+      window.module = module;
+      module = undefined;
+    }
+  </script>
+
+    <script src="js/vendor/jquery.js"></script>
+    <script src="js/vendor/jquery_ui.js"></script>
+
+    <link rel="stylesheet" href="fonts/fonts.css">
+
+
+    <link rel="stylesheet" type="text/css" href="main.css">
+    <link rel="stylesheet" href="vendor/bootstrap.min.css">
+    <link rel="stylesheet" href="fontawesome/fontawesome-all.css">
+
+  <script>
+    if (window.module) module = window.module;
+  </script>
+  <style>
+      body {
+        background-image: url("./images/phantom-bg.png");
+        background-size: cover;
+        background-color: #cccccc;
+        }
+        .loading-bar {
+    animation: sideToside 2s ease-in-out infinite;
+    /*change this for the color of the sideToside line*/
+    background-color: #fff;
+    height: 100%;
+    position: absolute;
+    width: 50%;
+}
+
+@keyframes sideToside {
+    0%,
+    100% {
+        transform: translateX(-50%);
+    }
+    50% {
+        transform: translateX(150%);
+    }
+}
+
+.center {
+    left: 50%;
+    margin: 0;
+    position: absolute;
+    top: 75%;
+    transform: translate(-50%, -50%);
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+}
+
+::-webkit-scrollbar {
+    display: none;
+}
+
+@-webkit-keyframes bgAni {
+    0% {
+        background-position: 51% 0%
+    }
+    50% {
+        background-position: 50% 100%
+    }
+    100% {
+        background-position: 51% 0%
+    }
+}
+
+@keyframes bgAni {
+    0% {
+        background-position: 51% 0%
+    }
+    50% {
+        background-position: 50% 100%
+    }
+    100% {
+        background-position: 51% 0%
+    }
+}
+.loading {
+    height: 5px;
+    margin: 1em;
+    overflow: hidden;
+    position: relative;
+    width: 12em;
+    border-radius: 5px;
+}
+body {
+    font-family: 'Proxima Nova', sans-serif !important;
+    border-radius: 10px;
+    /*
+        background: linear-gradient(180deg, #fe938b, #f77f9c);
+        background-size: 200% 200%;
+
+        -webkit-animation: bgAni 1.5s ease infinite;
+        animation: bgAni 1.5s ease infinite;
+    */
+    overflow: hidden;
+}
+html,
+        #app {
+            height: 100%;
+            width: 100%;
+            margin: 0;
+            padding: 0;
+            position: relative;
+        }
+
+#text {
+    position: absolute;
+    font-size: 24px;
+    color: #fff;
+    top: calc(50%);
+    width: 100%;
+    /* font-style: italic; */
+    text-align: center;
+}
+#tiny-text {
+    font-size: 14px;
+    color: #fff;
+    top: calc(50%);
+    width: 100%;
+    /* font-style: italic; */
+    text-align: center;
+}
+#logo {
+    position: relative;
+    top: 5% !important;
+    color: #fff;
+    font-size: 35px;
+    text-align: center;
+    padding-top: 10%;
+    text-shadow: 0 8px 16px 0 rgba(0, 0, 0, 0.2), 0 6px 20px 0 rgba(0, 0, 0, 0.19);
+    /*font-style: italic;
+         letter-spacing: -2px;
+                font-weight: bold;
+        text-shadow: 0 0 0.05em #fff, 0 0 0.05em #fff, 0 0 0.05em #fff;*/
+}
+#version {
+    position: absolute;
+    bottom: 10%;
+    text-align: center;
+    width: 100%;
+    font-weight: 300;
+    font-size: 14px;
+    color: #fff;
+}
+
+
+
+.pulse {
+            border: 2px solid transparent;
+            -webkit-animation: pulse 0.7s;
+            -webkit-animation-iteration-count: 2;
+            animation: pulse 0.7s;
+            animation-iteration-count: 2;
+            outline: 0;
+            }
+
+@-webkit-keyframes pulse {
+  from { border-color: transparent; }
+  50% { border-color: red; }
+  to { border-color: transparent; }
+}
+@keyframes pulse {
+  from { border-color: transparent; }
+  50% { border-color: red; }
+  to { border-color: transparent; }
+}
+        @keyframes shake {
+            10%, 90% {
+                transform: translate3d(-1px, 0, 0);
+            }
+
+            20%, 80% {
+                transform: translate3d(2px, 0, 0);
+            }
+
+            30%, 50%, 70% {
+                transform: translate3d(-4px, 0, 0);
+            }
+
+            40%, 60% {
+                transform: translate3d(4px, 0, 0);
+            }
+        }
+        .drag {
+            -webkit-app-region: drag;
+        }
+        .no-drag {
+            -webkit-app-region: no-drag;
+        }
+        .thin-font {
+            font-family: 'Proxima Nova', sans-serif;
+        }
+  </style>
+</head>
+
+<body scroll="no"> <div id="bg">
+
+</div>
+<div id="logo">Phantom by Ghost AIO</div>
+<div id="tiny-text"></div>
+<div id="text"></div>
+</b> </div>
+<div id="version"></div>
+
+
+
+
+
+
+<script>
+    // $("#tiny-text").hide()
+const {
+        ipcRenderer,
+        remote
+    }
+
+    =require('electron');
+    ipcRenderer.on('boot-status-update', (event, status)=> {
+        $('#text').text(status.message);
+    }
+
+
+    );
+    ipcRenderer.on('authentication-fail', (e, d) => {
+        $("#tiny-text").text(d);
+        $("#tiny-text").fadeIn()
+    });
+    $(function () {
+        $('#version').text('Beta Version ' + remote.getGlobal('app_version'));
+    }
+
+    );
+
+    </script> </body>
+
+</html>

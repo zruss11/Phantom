@@ -1,0 +1,6153 @@
+mod claude_local_usage;
+mod claude_usage_watcher;
+mod db;
+mod debug_http;
+mod local_usage;
+mod logger;
+mod namegen;
+mod summarize;
+mod utils;
+mod webhook;
+mod discord_bot;
+mod worktree;
+
+use utils::truncate_str;
+
+use chrono::TimeZone;
+use phantom_harness_backend::cli::{
+    AgentProcessClient, ImageContent, StreamingUpdate, TokenUsageInfo, UserInputQuestion,
+};
+use phantom_harness_backend::{
+    apply_model_selection, get_agent_models as backend_get_agent_models,
+    get_agent_modes as backend_get_agent_modes, get_codex_models as backend_get_codex_models,
+    get_codex_models_enriched as backend_get_codex_models_enriched,
+    get_codex_modes as backend_get_codex_modes, get_factory_custom_models, AgentLaunchConfig,
+    EnrichedModelOption, ModeOption, ModelOption,
+};
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+#[cfg(target_os = "macos")]
+use std::process::Command;
+use std::process::Stdio;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::Instant;
+use tauri::{
+    AppHandle, Emitter, LogicalPosition, Manager, Position, State, WebviewUrl, WebviewWindow,
+};
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command as TokioCommand;
+use tokio::sync::Mutex;
+use tokio::time::{timeout, Duration};
+
+use debug_http::start_debug_http;
+
+/// Model pricing (per million tokens): (model_pattern, input_rate, output_rate)
+/// Rates are in USD per 1M tokens
+const MODEL_PRICING: &[(&str, f64, f64)] = &[
+    // OpenAI models (https://openai.com/api/pricing/)
+    ("gpt-5.1-mini", 0.40, 1.60),
+    ("gpt-5.1", 2.50, 10.00),
+    ("gpt-5", 5.00, 15.00),
+    ("o4-mini", 1.10, 4.40),
+    ("o3-mini", 1.10, 4.40),
+    ("o3", 10.00, 40.00),
+    ("gpt-4.1-mini", 0.40, 1.60),
+    ("gpt-4.1-nano", 0.10, 0.40),
+    ("gpt-4.1", 2.50, 10.00),
+    ("gpt-4o-mini", 0.15, 0.60),
+    ("gpt-4o", 2.50, 10.00),
+    ("gpt-4-turbo", 10.00, 30.00),
+    ("gpt-4", 30.00, 60.00),
+    ("gpt-3.5-turbo", 0.50, 1.50),
+    // Anthropic models (https://www.anthropic.com/pricing)
+    ("claude-opus-4", 15.00, 75.00),
+    ("claude-sonnet-4", 3.00, 15.00),
+    ("claude-3-5-sonnet", 3.00, 15.00),
+    ("claude-3-opus", 15.00, 75.00),
+    ("claude-3-sonnet", 3.00, 15.00),
+    ("claude-3-haiku", 0.25, 1.25),
+];
+
+/// Calculate cost from token usage for a given model
+fn calculate_cost_from_usage(model: &str, usage: &TokenUsageInfo) -> f64 {
+    let (input_rate, output_rate) = get_model_rates(model);
+    let input_tokens = usage.last_token_usage.input_tokens;
+    let output_tokens = usage.last_token_usage.output_tokens;
+
+    let input_cost = (input_tokens as f64) * input_rate / 1_000_000.0;
+    let output_cost = (output_tokens as f64) * output_rate / 1_000_000.0;
+
+    input_cost + output_cost
+}
+
+/// Get pricing rates for a model (returns default rates if model not found)
+fn get_model_rates(model: &str) -> (f64, f64) {
+    let model_lower = model.to_lowercase();
+    for (pattern, input, output) in MODEL_PRICING {
+        if model_lower.contains(&pattern.to_lowercase()) {
+            return (*input, *output);
+        }
+    }
+    // Default rates (roughly GPT-4o rates)
+    (2.50, 10.00)
+}
+
+/// Check if an Agent error is recoverable (exit code 143/SIGTERM)
+/// These errors can be recovered by reconnecting the session
+fn is_recoverable_exit(error: &str) -> bool {
+    error.contains("exit code: 143")
+        || error.contains("Exit code: 143")
+        || error.contains("exited with code 143")
+        || error.contains("SIGTERM")
+        || error.contains("process was terminated")
+        || error.contains("terminated by signal 15")
+}
+
+/// Format an Agent error for display to the user
+/// Returns (formatted_message, error_type) where error_type is "terminated" or "error"
+fn format_agent_error(error: &str) -> (String, &'static str) {
+    if is_recoverable_exit(error) {
+        (
+            "Agent session was terminated. This may happen due to timeout, permission denial, or system interruption.".to_string(),
+            "terminated"
+        )
+    } else if error.contains("exited with code") {
+        (
+            format!("Agent process ended unexpectedly. {}", error),
+            "error",
+        )
+    } else {
+        (error.to_string(), "error")
+    }
+}
+
+/// Tracks whether an agent is available for use
+#[derive(Debug, Clone, Serialize)]
+struct AgentAvailability {
+    available: bool,
+    error_message: Option<String>,
+    last_checked: i64,
+}
+
+fn default_search_paths() -> Vec<std::path::PathBuf> {
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(env_paths) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&env_paths));
+    }
+    if let Some(home) = dirs::home_dir() {
+        paths.extend([
+            home.join(".amp/bin"),
+            home.join(".opencode/bin"),
+            home.join(".superset/bin"),
+            home.join(".factory/bin"),
+            home.join(".npm-global/bin"),
+            home.join(".local/bin"),
+            home.join(".cargo/bin"),
+            home.join("bin"),
+        ]);
+    }
+    if cfg!(target_os = "macos") {
+        paths.extend(
+            [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            ]
+            .iter()
+            .map(std::path::PathBuf::from),
+        );
+    } else if cfg!(target_os = "linux") {
+        paths.extend(
+            ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+                .iter()
+                .map(std::path::PathBuf::from),
+        );
+    }
+    paths
+}
+
+fn resolve_command_path(command: &str) -> Option<std::path::PathBuf> {
+    let path = Path::new(command);
+    if path.is_absolute() || command.contains('/') || command.contains('\\') {
+        return path.is_file().then_some(path.to_path_buf());
+    }
+    for dir in default_search_paths() {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            for ext in [".exe", ".cmd", ".bat"] {
+                if candidate
+                    .with_extension(ext.trim_start_matches('.'))
+                    .is_file()
+                {
+                    return Some(candidate.with_extension(ext.trim_start_matches('.')));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn command_exists(command: &str) -> bool {
+    resolve_command_path(command).is_some()
+}
+
+fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvailability> {
+    let now = chrono::Utc::now().timestamp();
+    let mut map = HashMap::new();
+    for agent in &config.agents {
+        let command = resolve_agent_command(agent);
+        let available = command_exists(&command);
+        let error_message = if available {
+            None
+        } else {
+            Some(format!(
+                "{} CLI not found. Install {} to enable this agent.",
+                agent.command, agent.command
+            ))
+        };
+        if available {
+            tracing::info!(
+                agent_id = %agent.id,
+                command = %command,
+                "Agent CLI detected"
+            );
+        } else {
+            let search_paths = default_search_paths();
+            let preview_paths: Vec<String> = search_paths
+                .iter()
+                .take(8)
+                .map(|p| p.to_string_lossy().to_string())
+                .collect();
+            tracing::warn!(
+                agent_id = %agent.id,
+                command = %command,
+                searched_paths = %preview_paths.join(":"),
+                total_search_paths = search_paths.len(),
+                "Agent CLI missing"
+            );
+        }
+        map.insert(
+            agent.id.clone(),
+            AgentAvailability {
+                available,
+                error_message,
+                last_checked: now,
+            },
+        );
+    }
+    map
+}
+
+#[derive(Clone)]
+pub(crate) struct AppState {
+    config: AgentsConfig,
+    sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
+    settings: Arc<Mutex<Settings>>,
+    db: Arc<StdMutex<rusqlite::Connection>>,
+    notification_windows: Arc<StdMutex<Vec<String>>>,
+    agent_availability: Arc<StdMutex<HashMap<String, AgentAvailability>>>,
+    // Prevent accidental duplicate starts (e.g., user rapid-clicking Start)
+    running_tasks: Arc<Mutex<HashSet<String>>>,
+    discord_bot: Arc<StdMutex<Option<discord_bot::DiscordBotHandle>>>,
+    pending_user_inputs: Arc<Mutex<HashMap<String, PendingUserInput>>>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct AgentsConfig {
+    #[allow(dead_code)]
+    version: Option<u32>,
+    #[allow(dead_code)]
+    max_parallel: Option<u32>,
+    #[serde(default)]
+    agents: Vec<AgentConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct AgentConfig {
+    id: String,
+    #[allow(dead_code)]
+    display_name: Option<String>,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    required_env: Vec<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    supports_plan: Option<bool>,
+    #[serde(default)]
+    default_plan_model: Option<String>,
+    #[serde(default)]
+    default_exec_model: Option<String>,
+    #[serde(default)]
+    model_source: Option<String>,
+    #[serde(default)]
+    models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AttachmentRef {
+    id: String,
+    #[serde(rename = "relativePath")]
+    relative_path: String,
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateAgentPayload {
+    #[serde(rename = "agentId")]
+    agent_id: String,
+    prompt: String,
+    #[serde(rename = "projectPath")]
+    project_path: Option<String>,
+    /// Base branch for worktree creation (optional)
+    #[serde(rename = "baseBranch", default)]
+    base_branch: Option<String>,
+    #[serde(rename = "planMode")]
+    plan_mode: bool,
+    thinking: bool,
+    #[serde(rename = "useWorktree")]
+    use_worktree: bool,
+    #[serde(rename = "permissionMode")]
+    permission_mode: String,
+    #[serde(rename = "execModel")]
+    exec_model: String,
+    /// Reasoning effort level for Codex models (low, medium, high)
+    #[serde(rename = "reasoningEffort", default)]
+    reasoning_effort: Option<String>,
+    /// Agent mode for agents that expose modes over ACP
+    #[serde(rename = "agentMode", default)]
+    agent_mode: Option<String>,
+    /// Codex mode (default, plan, pair-programming, execute)
+    #[serde(rename = "codexMode", default)]
+    codex_mode: Option<String>,
+    /// True when creating multiple agent sessions in one action
+    #[serde(rename = "multiCreate", default)]
+    multi_create: bool,
+    #[serde(default)]
+    attachments: Vec<AttachmentRef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct Settings {
+    #[serde(rename = "Webhook")]
+    webhook: Option<String>,
+    #[serde(rename = "discordEnabled")]
+    discord_enabled: Option<bool>,
+    #[serde(rename = "discordBotToken")]
+    discord_bot_token: Option<String>,
+    #[serde(rename = "discordChannelId")]
+    discord_channel_id: Option<String>,
+    #[serde(rename = "retryDelay")]
+    retry_delay: Option<String>,
+    #[serde(rename = "errorDelay")]
+    error_delay: Option<String>,
+    #[serde(rename = "ignoreDeclines")]
+    ignore_declines: Option<bool>,
+    #[serde(rename = "openaiApiKey")]
+    openai_api_key: Option<String>,
+    #[serde(rename = "anthropicApiKey")]
+    anthropic_api_key: Option<String>,
+    #[serde(rename = "codexAuthMethod")]
+    codex_auth_method: Option<String>,
+    #[serde(rename = "claudeAuthMethod")]
+    claude_auth_method: Option<String>,
+    #[serde(rename = "agentNotificationsEnabled")]
+    agent_notifications_enabled: Option<bool>,
+    #[serde(rename = "agentNotificationStack")]
+    agent_notification_stack: Option<bool>,
+    // AI-powered summarization for task titles and status
+    #[serde(rename = "aiSummariesEnabled")]
+    ai_summaries_enabled: Option<bool>,
+    // Task creation settings (sticky between restarts)
+    #[serde(rename = "taskProjectPath")]
+    task_project_path: Option<String>,
+    #[serde(rename = "taskPlanMode")]
+    task_plan_mode: Option<bool>,
+    #[serde(rename = "taskThinking")]
+    task_thinking: Option<bool>,
+    #[serde(rename = "taskUseWorktree")]
+    task_use_worktree: Option<bool>,
+    #[serde(rename = "taskBaseBranch")]
+    task_base_branch: Option<String>,
+    #[serde(rename = "taskLastAgent")]
+    task_last_agent: Option<String>,
+    // Per-agent task selections stored as JSON object
+    #[serde(rename = "taskAgentModels", default)]
+    task_agent_models: Option<std::collections::HashMap<String, AgentModelPrefs>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingUserInput {
+    request_id: String,
+    questions: Vec<UserInputQuestion>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MessageOrigin {
+    Ui,
+    Discord,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct AgentModelPrefs {
+    #[serde(rename = "planModel")]
+    plan_model: Option<String>,
+    #[serde(rename = "execModel")]
+    exec_model: Option<String>,
+    #[serde(rename = "permissionMode")]
+    permission_mode: Option<String>,
+    /// Reasoning effort level for Codex models (low, medium, high)
+    #[serde(rename = "reasoningEffort")]
+    reasoning_effort: Option<String>,
+    /// Agent mode for agents that expose modes over ACP
+    #[serde(rename = "agentMode")]
+    agent_mode: Option<String>,
+}
+
+struct SessionHandle {
+    agent_id: String,
+    session_id: String,
+    model: String,
+    client: AgentProcessClient,
+    pending_prompt: Option<String>,
+    pending_attachments: Vec<AttachmentRef>,
+    messages: Vec<serde_json::Value>,
+    /// Real-time cost watcher for Claude Code sessions (None for other agents)
+    #[allow(dead_code)] // Kept for future graceful shutdown
+    claude_watcher: Option<claude_usage_watcher::WatcherHandle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CodexAuthStatus {
+    authenticated: bool,
+    method: Option<String>,
+    expires_at: Option<String>,
+    email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ClaudeAuthStatus {
+    authenticated: bool,
+    method: Option<String>,
+    expires_at: Option<String>,
+    email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimitWindow {
+    used_percent: f64,
+    window_duration_mins: i32,
+    resets_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RateLimits {
+    primary: Option<RateLimitWindow>,
+    secondary: Option<RateLimitWindow>,
+    plan_type: Option<String>,
+    #[serde(rename = "notAvailable")]
+    not_available: Option<bool>,
+    #[serde(rename = "errorMessage")]
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepoBranches {
+    branches: Vec<String>,
+    default_branch: Option<String>,
+    current_branch: Option<String>,
+    source: String,
+    error: Option<String>,
+}
+
+/// Extract email from a JWT access token (base64 decode the payload)
+fn extract_email_from_jwt(token: &str) -> Option<String> {
+    // JWT format: header.payload.signature
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+
+    // Decode the payload (second part) - use URL-safe base64
+    let payload = parts[1];
+    // Add padding if needed
+    let padded = match payload.len() % 4 {
+        2 => format!("{}==", payload),
+        3 => format!("{}=", payload),
+        _ => payload.to_string(),
+    };
+
+    // Replace URL-safe characters
+    let standard = padded.replace('-', "+").replace('_', "/");
+
+    let decoded = match base64_decode(&standard) {
+        Ok(bytes) => bytes,
+        Err(_) => return None,
+    };
+
+    let json_str = match String::from_utf8(decoded) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+
+    let payload: serde_json::Value = match serde_json::from_str(&json_str) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    // Email is at https://api.openai.com/profile.email
+    payload
+        .get("https://api.openai.com/profile")
+        .and_then(|p| p.get("email"))
+        .and_then(|e| e.as_str())
+        .map(String::from)
+}
+
+/// Simple base64 decode without external crate
+fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    let mut output = Vec::new();
+    let mut buffer: u32 = 0;
+    let mut bits_collected = 0;
+
+    for c in input.bytes() {
+        if c == b'=' {
+            break;
+        }
+        let value = match ALPHABET.iter().position(|&x| x == c) {
+            Some(v) => v as u32,
+            None => return Err("invalid character"),
+        };
+        buffer = (buffer << 6) | value;
+        bits_collected += 6;
+        if bits_collected >= 8 {
+            bits_collected -= 8;
+            output.push((buffer >> bits_collected) as u8);
+            buffer &= (1 << bits_collected) - 1;
+        }
+    }
+    Ok(output)
+}
+
+fn load_agents_config(config_path: &Path) -> anyhow::Result<AgentsConfig> {
+    let raw = std::fs::read_to_string(config_path)?;
+    let config: AgentsConfig = toml::from_str(&raw)?;
+    Ok(config)
+}
+
+fn config_path() -> PathBuf {
+    // In debug builds, use the source tree path for hot reload during development
+    #[cfg(debug_assertions)]
+    {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("backend")
+            .join("config")
+            .join("agents.toml")
+    }
+
+    // In release builds, use the bundled resource path
+    #[cfg(not(debug_assertions))]
+    {
+        // On macOS: AppName.app/Contents/Resources/agents.toml
+        // On Linux/Windows: next to the executable
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| {
+                exe.parent().map(|dir| {
+                    // macOS bundle structure: .app/Contents/MacOS/binary
+                    // Resources are at: .app/Contents/Resources/
+                    if cfg!(target_os = "macos") {
+                        let direct = dir.join("../Resources/agents.toml");
+                        if direct.exists() {
+                            return direct;
+                        }
+                        let nested = dir.join("../Resources/backend/config/agents.toml");
+                        if nested.exists() {
+                            return nested;
+                        }
+                        let updater_path = dir.join("../Resources/_up_/backend/config/agents.toml");
+                        if updater_path.exists() {
+                            return updater_path;
+                        }
+                        dir.join("../Resources/agents.toml")
+                    } else {
+                        let direct = dir.join("agents.toml");
+                        if direct.exists() {
+                            return direct;
+                        }
+                        let nested = dir.join("backend/config/agents.toml");
+                        if nested.exists() {
+                            return nested;
+                        }
+                        direct
+                    }
+                })
+            })
+            .unwrap_or_else(|| PathBuf::from("agents.toml"))
+    }
+}
+
+fn settings_path() -> Result<PathBuf, String> {
+    let base = dirs::config_dir().ok_or_else(|| "config dir unavailable".to_string())?;
+    let dir = base.join("phantom-harness");
+    std::fs::create_dir_all(&dir).map_err(|err| format!("settings dir: {}", err))?;
+    Ok(dir.join("settings.json"))
+}
+
+fn db_path() -> Result<PathBuf, String> {
+    let base = dirs::config_dir().ok_or_else(|| "config dir unavailable".to_string())?;
+    let dir = base.join("phantom-harness");
+    std::fs::create_dir_all(&dir).map_err(|err| format!("db dir: {}", err))?;
+    Ok(dir.join("tasks.db"))
+}
+
+fn attachments_dir() -> Result<PathBuf, String> {
+    let base = dirs::config_dir().ok_or_else(|| "config dir unavailable".to_string())?;
+    let dir = base.join("phantom-harness").join("attachments");
+    std::fs::create_dir_all(&dir).map_err(|err| format!("attachments dir: {}", err))?;
+    Ok(dir)
+}
+
+fn load_settings_from_disk() -> Settings {
+    let path = match settings_path() {
+        Ok(path) => path,
+        Err(_) => return Settings::default(),
+    };
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(_) => return Settings::default(),
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+fn persist_settings(settings: &Settings) -> Result<(), String> {
+    let path = settings_path()?;
+    let payload = serde_json::to_string_pretty(settings)
+        .map_err(|err| format!("serialize settings: {}", err))?;
+    std::fs::write(&path, payload).map_err(|err| format!("write settings: {}", err))?;
+    Ok(())
+}
+
+fn discord_enabled(settings: &Settings) -> bool {
+    settings.discord_enabled.unwrap_or(false)
+}
+
+async fn stop_discord_bot(state: &AppState) {
+    let handle = {
+        let mut guard = match state.discord_bot.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        guard.take()
+    };
+    if let Some(handle) = handle {
+        handle.shutdown().await;
+    }
+}
+
+async fn ensure_discord_bot(app: &AppHandle, state: &AppState, settings: &Settings) {
+    if !discord_enabled(settings) {
+        stop_discord_bot(state).await;
+        return;
+    }
+
+    let should_start = {
+        let guard = match state.discord_bot.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        guard.is_none()
+    };
+    if !should_start {
+        return;
+    }
+
+    match discord_bot::start_discord_bot(app.clone(), settings).await {
+        Ok(handle) => {
+            if let Ok(mut guard) = state.discord_bot.lock() {
+                *guard = Some(handle);
+            }
+            println!("[Discord] Bot started");
+        }
+        Err(err) => {
+            println!("[Discord] Failed to start bot: {err}");
+        }
+    }
+}
+
+fn discord_handle(state: &AppState) -> Option<discord_bot::DiscordBotHandle> {
+    let guard = state.discord_bot.lock().ok()?;
+    guard.clone()
+}
+
+fn find_agent<'a>(config: &'a AgentsConfig, agent_id: &str) -> Option<&'a AgentConfig> {
+    config.agents.iter().find(|agent| agent.id == agent_id)
+}
+
+fn auth_env_for(agent_id: &str, settings: &Settings) -> Vec<(String, String)> {
+    let mut env = Vec::new();
+    if let Some(value) = settings.openai_api_key.as_ref() {
+        env.push(("OPENAI_API_KEY".to_string(), value.clone()));
+    }
+    if let Some(value) = settings.anthropic_api_key.as_ref() {
+        env.push(("ANTHROPIC_API_KEY".to_string(), value.clone()));
+    }
+    if agent_id != "codex" {
+        env.retain(|(key, _)| key != "OPENAI_API_KEY");
+    }
+    if agent_id != "claude-code" {
+        env.retain(|(key, _)| key != "ANTHROPIC_API_KEY");
+    }
+    env
+}
+
+fn default_path_entries() -> Vec<String> {
+    let mut entries = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        entries.push(format!("{home}/.npm-global/bin"));
+    }
+    entries.extend(
+        [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+        .iter()
+        .map(|value| value.to_string()),
+    );
+    entries
+}
+
+fn ensure_path_env(mut env: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut path_value = std::env::var("PATH").unwrap_or_default();
+    for entry in default_path_entries() {
+        if !path_value.split(':').any(|existing| existing == entry) {
+            if !path_value.is_empty() {
+                path_value.push(':');
+            }
+            path_value.push_str(&entry);
+        }
+    }
+
+    if let Some((_, value)) = env.iter_mut().find(|(key, _)| key == "PATH") {
+        if !value.is_empty() {
+            value.push(':');
+        }
+        value.push_str(&path_value);
+    } else if !path_value.is_empty() {
+        env.push(("PATH".to_string(), path_value));
+    }
+
+    env
+}
+
+fn build_env(
+    required: &[String],
+    overrides: &[(String, String)],
+    allow_missing: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let mut env = Vec::new();
+    let mut missing = Vec::new();
+    for key in required {
+        if let Some((_, value)) = overrides.iter().find(|(k, _)| k == key) {
+            env.push((key.clone(), value.clone()));
+            continue;
+        }
+        match std::env::var(key) {
+            Ok(value) => env.push((key.clone(), value)),
+            Err(_) => missing.push(key.clone()),
+        }
+    }
+    for (key, value) in overrides {
+        if !env.iter().any(|(k, _)| k == key) {
+            env.push((key.clone(), value.clone()));
+        }
+    }
+    if !missing.is_empty() && !allow_missing {
+        return Err(format!("Missing env: {}", missing.join(", ")));
+    }
+    Ok(ensure_path_env(env))
+}
+
+fn substitute_args(args: &[String], cwd: &str) -> Vec<String> {
+    args.iter()
+        .map(|arg| arg.replace("{worktree}", cwd))
+        .collect()
+}
+
+fn resolve_project_path(project_path: &Option<String>) -> Result<PathBuf, String> {
+    if let Some(path) = project_path.as_ref() {
+        if path.trim().is_empty() {
+            std::env::current_dir().map_err(|err| format!("cwd error: {}", err))
+        } else {
+            Ok(PathBuf::from(path))
+        }
+    } else {
+        std::env::current_dir().map_err(|err| format!("cwd error: {}", err))
+    }
+}
+
+fn resolve_task_cwd(task: &db::TaskRecord) -> Result<PathBuf, String> {
+    if let Some(path) = task.worktree_path.as_ref() {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    if let Some(path) = task.project_path.as_ref() {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return Ok(PathBuf::from(trimmed));
+        }
+    }
+    std::env::current_dir().map_err(|err| format!("cwd error: {}", err))
+}
+
+async fn resolve_repo_root(path: &Path) -> Option<PathBuf> {
+    let repo_path = path.to_path_buf();
+    match worktree::run_git_command(&repo_path, &["rev-parse", "--show-toplevel"]).await {
+        Ok(output) if !output.trim().is_empty() => Some(PathBuf::from(output.trim())),
+        _ => None,
+    }
+}
+
+fn parse_github_repo(remote_url: &str) -> Option<(String, String)> {
+    let trimmed = remote_url.trim().trim_end_matches(".git");
+    let rest = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("git://github.com/") {
+        rest
+    } else {
+        return None;
+    };
+
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some((owner.to_string(), repo.to_string()))
+}
+
+async fn run_gh_command(repo_root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = TokioCommand::new("gh")
+        .args(args)
+        .current_dir(repo_root)
+        .output()
+        .await
+        .map_err(|e| format!("Failed to execute gh: {}", e))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!("gh command failed: {}", stderr))
+    }
+}
+
+async fn get_repo_branches_via_gh(
+    repo_root: &Path,
+    owner: &str,
+    repo: &str,
+) -> Result<RepoBranches, String> {
+    let current_branch = worktree::current_branch(&repo_root.to_path_buf())
+        .await
+        .ok();
+    let default_branch = run_gh_command(
+        repo_root,
+        &[
+            "api",
+            &format!("repos/{}/{}", owner, repo),
+            "--jq",
+            ".default_branch",
+        ],
+    )
+    .await
+    .ok()
+    .filter(|value| !value.trim().is_empty());
+
+    let branches_output = run_gh_command(
+        repo_root,
+        &[
+            "api",
+            &format!("repos/{}/{}/branches", owner, repo),
+            "--paginate",
+            "--jq",
+            ".[].name",
+        ],
+    )
+    .await?;
+
+    let mut branches: Vec<String> = branches_output
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    if let Some(ref default_name) = default_branch {
+        if !branches.iter().any(|b| b == default_name) {
+            branches.insert(0, default_name.clone());
+        }
+    }
+
+    Ok(RepoBranches {
+        branches,
+        default_branch,
+        current_branch,
+        source: "gh".to_string(),
+        error: None,
+    })
+}
+
+#[tauri::command]
+async fn get_repo_branches(project_path: Option<String>) -> Result<RepoBranches, String> {
+    let cwd = resolve_project_path(&project_path)?;
+    let repo_root = match resolve_repo_root(&cwd).await {
+        Some(root) => root,
+        None => {
+            return Ok(RepoBranches {
+                branches: Vec::new(),
+                default_branch: None,
+                current_branch: None,
+                source: "none".to_string(),
+                error: Some("Not a git repository".to_string()),
+            });
+        }
+    };
+
+    let current_branch = worktree::current_branch(&repo_root)
+        .await
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+
+    let origin_url = worktree::run_git_command(&repo_root, &["remote", "get-url", "origin"])
+        .await
+        .ok();
+
+    if let Some(url) = origin_url {
+        if let Some((owner, repo)) = parse_github_repo(&url) {
+            if let Ok(result) = get_repo_branches_via_gh(&repo_root, &owner, &repo).await {
+                return Ok(result);
+            }
+        }
+    }
+
+    let branches = worktree::list_branches(&repo_root)
+        .await
+        .unwrap_or_default();
+    Ok(RepoBranches {
+        branches,
+        default_branch: None,
+        current_branch,
+        source: "git".to_string(),
+        error: None,
+    })
+}
+
+/// Format tool call into a human-readable status message for the task list
+fn format_tool_status(name: &str, arguments: &str) -> String {
+    let tool_name = if name.is_empty() { "tool" } else { name };
+    let arguments = if arguments.is_empty() {
+        None
+    } else {
+        Some(arguments)
+    };
+
+    // Parse common tools to show friendly status
+    match tool_name {
+        "read_file" | "Read" => {
+            if let Some(args) = arguments {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
+                    if let Some(path) = parsed
+                        .get("path")
+                        .or_else(|| parsed.get("file_path"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let filename = std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(path);
+                        return format!("Reading: {}", truncate_str(filename, 30));
+                    }
+                }
+            }
+            "Reading file...".to_string()
+        }
+        "write_file" | "Write" => {
+            if let Some(args) = arguments {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
+                    if let Some(path) = parsed
+                        .get("path")
+                        .or_else(|| parsed.get("file_path"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let filename = std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(path);
+                        return format!("Writing: {}", truncate_str(filename, 30));
+                    }
+                }
+            }
+            "Writing file...".to_string()
+        }
+        "edit_file" | "Edit" | "MultiEdit" => {
+            if let Some(args) = arguments {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
+                    if let Some(path) = parsed
+                        .get("path")
+                        .or_else(|| parsed.get("file_path"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let filename = std::path::Path::new(path)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(path);
+                        return format!("Editing: {}", truncate_str(filename, 30));
+                    }
+                }
+            }
+            "Editing file...".to_string()
+        }
+        "search" | "Grep" | "Glob" | "ripgrep" => {
+            if let Some(args) = arguments {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
+                    if let Some(pattern) = parsed
+                        .get("pattern")
+                        .or_else(|| parsed.get("query"))
+                        .and_then(|v| v.as_str())
+                    {
+                        return format!("Searching: {}", truncate_str(pattern, 20));
+                    }
+                }
+            }
+            "Searching...".to_string()
+        }
+        "shell" | "Bash" | "bash" | "execute" => {
+            if let Some(args) = arguments {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(args) {
+                    if let Some(cmd) = parsed
+                        .get("command")
+                        .or_else(|| parsed.get("cmd"))
+                        .and_then(|v| v.as_str())
+                    {
+                        // Extract just the command name (first word)
+                        let cmd_name = cmd.split_whitespace().next().unwrap_or(cmd);
+                        return format!("Running: {}", truncate_str(cmd_name, 20));
+                    }
+                }
+            }
+            "Running command...".to_string()
+        }
+        "web_search" | "WebSearch" | "WebFetch" => "Searching web...".to_string(),
+        "list_directory" | "LS" | "ls" => "Listing directory...".to_string(),
+        "Task" => "Launching agent...".to_string(),
+        "AskUserQuestion" => "Asking question...".to_string(),
+        "NotebookEdit" | "NotebookRead" => "Working with notebook...".to_string(),
+        _ => {
+            // For unknown tools, show a truncated name
+            format!("Running: {}", truncate_str(tool_name, 25))
+        }
+    }
+}
+
+fn resolve_codex_command() -> String {
+    // Check user-specific paths first
+    if let Ok(home) = std::env::var("HOME") {
+        // Check ~/.local/bin (common for pip/pipx installs)
+        let local_bin = format!("{home}/.local/bin/codex");
+        if Path::new(&local_bin).exists() {
+            return local_bin;
+        }
+        // Check npm global
+        let npm_global = format!("{home}/.npm-global/bin/codex");
+        if Path::new(&npm_global).exists() {
+            return npm_global;
+        }
+    }
+    let candidates = [
+        "/opt/homebrew/bin/codex",
+        "/usr/local/bin/codex",
+        "/usr/bin/codex",
+    ];
+    for candidate in candidates {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    "codex".to_string()
+}
+
+fn resolve_claude_command() -> String {
+    // Check user-specific paths first
+    if let Ok(home) = std::env::var("HOME") {
+        // Check ~/.local/bin (common for pip/pipx installs)
+        let local_bin = format!("{home}/.local/bin/claude");
+        if Path::new(&local_bin).exists() {
+            return local_bin;
+        }
+        // Check npm global
+        let npm_global = format!("{home}/.npm-global/bin/claude");
+        if Path::new(&npm_global).exists() {
+            return npm_global;
+        }
+    }
+    let candidates = [
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+        "/usr/bin/claude",
+    ];
+    for candidate in candidates {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    "claude".to_string()
+}
+
+fn resolve_agent_command(agent: &AgentConfig) -> String {
+    match agent.command.as_str() {
+        "claude" => resolve_claude_command(),
+        "codex" => resolve_codex_command(),
+        other => resolve_command_path(other)
+            .map(|path| path.to_string_lossy().to_string())
+            .unwrap_or_else(|| other.to_string()),
+    }
+}
+
+/// Validate OAuth URLs against known OpenAI providers
+fn validate_oauth_url(url: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let allowed_domains = [
+            "accounts.openai.com",
+            "auth.openai.com",
+            "chatgpt.com",
+            "auth0.openai.com",
+        ];
+        if let Some(host) = parsed.host_str() {
+            return parsed.scheme() == "https"
+                && allowed_domains
+                    .iter()
+                    .any(|d| host == *d || host.ends_with(&format!(".{}", d)));
+        }
+    }
+    false
+}
+
+async fn spawn_agent_client(
+    agent: &AgentConfig,
+    cwd: &Path,
+    env: &[(String, String)],
+    args: &[String],
+) -> Result<AgentProcessClient, String> {
+    let command = resolve_agent_command(agent);
+    match AgentProcessClient::spawn(&command, args, cwd, env).await {
+        Ok(client) => {
+            tracing::info!(agent_id = %agent.id, command = %command, "Agent CLI spawned");
+            Ok(client)
+        }
+        Err(err) => {
+            tracing::error!(
+                agent_id = %agent.id,
+                command = %command,
+                error = %err,
+                "Failed to spawn agent CLI"
+            );
+            Err(err.to_string())
+        }
+    }
+}
+
+/// Reconnect a session with context restoration using hybrid approach:
+/// 1. Try Agent session/load if agent supports loadSession capability
+/// 2. Fall back to creating a new session if not supported
+/// Returns (client, session_id, used_session_load)
+/// Note: The caller is responsible for history injection if used_session_load is false
+async fn reconnect_session_with_context(
+    agent: &AgentConfig,
+    task: &db::TaskRecord,
+    cwd: &Path,
+    env: &[(String, String)],
+    db: &Arc<StdMutex<rusqlite::Connection>>,
+) -> Result<(AgentProcessClient, String, bool), String> {
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let args = substitute_args(&agent.args, &cwd_str);
+
+    // Spawn and initialize Agent client
+    let mut client = spawn_agent_client(agent, cwd, env, &args).await?;
+    let _capabilities = client
+        .initialize("Phantom Harness", "0.1.0")
+        .await
+        .map_err(|err| format!("initialize failed: {}", err))?;
+
+    // Check if we have a stored Agent session ID and the agent supports session/load
+    if client.supports_load_session() {
+        if let Some(ref stored_session_id) = task.agent_session_id {
+            if stored_session_id.starts_with("local-") {
+                println!(
+                    "[Harness] Skipping session/load for local session placeholder: {}",
+                    stored_session_id
+                );
+            } else {
+                println!(
+                    "[Harness] Attempting session/load for task {} with session {}",
+                    task.id, stored_session_id
+                );
+
+                // Try to load the previous session
+                match client
+                    .session_load(stored_session_id, &cwd_str, Vec::new())
+                    .await
+                {
+                    Ok(load_result) => {
+                        println!(
+                            "[Harness] Session restored via session/load: {}",
+                            load_result.session_id
+                        );
+                        return Ok((client, load_result.session_id, true));
+                    }
+                    Err(e) => {
+                        // session/load failed, fall back to history injection
+                        eprintln!(
+                            "[Harness] session/load failed (falling back to history injection): {}",
+                            e
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: Create new session with history injection
+    println!(
+        "[Harness] Using history injection fallback for task {}",
+        task.id
+    );
+
+    let session = client
+        .session_new(&cwd_str)
+        .await
+        .map_err(|err| format!("session/new failed: {}", err))?;
+
+    // Apply model selection if not default
+    if task.model != "default" && !task.model.trim().is_empty() {
+        let _ = apply_model_selection(&mut client, &session, &task.model).await;
+    }
+
+    // Load and format conversation history for context injection
+    let history_context = {
+        let conn = db.lock().map_err(|e| format!("db lock error: {}", e))?;
+        let messages = db::get_message_records(&conn, &task.id)
+            .map_err(|e| format!("get messages error: {}", e))?;
+
+        if !messages.is_empty() {
+            // Use compaction with a reasonable limit (approx 100k chars, ~25k tokens)
+            let (history, was_truncated) =
+                db::compact_history(&messages, task.prompt.as_deref(), 100_000);
+            if was_truncated {
+                println!(
+                    "[Harness] History was compacted to fit context window ({} messages)",
+                    messages.len()
+                );
+            }
+            Some(history)
+        } else {
+            None
+        }
+    };
+
+    // Log if we have history context available (the caller handles actual injection)
+    if let Some(ref history) = history_context {
+        println!(
+            "[Harness] History context available ({} chars), caller will handle injection",
+            history.len()
+        );
+    }
+
+    // Update the stored Agent session ID for future reconnections
+    {
+        let conn = db.lock().map_err(|e| format!("db lock error: {}", e))?;
+        let _ = db::update_task_agent_session_id(&conn, &task.id, &session.session_id);
+    }
+
+    Ok((client, session.session_id, false))
+}
+
+/// Format a message with conversation history context for agents that don't support session/load
+fn format_message_with_history(history: &str, new_message: &str) -> String {
+    format!("{}\n[User's new message]\n{}", history, new_message)
+}
+
+/// Get cached models from SQLite (instant, for immediate UI display)
+#[tauri::command]
+fn get_cached_models(
+    agent_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ModelOption>, String> {
+    println!("[Harness] get_cached_models called for: {}", agent_id);
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let cached = db::get_cached_models(&conn, &agent_id).map_err(|e| e.to_string())?;
+
+    let models: Vec<ModelOption> = cached
+        .into_iter()
+        .map(|m| ModelOption {
+            value: m.value,
+            name: m.name,
+            description: m.description,
+        })
+        .collect();
+
+    println!(
+        "[Harness] Returning {} cached models for {}",
+        models.len(),
+        agent_id
+    );
+    Ok(models)
+}
+
+/// Get all cached models for all agents (for startup preload)
+#[tauri::command]
+fn get_all_cached_models(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, Vec<ModelOption>>, String> {
+    println!("[Harness] get_all_cached_models called");
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let all_cached = db::get_all_cached_models(&conn).map_err(|e| e.to_string())?;
+
+    let mut result: HashMap<String, Vec<ModelOption>> = HashMap::new();
+    for (agent_id, models) in all_cached {
+        let model_options: Vec<ModelOption> = models
+            .into_iter()
+            .map(|m| ModelOption {
+                value: m.value,
+                name: m.name,
+                description: m.description,
+            })
+            .collect();
+        println!(
+            "[Harness] Cached {} models for {}",
+            model_options.len(),
+            agent_id
+        );
+        result.insert(agent_id, model_options);
+    }
+
+    Ok(result)
+}
+
+/// Get cached modes for an agent
+#[tauri::command]
+fn get_cached_modes(
+    agent_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ModeOption>, String> {
+    println!("[Harness] get_cached_modes called for: {}", agent_id);
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let cached = db::get_cached_modes(&conn, &agent_id).map_err(|e| e.to_string())?;
+
+    let modes: Vec<ModeOption> = cached
+        .into_iter()
+        .map(|m| ModeOption {
+            value: m.value,
+            name: m.name,
+            description: m.description,
+        })
+        .collect();
+
+    println!(
+        "[Harness] Returning {} cached modes for {}",
+        modes.len(),
+        agent_id
+    );
+    Ok(modes)
+}
+
+/// Get all cached modes for all agents (for startup preload)
+#[tauri::command]
+fn get_all_cached_modes_cmd(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, Vec<ModeOption>>, String> {
+    println!("[Harness] get_all_cached_modes called");
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let all_cached = db::get_all_cached_modes(&conn).map_err(|e| e.to_string())?;
+
+    let mut result: HashMap<String, Vec<ModeOption>> = HashMap::new();
+    for (agent_id, modes) in all_cached {
+        let mode_options: Vec<ModeOption> = modes
+            .into_iter()
+            .map(|m| ModeOption {
+                value: m.value,
+                name: m.name,
+                description: m.description,
+            })
+            .collect();
+        println!(
+            "[Harness] Cached {} modes for {}",
+            mode_options.len(),
+            agent_id
+        );
+        result.insert(agent_id, mode_options);
+    }
+
+    Ok(result)
+}
+
+/// Helper to save modes to SQLite cache
+fn save_modes_to_cache(
+    db: &Arc<StdMutex<rusqlite::Connection>>,
+    agent_id: &str,
+    modes: &[ModeOption],
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let cached_modes: Vec<db::CachedMode> = modes
+        .iter()
+        .map(|m| db::CachedMode {
+            value: m.value.clone(),
+            name: m.name.clone(),
+            description: m.description.clone(),
+        })
+        .collect();
+    db::save_cached_modes(&conn, agent_id, &cached_modes)
+        .map_err(|e| format!("Failed to cache modes: {}", e))?;
+    println!("[Harness] Cached {} modes for {}", modes.len(), agent_id);
+    Ok(())
+}
+
+/// Fetch fresh modes from agent (slow, updates cache)
+#[tauri::command]
+async fn refresh_agent_modes(
+    agent_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ModeOption>, String> {
+    println!("[Harness] refresh_agent_modes called for: {}", agent_id);
+
+    // Codex uses the app-server mode/list API
+    if agent_id == "codex" {
+        let agent = find_agent(&state.config, &agent_id)
+            .ok_or_else(|| format!("Unknown agent id: {}", agent_id))?;
+
+        let cwd = std::env::current_dir().map_err(|err| format!("cwd error: {}", err))?;
+        let cwd_str = cwd.to_string_lossy().to_string();
+        let settings = state.settings.lock().await.clone();
+        let overrides = auth_env_for(&agent_id, &settings);
+        let allow_missing = settings.codex_auth_method.as_deref() == Some("chatgpt");
+        let env = build_env(&agent.required_env, &overrides, allow_missing)
+            .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
+        let args = substitute_args(&agent.args, &cwd_str);
+        let command = resolve_agent_command(agent);
+
+        let config = AgentLaunchConfig {
+            command: command.clone(),
+            args,
+            env,
+            cwd: cwd_str,
+        };
+
+        println!("[Harness] Fetching modes from Codex app-server");
+
+        let modes = match backend_get_codex_modes(config).await {
+            Ok(modes) => {
+                println!("[Harness] Got {} modes from Codex", modes.len());
+                modes
+            }
+            Err(err) => {
+                let message = err.to_string();
+                println!("[Harness] Codex modes fetch failed: {}", message);
+                return Err(format!(
+                    "Failed to fetch modes from Codex app-server: {}",
+                    message
+                ));
+            }
+        };
+
+        save_modes_to_cache(&state.db, &agent_id, &modes)?;
+        return Ok(modes);
+    }
+
+    let agent = find_agent(&state.config, &agent_id)
+        .ok_or_else(|| format!("Unknown agent id: {}", agent_id))?;
+
+    let cwd = std::env::current_dir().map_err(|err| format!("cwd error: {}", err))?;
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let settings = state.settings.lock().await.clone();
+    let overrides = auth_env_for(&agent_id, &settings);
+    let allow_missing = false;
+
+    // Build env - fail if auth is not configured
+    let env = build_env(&agent.required_env, &overrides, allow_missing)
+        .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
+
+    let args = substitute_args(&agent.args, &cwd_str);
+    let command = resolve_agent_command(agent);
+    let config = AgentLaunchConfig {
+        command: command.clone(),
+        args: args.clone(),
+        env,
+        cwd: cwd_str,
+    };
+
+    println!(
+        "[Harness] Fetching modes from agent: {} {}",
+        command,
+        args.join(" ")
+    );
+
+    let modes = match backend_get_agent_modes(config).await {
+        Ok(modes) => {
+            println!("[Harness] Got {} modes from agent", modes.len());
+            modes
+        }
+        Err(err) => {
+            let message = err.to_string();
+            println!("[Harness] Agent modes fetch failed: {}", message);
+            return Err(format!(
+                "Failed to fetch modes from {}: {}",
+                agent_id, message
+            ));
+        }
+    };
+
+    // Save to cache
+    save_modes_to_cache(&state.db, &agent_id, &modes)?;
+
+    Ok(modes)
+}
+
+/// Get modes for an agent - returns cached if available, otherwise fetches
+#[tauri::command]
+async fn get_agent_modes(
+    agent_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ModeOption>, String> {
+    // Try cache first for instant response
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let cached = db::get_cached_modes(&conn, &agent_id)
+            .ok()
+            .unwrap_or_default();
+        if !cached.is_empty() {
+            println!(
+                "[Harness] get_agent_modes returning {} cached modes for {}",
+                cached.len(),
+                agent_id
+            );
+            return Ok(cached
+                .into_iter()
+                .map(|m| ModeOption {
+                    value: m.value,
+                    name: m.name,
+                    description: m.description,
+                })
+                .collect());
+        }
+    }
+
+    // No cache, do full fetch
+    println!("[Harness] No cached modes for {}, fetching fresh", agent_id);
+    refresh_agent_modes(agent_id, state).await
+}
+
+/// Get cached analytics snapshot for an agent type (codex or claude)
+#[tauri::command]
+fn get_cached_analytics(
+    agent_type: String,
+    state: State<'_, AppState>,
+) -> Result<Option<serde_json::Value>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    match db::get_analytics_cache(&conn, &agent_type) {
+        Ok(Some((json_str, _updated_at))) => {
+            let snapshot: serde_json::Value =
+                serde_json::from_str(&json_str).map_err(|e| e.to_string())?;
+            Ok(Some(snapshot))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Get all cached analytics for startup preload
+#[tauri::command]
+fn get_all_cached_analytics(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, serde_json::Value>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let all_cached = db::get_all_analytics_cache(&conn).map_err(|e| e.to_string())?;
+
+    let mut result: HashMap<String, serde_json::Value> = HashMap::new();
+    for (agent_type, json_str, _updated_at) in all_cached {
+        if let Ok(snapshot) = serde_json::from_str(&json_str) {
+            result.insert(agent_type, snapshot);
+        }
+    }
+    Ok(result)
+}
+
+/// Save analytics snapshot to cache
+#[tauri::command]
+fn save_analytics_cache(
+    agent_type: String,
+    snapshot: serde_json::Value,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let json_str = serde_json::to_string(&snapshot).map_err(|e| e.to_string())?;
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::save_analytics_cache(&conn, &agent_type, &json_str).map_err(|e| e.to_string())
+}
+
+/// Fetch fresh models from agent (slow, updates cache)
+#[tauri::command]
+async fn refresh_agent_models(
+    agent_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ModelOption>, String> {
+    println!("[Harness] refresh_agent_models called for: {}", agent_id);
+
+    let agent = find_agent(&state.config, &agent_id)
+        .ok_or_else(|| format!("Unknown agent id: {}", agent_id))?;
+
+    // If using config-based models, return those and cache them
+    if agent.model_source.as_deref() == Some("config") && !agent.models.is_empty() {
+        println!("[Harness] Using config models for {}", agent_id);
+        let mut models: Vec<ModelOption> = agent
+            .models
+            .iter()
+            .map(|value| ModelOption {
+                value: value.clone(),
+                name: None,
+                description: None,
+            })
+            .collect();
+
+        // For Factory Droid, also include custom BYOK models from ~/.factory/settings.json
+        if agent_id == "droid" || agent_id == "factory-droid" {
+            let custom_models = get_factory_custom_models();
+            if !custom_models.is_empty() {
+                println!(
+                    "[Harness] Adding {} custom BYOK models for {}",
+                    custom_models.len(),
+                    agent_id
+                );
+                models.extend(custom_models);
+            }
+        }
+
+        // Cache config models too
+        save_models_to_cache(&state.db, &agent_id, &models)?;
+        return Ok(models);
+    }
+
+    let cwd = std::env::current_dir().map_err(|err| format!("cwd error: {}", err))?;
+    let cwd_str = cwd.to_string_lossy().to_string();
+
+    // If using app-server (Codex), fetch models via model/list API
+    if agent.model_source.as_deref() == Some("app-server") {
+        println!(
+            "[Harness] Fetching models from Codex app-server for {}",
+            agent_id
+        );
+        let settings = state.settings.lock().await.clone();
+        let overrides = auth_env_for(&agent_id, &settings);
+        let allow_missing =
+            agent_id == "codex" && settings.codex_auth_method.as_deref() == Some("chatgpt");
+        let env = build_env(&agent.required_env, &overrides, allow_missing)
+            .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
+
+        let command = resolve_agent_command(agent);
+        let config = AgentLaunchConfig {
+            command,
+            args: vec![], // app-server doesn't need extra args
+            env,
+            cwd: cwd_str,
+        };
+
+        let models = match backend_get_codex_models(config).await {
+            Ok(models) => {
+                println!(
+                    "[Harness] Got {} models from Codex app-server",
+                    models.len()
+                );
+                models
+            }
+            Err(err) => {
+                let message = err.to_string();
+                println!("[Harness] Codex model fetch failed: {}", message);
+                return Err(format!(
+                    "Failed to fetch models from Codex app-server: {}",
+                    message
+                ));
+            }
+        };
+
+        // Save to cache
+        save_models_to_cache(&state.db, &agent_id, &models)?;
+        return Ok(models);
+    }
+
+    // Fallback: fetch models from agent's session/new response (ACP protocol)
+    let settings = state.settings.lock().await.clone();
+    let overrides = auth_env_for(&agent_id, &settings);
+    let allow_missing = (agent_id == "codex"
+        && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+        || (agent_id == "claude-code"
+            && matches!(
+                settings.claude_auth_method.as_deref(),
+                Some("cli") | Some("oauth")
+            ));
+
+    // Build env - fail if auth is not configured
+    let env = build_env(&agent.required_env, &overrides, allow_missing)
+        .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
+
+    let args = substitute_args(&agent.args, &cwd_str);
+    let command = resolve_agent_command(agent);
+    let config = AgentLaunchConfig {
+        command: command.clone(),
+        args: args.clone(),
+        env: env.clone(),
+        cwd: cwd_str.clone(),
+    };
+
+    println!(
+        "[Harness] Fetching models from agent: {} {}",
+        command,
+        args.join(" ")
+    );
+
+    let models = match backend_get_agent_models(config).await {
+        Ok(models) => {
+            println!("[Harness] Got {} models from agent", models.len());
+            models
+        }
+        Err(err) => {
+            let message = err.to_string();
+            println!("[Harness] Agent models fetch failed: {}", message);
+            return Err(format!(
+                "Failed to fetch models from {}: {}",
+                agent_id, message
+            ));
+        }
+    };
+
+    // Save to cache
+    save_models_to_cache(&state.db, &agent_id, &models)?;
+
+    Ok(models)
+}
+
+/// Helper to save models to SQLite cache
+fn save_models_to_cache(
+    db: &Arc<StdMutex<rusqlite::Connection>>,
+    agent_id: &str,
+    models: &[ModelOption],
+) -> Result<(), String> {
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    let cached_models: Vec<db::CachedModel> = models
+        .iter()
+        .map(|m| db::CachedModel {
+            value: m.value.clone(),
+            name: m.name.clone(),
+            description: m.description.clone(),
+        })
+        .collect();
+    db::save_cached_models(&conn, agent_id, &cached_models)
+        .map_err(|e| format!("Failed to cache models: {}", e))?;
+    println!("[Harness] Cached {} models for {}", models.len(), agent_id);
+    Ok(())
+}
+
+/// Legacy alias for compatibility - returns cached if available, otherwise fetches
+#[tauri::command]
+async fn get_agent_models(
+    agent_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ModelOption>, String> {
+    // Try cache first for instant response
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let cached = db::get_cached_models(&conn, &agent_id)
+            .ok()
+            .unwrap_or_default();
+        if !cached.is_empty() {
+            println!(
+                "[Harness] get_agent_models returning {} cached models for {}",
+                cached.len(),
+                agent_id
+            );
+            return Ok(cached
+                .into_iter()
+                .map(|m| ModelOption {
+                    value: m.value,
+                    name: m.name,
+                    description: m.description,
+                })
+                .collect());
+        }
+    }
+
+    // No cache, do full fetch
+    println!(
+        "[Harness] No cached models for {}, fetching fresh",
+        agent_id
+    );
+    refresh_agent_models(agent_id, state).await
+}
+
+/// Get enriched models with reasoning effort support (for Codex)
+#[tauri::command]
+async fn get_enriched_models(
+    agent_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<EnrichedModelOption>, String> {
+    println!("[Harness] get_enriched_models called for: {}", agent_id);
+
+    let agent = find_agent(&state.config, &agent_id)
+        .ok_or_else(|| format!("Unknown agent id: {}", agent_id))?;
+
+    // Only Codex app-server supports enriched models
+    if agent.model_source.as_deref() != Some("app-server") {
+        return Err(format!(
+            "Agent {} does not support enriched models (not app-server)",
+            agent_id
+        ));
+    }
+
+    let cwd = std::env::current_dir().map_err(|err| format!("cwd error: {}", err))?;
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let settings = state.settings.lock().await.clone();
+    let overrides = auth_env_for(&agent_id, &settings);
+    let allow_missing =
+        agent_id == "codex" && settings.codex_auth_method.as_deref() == Some("chatgpt");
+    let env = build_env(&agent.required_env, &overrides, allow_missing)
+        .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
+
+    let command = resolve_agent_command(agent);
+    let config = AgentLaunchConfig {
+        command,
+        args: vec![],
+        env,
+        cwd: cwd_str,
+    };
+
+    let models = backend_get_codex_models_enriched(config)
+        .await
+        .map_err(|e| format!("Failed to fetch enriched models: {}", e))?;
+
+    println!(
+        "[Harness] Got {} enriched models from Codex app-server",
+        models.len()
+    );
+    Ok(models)
+}
+
+#[tauri::command]
+async fn pick_project_path(app: tauri::AppHandle) -> Option<String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let result = app.dialog().file().blocking_pick_folder();
+    result.map(|file_path| file_path.to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CreateAgentResult {
+    task_id: String,
+    session_id: String,
+    #[serde(rename = "worktreePath")]
+    worktree_path: Option<String>,
+}
+
+#[tauri::command]
+async fn create_agent_session(
+    app: AppHandle,
+    payload: CreateAgentPayload,
+    state: State<'_, AppState>,
+) -> Result<CreateAgentResult, String> {
+    let agent = find_agent(&state.config, &payload.agent_id)
+        .ok_or_else(|| format!("Unknown agent id: {}", payload.agent_id))?;
+
+    let source_path = resolve_project_path(&payload.project_path)?;
+    let mut cwd = source_path.clone();
+    let mut worktree_path: Option<PathBuf> = None;
+    let settings = state.settings.lock().await.clone();
+
+    // Variables for deferred branch rename (populated if worktree is created)
+    let mut deferred_branch_rename: Option<(PathBuf, String, PathBuf)> = None; // (repo_root, animal_name, workspace_path)
+
+    if payload.use_worktree {
+        let repo_root = resolve_repo_root(&source_path).await;
+        let sync_source = repo_root.as_deref().unwrap_or(&source_path);
+        let repo_slug = worktree::repo_slug(sync_source);
+        let workspace_path = worktree::build_workspace_path(&repo_slug)?;
+
+        // Extract the animal name from the workspace path (last component)
+        // This is guaranteed unique via the -v1, -v2 suffix logic in build_workspace_path
+        let animal_name = workspace_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("task")
+            .to_string();
+
+        if let Some(repo_root) = repo_root.as_ref() {
+            let requested_base = payload
+                .base_branch
+                .clone()
+                .or_else(|| settings.task_base_branch.clone())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty() && value != "default");
+            let base_branch = match requested_base {
+                Some(value) => value,
+                None => worktree::current_branch(repo_root)
+                    .await
+                    .unwrap_or_else(|_| "main".to_string()),
+            };
+
+            let base_ref = if worktree::branch_exists(repo_root, &base_branch).await? {
+                base_branch.clone()
+            } else if worktree::remote_branch_exists(repo_root, "origin", &base_branch).await? {
+                format!("origin/{}", base_branch)
+            } else {
+                base_branch.clone()
+            };
+
+            // Create worktree with animal name as initial branch (non-blocking)
+            // The branch will be renamed asynchronously after LLM generates the proper name
+            worktree::create_worktree(repo_root, &workspace_path, &animal_name, &base_ref).await?;
+            worktree::apply_uncommitted_changes(sync_source, &workspace_path).await?;
+
+            // Store info for deferred branch rename
+            deferred_branch_rename = Some((repo_root.clone(), animal_name, workspace_path.clone()));
+
+            // Preserve subdirectory path for monorepos
+            if let Ok(relative) = source_path.strip_prefix(repo_root) {
+                if relative.as_os_str().len() > 0 {
+                    cwd = workspace_path.join(relative);
+                } else {
+                    cwd = workspace_path.clone();
+                }
+            } else {
+                cwd = workspace_path.clone();
+            }
+        } else {
+            std::fs::create_dir_all(&workspace_path)
+                .map_err(|err| format!("Failed to create workspace directory: {}", err))?;
+            worktree::sync_workspace_from_source(sync_source, &workspace_path).await?;
+            cwd = workspace_path.clone();
+        }
+        worktree_path = Some(workspace_path);
+    }
+
+    let cwd_str = cwd.to_string_lossy().to_string();
+    let overrides = auth_env_for(&payload.agent_id, &settings);
+    let allow_missing = (payload.agent_id == "codex"
+        && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+        || (payload.agent_id == "claude-code"
+            && matches!(
+                settings.claude_auth_method.as_deref(),
+                Some("cli") | Some("oauth")
+            ));
+    let env = build_env(&agent.required_env, &overrides, allow_missing)?;
+    let args = substitute_args(&agent.args, &cwd_str);
+    let mut client = spawn_agent_client(agent, &cwd, &env, &args)
+        .await
+        .map_err(|err| format!("spawn failed: {}", err))?;
+    client
+        .initialize("Phantom Harness", "0.1.0")
+        .await
+        .map_err(|err| format!("initialize failed: {}", err))?;
+
+    // For Codex, set model, reasoning effort, and mode before session_new (they're passed to thread/start)
+    if payload.agent_id == "codex" {
+        // Set model on client if specified
+        if payload.exec_model != "default" && !payload.exec_model.trim().is_empty() {
+            let _ = client
+                .set_session_model("", &payload.exec_model)
+                .await
+                .map_err(|err| format!("set model failed: {}", err))?;
+        }
+        // Set reasoning effort on client if specified, otherwise fall back to thinking toggle
+        if let Some(ref effort) = payload.reasoning_effort {
+            if effort != "default" && !effort.trim().is_empty() {
+                client.set_reasoning_effort(Some(effort));
+                println!("[Harness] Set reasoning effort: {}", effort);
+            }
+        } else if payload.thinking {
+            client.set_reasoning_effort(Some("high"));
+            println!("[Harness] Set reasoning effort: high (thinking enabled)");
+        } else {
+            client.set_reasoning_effort(Some("low"));
+            println!("[Harness] Set reasoning effort: low (thinking disabled)");
+        }
+        // Set Codex mode on client if specified
+        if let Some(ref mode) = payload.codex_mode {
+            if mode != "default" && !mode.trim().is_empty() {
+                client.set_codex_mode(Some(mode));
+                println!("[Harness] Set Codex mode: {}", mode);
+            }
+        }
+    }
+
+    let session = client
+        .session_new(&cwd_str)
+        .await
+        .map_err(|err| format!("session/new failed: {}", err))?;
+
+    // Set permission mode if provided and modes are available
+    if !payload.permission_mode.is_empty() && payload.permission_mode != "default" {
+        if let Err(e) = client
+            .session_set_mode(&session.session_id, &payload.permission_mode)
+            .await
+        {
+            eprintln!("[Harness] session/set_mode failed (non-fatal): {}", e);
+        }
+    }
+
+    // Set agent mode (for agents that expose modes)
+    if let Some(ref agent_mode) = payload.agent_mode {
+        if !agent_mode.is_empty() && agent_mode != "default" {
+            println!("[Harness] Setting agent mode: {}", agent_mode);
+            if let Err(e) = client
+                .session_set_mode(&session.session_id, agent_mode)
+                .await
+            {
+                eprintln!(
+                    "[Harness] session/set_mode (agent_mode) failed (non-fatal): {}",
+                    e
+                );
+            }
+        }
+    }
+
+    // Select model: use exec_model if specified, otherwise fall back to agent defaults
+    let selected = if payload.exec_model == "default" {
+        if payload.plan_mode {
+            // In plan mode, prefer default_plan_model if available
+            agent
+                .default_plan_model
+                .clone()
+                .or_else(|| agent.default_exec_model.clone())
+                .unwrap_or_else(|| "default".to_string())
+        } else {
+            agent
+                .default_exec_model
+                .clone()
+                .unwrap_or_else(|| "default".to_string())
+        }
+    } else {
+        payload.exec_model.clone()
+    };
+
+    if selected != "default" && !selected.trim().is_empty() {
+        let _ = apply_model_selection(&mut client, &session, &selected)
+            .await
+            .map_err(|err| format!("set model failed: {}", err))?;
+    }
+
+    let task_id = format!(
+        "task-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        uuid::Uuid::new_v4()
+            .to_string()
+            .split('-')
+            .next()
+            .unwrap_or("0000")
+    );
+
+    // Spawn Claude usage watcher for real-time cost tracking
+    let claude_watcher = if payload.agent_id == "claude-code" {
+        Some(claude_usage_watcher::start_watching(
+            &session.session_id,
+            &task_id,
+            app.clone(),
+            state.db.clone(),
+        ))
+    } else {
+        None
+    };
+
+    let handle = SessionHandle {
+        agent_id: payload.agent_id.clone(),
+        session_id: session.session_id.clone(),
+        model: selected.clone(),
+        client,
+        pending_prompt: Some(payload.prompt.clone()),
+        pending_attachments: payload.attachments.clone(),
+        messages: Vec::new(),
+        claude_watcher,
+    };
+
+    let mut sessions = state.sessions.lock().await;
+    sessions.insert(task_id.clone(), handle);
+
+    // Persist task to database (including Agent session ID for context restoration)
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let now = chrono::Utc::now().timestamp();
+        // Initial branch is the folder name (animal name) - will be updated after async rename
+        let initial_branch = worktree_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+        let task = db::TaskRecord {
+            id: task_id.clone(),
+            agent_id: payload.agent_id.clone(),
+            model: selected.clone(),
+            prompt: Some(payload.prompt.clone()),
+            project_path: payload.project_path.clone(),
+            worktree_path: worktree_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            branch: initial_branch,
+            status: "Ready".to_string(),
+            status_state: "idle".to_string(),
+            cost: 0.0,
+            created_at: now,
+            updated_at: now,
+            title_summary: None,
+            agent_session_id: Some(session.session_id.clone()),
+            total_tokens: None,
+            context_window: None,
+        };
+        db::insert_task(&conn, &task).map_err(|e| e.to_string())?;
+    }
+
+    // Generate AI title summary in the background (non-blocking)
+    if settings.ai_summaries_enabled.unwrap_or(true) {
+        let prompt_clone = payload.prompt.clone();
+        let agent_clone = payload.agent_id.clone();
+        let task_id_clone = task_id.clone();
+        let db_clone = state.db.clone();
+        let window_opt = app.get_webview_window("main");
+
+        tauri::async_runtime::spawn(async move {
+            let title = summarize::summarize_title(&prompt_clone, &agent_clone).await;
+            println!("[Harness] Generated title summary: {}", title);
+
+            // Update database
+            if let Ok(conn) = db_clone.lock() {
+                if let Err(e) = db::update_task_title_summary(&conn, &task_id_clone, &title) {
+                    eprintln!("[Harness] Failed to save title summary: {}", e);
+                }
+            }
+
+            // Emit event to frontend
+            if let Some(window) = window_opt {
+                if let Err(e) = window.emit("TitleUpdate", (&task_id_clone, &title)) {
+                    eprintln!("[Harness] Failed to emit TitleUpdate: {}", e);
+                }
+            }
+        });
+    }
+
+    // Spawn async branch rename task (deferred branch naming)
+    // This runs after worktree creation with animal name, generating the proper LLM branch name
+    if let Some((repo_root, animal_name, workspace_path)) = deferred_branch_rename {
+        let prompt_clone = payload.prompt.clone();
+        let agent_clone = payload.agent_id.clone();
+        let task_id_clone = task_id.clone();
+        let window_opt = app.get_webview_window("main");
+        let multi_create = payload.multi_create;
+        let db_clone = state.db.clone();
+        let api_key = match payload.agent_id.as_str() {
+            "codex" => settings.openai_api_key.clone(),
+            "claude-code" => settings.anthropic_api_key.clone(),
+            _ => settings
+                .openai_api_key
+                .clone()
+                .or(settings.anthropic_api_key.clone()),
+        };
+
+        tauri::async_runtime::spawn(async move {
+            // Generate proper branch name via LLM
+            let metadata = namegen::generate_run_metadata_with_timeout(
+                &prompt_clone,
+                &agent_clone,
+                api_key.as_deref(),
+                5,
+            )
+            .await;
+
+            // Build the target branch name (with UUID suffix for multi-create)
+            let branch_seed = if multi_create {
+                let suffix = uuid::Uuid::new_v4()
+                    .to_string()
+                    .split('-')
+                    .next()
+                    .unwrap_or("0000")
+                    .to_string();
+                format!("{}-{}", metadata.branch_name, suffix)
+            } else {
+                metadata.branch_name.clone()
+            };
+
+            // Make the branch name unique if needed
+            let new_branch = match worktree::unique_branch_name(&repo_root, &branch_seed).await {
+                Ok(name) => name,
+                Err(e) => {
+                    eprintln!("[worktree] Failed to generate unique branch name: {}", e);
+                    return; // Keep animal name as fallback
+                }
+            };
+
+            // Skip rename if the generated name is the same as the animal name
+            if new_branch == animal_name {
+                println!(
+                    "[worktree] Branch name unchanged, skipping rename: {}",
+                    animal_name
+                );
+                return;
+            }
+
+            // Rename branch in the worktree
+            if let Err(e) =
+                worktree::rename_worktree_branch(&workspace_path, &animal_name, &new_branch).await
+            {
+                eprintln!(
+                    "[worktree] Branch rename failed (keeping {}): {}",
+                    animal_name, e
+                );
+                return; // Keep animal name as fallback
+            }
+
+            println!(
+                "[worktree] Renamed branch: {} -> {}",
+                animal_name, new_branch
+            );
+
+            // Save branch name to database for persistence across restarts
+            if let Ok(conn) = db_clone.lock() {
+                if let Err(e) = db::update_task_branch(&conn, &task_id_clone, &new_branch) {
+                    eprintln!("[worktree] Failed to save branch to DB: {}", e);
+                }
+            }
+
+            // Emit event to update UI with new branch name
+            if let Some(window) = window_opt {
+                if let Err(e) = window.emit("BranchUpdate", (&task_id_clone, &new_branch)) {
+                    eprintln!("[worktree] Failed to emit BranchUpdate: {}", e);
+                }
+            }
+        });
+    }
+
+    println!(
+        "[Harness] Agent session created: task_id={} session_id={} (model: {})",
+        task_id, session.session_id, selected
+    );
+
+    Ok(CreateAgentResult {
+        task_id,
+        session_id: session.session_id,
+        worktree_path: worktree_path.map(|path| path.to_string_lossy().to_string()),
+    })
+}
+
+#[tauri::command]
+async fn start_task(
+    task_id: String,
+    state: State<'_, AppState>,
+    window: WebviewWindow,
+) -> Result<(), String> {
+    // Prevent duplicate starts for the same task id (rapid-clicking Start).
+    // If a run is already in-flight, treat this as a no-op.
+    struct RunningTaskGuard {
+        task_id: String,
+        running_tasks: Arc<Mutex<HashSet<String>>>,
+    }
+    impl Drop for RunningTaskGuard {
+        fn drop(&mut self) {
+            let task_id = self.task_id.clone();
+            let running_tasks = self.running_tasks.clone();
+            // best-effort cleanup
+            tauri::async_runtime::spawn(async move {
+                let mut set = running_tasks.lock().await;
+                set.remove(&task_id);
+            });
+        }
+    }
+
+    {
+        let mut set = state.running_tasks.lock().await;
+        if set.contains(&task_id) {
+            println!(
+                "[Harness] start_task ignored (already running): {}",
+                task_id
+            );
+            return Ok(());
+        }
+        set.insert(task_id.clone());
+    }
+    let _running_guard = RunningTaskGuard {
+        task_id: task_id.clone(),
+        running_tasks: state.running_tasks.clone(),
+    };
+    // Emit initial status
+    window
+        .emit(
+            "StatusUpdate",
+            (&task_id, "Starting...", "yellow", "running"),
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Update DB status to running
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::update_task_status(&conn, &task_id, "Starting...", "running");
+    }
+
+    // Extract session handle - IMPORTANT: We remove it from the HashMap to release the lock
+    // This allows other tasks to run concurrently
+    let mut handle = {
+        let mut sessions = state.sessions.lock().await;
+
+        // If session doesn't exist, we need to reconnect
+        if !sessions.contains_key(&task_id) {
+            println!(
+                "[Harness] Session not found for start_task, attempting to reconnect: {}",
+                task_id
+            );
+            drop(sessions); // Release lock before reconnection
+
+            // Look up task from DB to get reconnection info
+            let task = {
+                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                db::list_tasks(&conn)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .find(|t| t.id == task_id)
+            };
+
+            let task = match task {
+                Some(t) => t,
+                None => {
+                    let error_msg = "Task not found in database";
+                    println!("[Harness] start_task reconnect error: {}", error_msg);
+                    window
+                        .emit("StatusUpdate", (&task_id, error_msg, "red", "error"))
+                        .map_err(|e| e.to_string())?;
+                    return Err(error_msg.to_string());
+                }
+            };
+
+            // Find agent config
+            let agent = match find_agent(&state.config, &task.agent_id) {
+                Some(a) => a,
+                None => {
+                    let error_msg = format!("Unknown agent: {}", task.agent_id);
+                    println!("[Harness] start_task reconnect error: {}", error_msg);
+                    window
+                        .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
+                        .map_err(|e| e.to_string())?;
+                    return Err(error_msg);
+                }
+            };
+
+            // Set up working directory
+            let cwd = resolve_task_cwd(&task)?;
+
+            // Build environment
+            let settings = state.settings.lock().await.clone();
+            let overrides = auth_env_for(&task.agent_id, &settings);
+            let allow_missing = (task.agent_id == "codex"
+                && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+                || (task.agent_id == "claude-code"
+                    && matches!(
+                        settings.claude_auth_method.as_deref(),
+                        Some("cli") | Some("oauth")
+                    ));
+
+            let env = match build_env(&agent.required_env, &overrides, allow_missing) {
+                Ok(e) => e,
+                Err(e) => {
+                    let error_msg = format!("Auth not configured: {}", e);
+                    println!("[Harness] start_task reconnect error: {}", error_msg);
+                    window
+                        .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
+                        .map_err(|e| e.to_string())?;
+                    return Err(error_msg);
+                }
+            };
+
+            // Reconnect with context restoration (hybrid: session/load or history injection)
+            println!(
+                "[Harness] Reconnecting Agent session for start_task: {}",
+                task_id
+            );
+            window
+                .emit(
+                    "StatusUpdate",
+                    (&task_id, "Reconnecting...", "yellow", "running"),
+                )
+                .map_err(|e| e.to_string())?;
+
+            let (client, session_id, used_session_load) =
+                match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        let error_msg = format!("Failed to reconnect: {}", e);
+                        println!("[Harness] start_task reconnect error: {}", error_msg);
+                        window
+                            .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
+                            .map_err(|e| e.to_string())?;
+                        return Err(error_msg);
+                    }
+                };
+
+            let model = task.model.clone();
+
+            // Prepare the prompt with history context if needed
+            // For start_task, we're re-running the original prompt, so inject history before it
+            let prompt_with_context = if !used_session_load {
+                // Load history for context injection
+                let history_opt = {
+                    let conn = state.db.lock().map_err(|e| e.to_string())?;
+                    let messages =
+                        db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
+                    if !messages.is_empty() {
+                        let (history, _) = db::compact_history(&messages, None, 100_000);
+                        Some(history)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(history) = history_opt {
+                    if let Some(ref original_prompt) = task.prompt {
+                        Some(format_message_with_history(&history, original_prompt))
+                    } else {
+                        task.prompt.clone()
+                    }
+                } else {
+                    task.prompt.clone()
+                }
+            } else {
+                // session/load restored context, use original prompt
+                task.prompt.clone()
+            };
+
+            println!(
+                "[Harness] Session reconnected for start_task: task_id={} session_id={} (used_session_load={})",
+                task_id, session_id, used_session_load
+            );
+
+            // Spawn Claude usage watcher for reconnected sessions
+            let claude_watcher = if task.agent_id == "claude-code" {
+                Some(claude_usage_watcher::start_watching(
+                    &session_id,
+                    &task_id,
+                    window.app_handle().clone(),
+                    state.db.clone(),
+                ))
+            } else {
+                None
+            };
+
+            SessionHandle {
+                agent_id: task.agent_id.clone(),
+                session_id,
+                model: model.clone(),
+                client,
+                pending_prompt: prompt_with_context,
+                pending_attachments: Vec::new(),
+                messages: Vec::new(),
+                claude_watcher,
+            }
+        } else {
+            // Session exists - remove it from the map to release the lock
+            sessions
+                .remove(&task_id)
+                .ok_or_else(|| "Session not found".to_string())?
+        }
+    }; // Lock is released here!
+
+    let agent_id = handle.agent_id.clone();
+
+    // Get and consume pending prompt and attachments
+    let prompt = handle
+        .pending_prompt
+        .take()
+        .ok_or("No prompt pending - task may have already started")?;
+    let attachments = std::mem::take(&mut handle.pending_attachments);
+
+    // Load images from attachments
+    let images: Vec<ImageContent> = {
+        let mut loaded = Vec::new();
+        if !attachments.is_empty() {
+            let base_dir = attachments_dir().map_err(|e| e.to_string())?;
+            for att in &attachments {
+                let file_path = base_dir.join(&att.relative_path);
+                if file_path.exists() {
+                    match std::fs::read(&file_path) {
+                        Ok(data) => {
+                            use base64::Engine;
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                            let media_type = att
+                                .mime_type
+                                .clone()
+                                .unwrap_or_else(|| "image/png".to_string());
+                            loaded.push(ImageContent {
+                                media_type,
+                                data: encoded,
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[Harness] Failed to read attachment {}: {}",
+                                att.relative_path, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        loaded
+    };
+
+    // Get chat window label for emitting streaming updates
+    let chat_window_label = format!("chat-{}", task_id);
+
+    // Persist user message before sending so it renders first in history
+    let user_timestamp = chrono::Utc::now().to_rfc3339();
+    handle.messages.push(serde_json::json!({
+        "message_type": "user_message",
+        "content": prompt,
+        "timestamp": user_timestamp
+    }));
+    let message_id = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::save_message(
+            &conn,
+            &task_id,
+            "user_message",
+            Some(&prompt),
+            None,
+            None,
+            None,
+            None,
+            &user_timestamp,
+        )
+        .map_err(|e| e.to_string())?
+    };
+    if !attachments.is_empty() {
+        let attachment_records: Vec<db::AttachmentRecord> = attachments
+            .iter()
+            .map(|att| db::AttachmentRecord {
+                id: att.id.clone(),
+                file_name: None,
+                mime_type: att.mime_type.clone(),
+                relative_path: att.relative_path.clone(),
+                byte_size: 0,
+            })
+            .collect();
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::save_message_attachments(&conn, &task_id, message_id, &attachment_records);
+    }
+
+    // Build attachment info with data URLs for chat display
+    let chat_attachments: Vec<serde_json::Value> = attachments
+        .iter()
+        .zip(images.iter())
+        .map(|(att, img)| {
+            let data_url = format!("data:{};base64,{}", img.media_type, img.data);
+            let file_name = att
+                .relative_path
+                .split('/')
+                .last()
+                .unwrap_or(&att.relative_path);
+            serde_json::json!({
+                "id": att.id,
+                "fileName": file_name,
+                "mimeType": att.mime_type,
+                "dataUrl": data_url
+            })
+        })
+        .collect();
+
+    if let Some(chat_window) = window.app_handle().get_webview_window(&chat_window_label) {
+        let user_chat_msg = if chat_attachments.is_empty() {
+            serde_json::json!({
+                "message_type": "user_message",
+                "content": prompt.clone(),
+                "timestamp": user_timestamp
+            })
+        } else {
+            serde_json::json!({
+                "message_type": "user_message",
+                "content": prompt.clone(),
+                "timestamp": user_timestamp,
+                "attachments": chat_attachments
+            })
+        };
+        let _ = chat_window.emit("ChatLogUpdate", (&task_id, user_chat_msg));
+    }
+
+    post_discord_user_message(state.inner(), &task_id, &agent_id, &prompt).await;
+
+    // Send prompt to agent
+    window
+        .emit(
+            "StatusUpdate",
+            (&task_id, "Sending to agent...", "yellow", "running"),
+        )
+        .map_err(|e| e.to_string())?;
+
+    let chat_window_label_streaming = chat_window_label.clone();
+
+    // Set up channel for streaming updates
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamingUpdate>();
+
+    // Spawn a task to emit streaming updates to the chat window AND main window status
+    let app_handle = window.app_handle().clone();
+    let task_id_clone = task_id.clone();
+    let db_for_stream = state.db.clone();
+    let state_for_stream: AppState = state.inner().clone();
+    let stream_emit_handle = tokio::task::spawn_blocking(move || {
+        use std::time::{Duration, Instant};
+
+        // Throttle status updates to max ~10/sec for performance with multiple concurrent agents
+        let throttle_duration = Duration::from_millis(100);
+        let mut last_status_update = Instant::now()
+            .checked_sub(throttle_duration)
+            .unwrap_or_else(Instant::now);
+
+        while let Ok(update) = stream_rx.recv() {
+            // Emit status update to main window (throttled for non-tool updates)
+            let should_emit_status = match &update {
+                // Tool calls are always important - show immediately
+                StreamingUpdate::ToolCall { .. } | StreamingUpdate::ToolReturn { .. } => true,
+                // Status messages are always important
+                StreamingUpdate::Status { .. } => true,
+                // Permission requests are always important - user needs to see and respond
+                StreamingUpdate::PermissionRequest { .. } => true,
+                // User input requests are always important - user needs to answer
+                StreamingUpdate::UserInputRequest { .. } => true,
+                // Text/reasoning chunks are throttled to prevent UI overload
+                StreamingUpdate::TextChunk { .. } | StreamingUpdate::ReasoningChunk { .. } => {
+                    last_status_update.elapsed() >= throttle_duration
+                }
+                // Commands don't need main window status
+                StreamingUpdate::AvailableCommands { .. } => false,
+            };
+
+            if should_emit_status {
+                if let Some(main_window) = app_handle.get_webview_window("main") {
+                    let (status_text, color) = match &update {
+                        StreamingUpdate::ToolCall { name, arguments } => {
+                            (format_tool_status(name, arguments), "yellow")
+                        }
+                        StreamingUpdate::ToolReturn { .. } => {
+                            ("Tool completed".to_string(), "white")
+                        }
+                        StreamingUpdate::ReasoningChunk { .. } => {
+                            ("Thinking...".to_string(), "white")
+                        }
+                        StreamingUpdate::TextChunk { .. } => ("Responding...".to_string(), "white"),
+                        StreamingUpdate::Status { message } => (message.clone(), "yellow"),
+                        StreamingUpdate::PermissionRequest { tool_name, .. } => {
+                            (format!("Waiting for permission: {}", tool_name), "#4ade80")
+                        }
+                        StreamingUpdate::UserInputRequest { .. } => {
+                            ("Waiting for input...".to_string(), "#4ade80")
+                        }
+                        StreamingUpdate::AvailableCommands { .. } => {
+                            // Handled separately, won't reach here due to should_emit_status check
+                            continue;
+                        }
+                    };
+                    let _ = main_window.emit(
+                        "StatusUpdate",
+                        (&task_id_clone, &status_text, color, "running"),
+                    );
+                    last_status_update = Instant::now();
+                }
+            }
+
+            // Persist streaming updates for structural events only (tool calls, permissions, etc.)
+            // NOTE: TextChunk and ReasoningChunk are NOT persisted here - they accumulate
+            // during streaming and the final complete message is saved after streaming completes.
+            // This prevents duplicate messages in the chat history.
+            {
+                let ts = chrono::Utc::now().to_rfc3339();
+                if let Ok(conn) = db_for_stream.lock() {
+                    let _ = match &update {
+                        // Skip TextChunk - final message saved after streaming completes
+                        StreamingUpdate::TextChunk { .. } => Ok(0),
+                        // Skip ReasoningChunk - final message saved after streaming completes
+                        StreamingUpdate::ReasoningChunk { .. } => Ok(0),
+                        StreamingUpdate::ToolCall { name, arguments } => db::save_message(
+                            &conn,
+                            &task_id_clone,
+                            "tool_call",
+                            None,
+                            None,
+                            Some(name),
+                            Some(arguments),
+                            None,
+                            &ts,
+                        ),
+                        StreamingUpdate::ToolReturn { output } => db::save_message(
+                            &conn,
+                            &task_id_clone,
+                            "tool_return",
+                            None,
+                            None,
+                            None,
+                            None,
+                            Some(output),
+                            &ts,
+                        ),
+                        // Skip Status - these are transient UI updates, not conversation history
+                        StreamingUpdate::Status { .. } => Ok(0),
+                        StreamingUpdate::PermissionRequest {
+                            tool_name,
+                            description,
+                            raw_input,
+                            ..
+                        } => db::save_message(
+                            &conn,
+                            &task_id_clone,
+                            "permission_request",
+                            description.as_deref(),
+                            None,
+                            Some(tool_name),
+                            raw_input.as_deref(),
+                            None,
+                            &ts,
+                        ),
+                        StreamingUpdate::UserInputRequest { questions, .. } => {
+                            // Persist the questions payload so we can reconstruct state on reload.
+                            let questions_json =
+                                serde_json::to_string(questions).unwrap_or_default();
+                            db::save_message(
+                                &conn,
+                                &task_id_clone,
+                                "user_input_request",
+                                Some(&questions_json),
+                                None,
+                                None,
+                                None,
+                                None,
+                                &ts,
+                            )
+                        }
+                        StreamingUpdate::AvailableCommands { .. } => Ok(0),
+                    };
+                }
+            }
+
+            if let StreamingUpdate::UserInputRequest { request_id, questions } = &update {
+                let pending = PendingUserInput {
+                    request_id: request_id.clone(),
+                    questions: questions.clone(),
+                };
+                let state_clone = state_for_stream.clone();
+                let task_id = task_id_clone.clone();
+                let request_id = request_id.clone();
+                let questions = questions.clone();
+                tauri::async_runtime::spawn(async move {
+                    {
+                        let mut guard: tokio::sync::MutexGuard<
+                            '_,
+                            std::collections::HashMap<String, PendingUserInput>,
+                        > = state_clone.pending_user_inputs.lock().await;
+                        guard.insert(task_id.clone(), pending);
+                    }
+                    post_discord_user_input_request(&state_clone, &task_id, &request_id, &questions)
+                        .await;
+                });
+            }
+
+            // Emit to chat window (always, for streaming display)
+            if let Some(chat_window) = app_handle.get_webview_window(&chat_window_label_streaming) {
+                // Convert StreamingUpdate to a chat message format
+                let chat_msg = match &update {
+                    StreamingUpdate::TextChunk { text, item_id } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "text_chunk",
+                        "content": text,
+                        "item_id": item_id
+                    }),
+                    StreamingUpdate::ReasoningChunk { text } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "reasoning_chunk",
+                        "content": text
+                    }),
+                    StreamingUpdate::ToolCall { name, arguments } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "tool_call",
+                        "name": name,
+                        "arguments": arguments
+                    }),
+                    StreamingUpdate::ToolReturn { output } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "tool_return",
+                        "content": output
+                    }),
+                    StreamingUpdate::Status { message } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "status",
+                        "content": message
+                    }),
+                    StreamingUpdate::AvailableCommands { commands } => {
+                        // Emit available commands to all windows for slash command autocomplete
+                        if let Some(main_window) = app_handle.get_webview_window("main") {
+                            let _ =
+                                main_window.emit("AvailableCommands", (&task_id_clone, &commands));
+                        }
+                        let _ = chat_window.emit("AvailableCommands", (&task_id_clone, &commands));
+                        continue;
+                    }
+                    StreamingUpdate::PermissionRequest {
+                        request_id,
+                        tool_name,
+                        description,
+                        raw_input,
+                        options,
+                    } => {
+                        serde_json::json!({
+                            "type": "streaming",
+                            "message_type": "permission_request",
+                            "request_id": request_id,
+                            "tool_name": tool_name,
+                            "description": description,
+                            "raw_input": raw_input,
+                            "options": options
+                        })
+                    }
+                    StreamingUpdate::UserInputRequest {
+                        request_id,
+                        questions,
+                    } => {
+                        serde_json::json!({
+                            "type": "streaming",
+                            "message_type": "user_input_request",
+                            "request_id": request_id,
+                            "questions": questions
+                        })
+                    }
+                };
+                let _ = chat_window.emit("ChatLogStreaming", (&task_id_clone, chat_msg));
+            }
+        }
+    });
+
+    // Use streaming version of session_prompt (with images if present)
+    // Wrapped in retry logic for recoverable errors (exit code 143/SIGTERM)
+    const MAX_RECONNECT_ATTEMPTS: u32 = 2;
+    let mut attempt = 0;
+
+    let response = loop {
+        attempt += 1;
+
+        let result = if images.is_empty() {
+            handle
+                .client
+                .session_prompt_streaming(&handle.session_id, &prompt, |update| {
+                    let _ = stream_tx.send(update);
+                })
+                .await
+        } else {
+            println!("[Harness] Sending prompt with {} image(s)", images.len());
+            handle
+                .client
+                .session_prompt_streaming_with_images(
+                    &handle.session_id,
+                    &prompt,
+                    &images,
+                    |update| {
+                        let _ = stream_tx.send(update);
+                    },
+                )
+                .await
+        };
+
+        match result {
+            Ok(response) => break response,
+            Err(e) => {
+                let error_str = e.to_string();
+                println!(
+                    "[Harness] session/prompt error (attempt {}): {}",
+                    attempt, error_str
+                );
+
+                // Check if this is a recoverable exit (SIGTERM/exit code 143)
+                if is_recoverable_exit(&error_str) && attempt < MAX_RECONNECT_ATTEMPTS {
+                    println!("[Harness] Detected recoverable exit, attempting reconnection...");
+
+                    // Emit reconnection status
+                    let _ = window.emit(
+                        "StatusUpdate",
+                        (
+                            &task_id,
+                            "Session terminated, reconnecting...",
+                            "#FFA500",
+                            "running",
+                        ),
+                    );
+
+                    // Look up task from DB to get reconnection info
+                    let task = {
+                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                        db::list_tasks(&conn)
+                            .map_err(|e| e.to_string())?
+                            .into_iter()
+                            .find(|t| t.id == task_id)
+                    };
+
+                    let task = match task {
+                        Some(t) => t,
+                        None => {
+                            let (formatted_error, _) = format_agent_error(&error_str);
+                            return Err(format!("session/prompt failed: {}", formatted_error));
+                        }
+                    };
+
+                    // Find agent config
+                    let agent = match find_agent(&state.config, &task.agent_id) {
+                        Some(a) => a,
+                        None => {
+                            let (formatted_error, _) = format_agent_error(&error_str);
+                            return Err(format!("session/prompt failed: {}", formatted_error));
+                        }
+                    };
+
+                    // Set up working directory
+                    let cwd = resolve_task_cwd(&task)?;
+
+                    // Build environment
+                    let settings = state.settings.lock().await.clone();
+                    let overrides = auth_env_for(&task.agent_id, &settings);
+                    let allow_missing = (task.agent_id == "codex"
+                        && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+                        || (task.agent_id == "claude-code"
+                            && matches!(
+                                settings.claude_auth_method.as_deref(),
+                                Some("cli") | Some("oauth")
+                            ));
+
+                    let env = match build_env(&agent.required_env, &overrides, allow_missing) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            return Err(format!("Reconnection failed - auth error: {}", e));
+                        }
+                    };
+
+                    // Reconnect with context restoration
+                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await
+                    {
+                        Ok((new_client, new_session_id, _used_session_load)) => {
+                            println!(
+                                "[Harness] Session reconnected after termination: {}",
+                                new_session_id
+                            );
+
+                            // Update the handle with the new client/session
+                            handle.client = new_client;
+                            handle.session_id = new_session_id.clone();
+
+                            // Also update Claude watcher if applicable
+                            if task.agent_id == "claude-code" {
+                                handle.claude_watcher = Some(claude_usage_watcher::start_watching(
+                                    &new_session_id,
+                                    &task_id,
+                                    window.app_handle().clone(),
+                                    state.db.clone(),
+                                ));
+                            }
+
+                            // Emit status and retry
+                            let _ = window.emit(
+                                "StatusUpdate",
+                                (&task_id, "Reconnected, retrying...", "#4ade80", "running"),
+                            );
+                            continue; // Retry the prompt
+                        }
+                        Err(reconnect_err) => {
+                            let (formatted_error, _) = format_agent_error(&error_str);
+                            return Err(format!(
+                                "Session terminated and reconnection failed: {} (reconnect error: {})",
+                                formatted_error, reconnect_err
+                            ));
+                        }
+                    }
+                } else {
+                    // Not recoverable or max attempts reached
+                    let (formatted_error, _) = format_agent_error(&error_str);
+                    return Err(format!("session/prompt failed: {}", formatted_error));
+                }
+            }
+        }
+    };
+
+    // Drop the sender to signal completion, then wait for emit task
+    drop(stream_tx);
+    let _ = stream_emit_handle.await;
+
+    // Store and process response messages
+    for msg in &response.messages {
+        let msg_timestamp = chrono::Utc::now().to_rfc3339();
+
+        // Build chat message JSON
+        let chat_msg = serde_json::json!({
+            "message_type": msg.message_type,
+            "content": msg.content,
+            "reasoning": msg.reasoning,
+            "tool_call": msg.name.as_ref().map(|name| serde_json::json!({
+                "name": name,
+                "arguments": msg.arguments
+            })),
+            "tool_return": msg.tool_return,
+            "timestamp": msg_timestamp
+        });
+
+        // Store message in memory
+        handle.messages.push(serde_json::json!({
+            "message_type": msg.message_type,
+            "content": msg.content,
+            "reasoning": msg.reasoning,
+            "name": msg.name,
+            "arguments": msg.arguments,
+            "tool_return": msg.tool_return,
+            "timestamp": msg_timestamp
+        }));
+
+        // Persist to DB
+        {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let _ = db::save_message(
+                &conn,
+                &task_id,
+                &msg.message_type,
+                msg.content.as_deref(),
+                msg.reasoning.as_deref(),
+                msg.name.as_deref(),
+                msg.arguments.as_deref(),
+                msg.tool_return.as_deref(),
+                &msg_timestamp,
+            );
+        }
+
+        // Emit to chat window
+        if let Some(chat_window) = window.app_handle().get_webview_window(&chat_window_label) {
+            let _ = chat_window.emit("ChatLogUpdate", (&task_id, &chat_msg));
+        }
+
+        let status = match msg.message_type.as_str() {
+            "assistant_message" => msg.content.clone().unwrap_or_default(),
+            "reasoning_message" => format!("Thinking: {}", msg.reasoning.as_deref().unwrap_or("")),
+            "tool_call_message" => format!("Running: {}", msg.name.as_deref().unwrap_or("tool")),
+            "tool_return_message" => "Tool completed".to_string(),
+            _ => continue,
+        };
+        let color = if msg.message_type == "tool_call_message" {
+            "yellow"
+        } else {
+            "white"
+        };
+        window
+            .emit("StatusUpdate", (&task_id, &status, color, "running"))
+            .map_err(|e| e.to_string())?;
+    }
+
+    // Process token usage and update cost
+    if let Some(usage) = &response.token_usage {
+        let cost = calculate_cost_from_usage(&handle.model, usage);
+        if cost > 0.0 {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let current_cost = db::get_task_cost(&conn, &task_id).unwrap_or(0.0);
+            let new_total = current_cost + cost;
+            let _ = db::update_task_cost(&conn, &task_id, new_total);
+            window
+                .emit("CostUpdate", (&task_id, new_total))
+                .map_err(|e| e.to_string())?;
+        }
+        // Emit token usage for context indicator and save to database
+        window
+            .emit("TokenUsageUpdate", (&task_id, usage))
+            .map_err(|e| e.to_string())?;
+        // Persist token usage to database for restart recovery
+        let total_tokens = usage.total_token_usage.total_tokens;
+        let context_window = usage.model_context_window;
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::update_task_token_usage(&conn, &task_id, total_tokens, context_window);
+    }
+
+    if let Some(new_session_id) = response.session_id.as_ref() {
+        if new_session_id != &handle.session_id {
+            handle.session_id = new_session_id.clone();
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let _ = db::update_task_agent_session_id(&conn, &task_id, new_session_id);
+            if agent_id == "claude-code" {
+                handle.claude_watcher = Some(claude_usage_watcher::start_watching(
+                    new_session_id,
+                    &task_id,
+                    window.app_handle().clone(),
+                    state.db.clone(),
+                ));
+            }
+        }
+    }
+
+    // Mark complete
+    let final_status = response
+        .messages
+        .iter()
+        .filter(|m| m.message_type == "assistant_message")
+        .filter_map(|m| m.content.as_ref())
+        .last()
+        .map(|s| truncate_str(s, 50))
+        .unwrap_or_else(|| "Completed".to_string());
+    let preview_source = response
+        .messages
+        .iter()
+        .filter(|m| m.message_type == "assistant_message")
+        .filter_map(|m| m.content.as_ref())
+        .last()
+        .cloned()
+        .unwrap_or_else(|| final_status.clone());
+
+    let summary_status = summarize_status_for_notifications(
+        state.inner(),
+        &agent_id,
+        &preview_source,
+        &final_status,
+    )
+    .await;
+
+    post_discord_assistant_message(state.inner(), &task_id, &preview_source).await;
+
+    window
+        .emit(
+            "StatusUpdate",
+            (&task_id, &summary_status, "#04d885", "completed"),
+        )
+        .map_err(|e| e.to_string())?;
+
+    // Emit completion status to chat window
+    if let Some(chat_window) = window.app_handle().get_webview_window(&chat_window_label) {
+        let _ = chat_window.emit("ChatLogStatus", (&task_id, &summary_status, "completed"));
+    }
+
+    // Update DB status to completed (with summary)
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::update_task_status(&conn, &task_id, &summary_status, "completed");
+    }
+
+    // Re-insert the session handle back into the map for future follow-up messages
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.insert(task_id.clone(), handle);
+    }
+
+    let app_handle = window.app_handle();
+    let _ = maybe_show_agent_notification(
+        &app_handle,
+        state.inner(),
+        &task_id,
+        &agent_id,
+        &summary_status,
+    )
+    .await;
+
+    Ok(())
+}
+
+/// Start a pending prompt from the chat log window.
+/// This is called when user clicks "Start Session & Send" on a draft message.
+/// Reuses start_task logic - it handles session creation/reconnection and sending the pending prompt.
+#[tauri::command]
+async fn start_pending_prompt(
+    task_id: String,
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    println!("[Harness] start_pending_prompt: task_id={}", task_id);
+    // Reuse start_task logic - it already handles:
+    // - Session creation/reconnection
+    // - Sending pending prompt
+    // - Streaming responses
+    // - Emitting to the calling window
+    start_task(task_id, state, window).await
+}
+
+#[tauri::command]
+async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
+    Ok(state.settings.lock().await.clone())
+}
+
+#[tauri::command]
+async fn save_settings(
+    settings: Settings,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let prev = state.settings.lock().await.clone();
+    let mut next = settings;
+    if next.codex_auth_method.is_none()
+        && next
+            .openai_api_key
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    {
+        next.codex_auth_method = Some("api".to_string());
+    }
+    if next.claude_auth_method.is_none()
+        && next
+            .anthropic_api_key
+            .as_ref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    {
+        next.claude_auth_method = Some("api".to_string());
+    }
+
+    persist_settings(&next)?;
+    {
+        let mut locked = state.settings.lock().await;
+        *locked = next.clone();
+    }
+
+    let discord_config_changed = prev.discord_enabled != next.discord_enabled
+        || prev.discord_bot_token != next.discord_bot_token
+        || prev.discord_channel_id != next.discord_channel_id;
+    if discord_config_changed {
+        stop_discord_bot(state.inner()).await;
+        ensure_discord_bot(&app, state.inner(), &next).await;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn test_webhook(state: State<'_, AppState>) -> Result<String, String> {
+    let settings = state.settings.lock().await;
+    let webhook_url = settings
+        .webhook
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "No webhook URL configured. Add one in Settings.".to_string())?
+        .clone();
+    drop(settings); // Release lock before async call
+
+    let payload = webhook::build_test_payload();
+    webhook::send_webhook(&webhook_url, &payload).await?;
+    Ok("Webhook sent successfully!".to_string())
+}
+
+#[tauri::command]
+async fn test_discord(state: State<'_, AppState>, app: tauri::AppHandle) -> Result<String, String> {
+    let settings = state.settings.lock().await.clone();
+    if !discord_enabled(&settings) {
+        return Err("Discord bot is disabled in settings".to_string());
+    }
+    ensure_discord_bot(&app, state.inner(), &settings).await;
+    let handle = discord_handle(state.inner()).ok_or_else(|| "Discord bot not running".to_string())?;
+    handle
+        .send_channel_message("Phantom Harness Discord test message")
+        .await?;
+    Ok("Discord test sent".to_string())
+}
+
+/// Get the availability status of all agents
+#[tauri::command]
+fn get_agent_availability(
+    state: State<'_, AppState>,
+) -> Result<HashMap<String, AgentAvailability>, String> {
+    let latest = build_agent_availability(&state.config);
+    let mut avail = state.agent_availability.lock().map_err(|e| e.to_string())?;
+    *avail = latest.clone();
+    Ok(latest)
+}
+
+/// Refresh agent availability and emit UI updates
+#[tauri::command]
+fn refresh_agent_availability(
+    state: State<'_, AppState>,
+    window: tauri::Window,
+) -> Result<HashMap<String, AgentAvailability>, String> {
+    let latest = build_agent_availability(&state.config);
+    {
+        let mut avail = state.agent_availability.lock().map_err(|e| e.to_string())?;
+        *avail = latest.clone();
+    }
+    for (agent_id, status) in &latest {
+        let _ = window.emit(
+            "AgentAvailabilityUpdate",
+            (
+                agent_id.clone(),
+                status.available,
+                status.error_message.clone(),
+            ),
+        );
+    }
+    Ok(latest)
+}
+
+/// Get the display name for an agent from the config
+fn get_agent_display_name(config: &AgentsConfig, agent_id: &str) -> String {
+    config
+        .agents
+        .iter()
+        .find(|a| a.id == agent_id)
+        .and_then(|a| a.display_name.clone())
+        .unwrap_or_else(|| agent_id.to_string())
+}
+
+/// Represents an agent skill parsed from a SKILL.md file
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct AgentSkill {
+    name: String,
+    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    triggers: Option<Vec<String>>,
+    source: String,   // "personal" or "project"
+    enabled: bool,    // Whether the skill is currently enabled
+    path: String,     // Full path to the skill directory (for move operations)
+    can_toggle: bool, // false for project skills (read-only)
+}
+
+/// Parse YAML frontmatter from a SKILL.md file
+fn parse_skill_frontmatter(content: &str) -> Option<AgentSkill> {
+    // SKILL.md files use YAML frontmatter between --- markers
+    if !content.starts_with("---") {
+        return None;
+    }
+
+    let parts: Vec<&str> = content.splitn(3, "---").collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let yaml_content = parts[1].trim();
+
+    // Parse basic fields from YAML
+    let mut name = None;
+    let mut description = None;
+    let mut triggers = Vec::new();
+    let mut in_triggers = false;
+
+    for line in yaml_content.lines() {
+        let line = line.trim();
+        if line.starts_with("name:") {
+            name = Some(line.trim_start_matches("name:").trim().to_string());
+            in_triggers = false;
+        } else if line.starts_with("description:") {
+            description = Some(line.trim_start_matches("description:").trim().to_string());
+            in_triggers = false;
+        } else if line.starts_with("triggers:") {
+            in_triggers = true;
+        } else if in_triggers && line.starts_with("- ") {
+            triggers.push(line.trim_start_matches("- ").trim().to_string());
+        } else if !line.starts_with("- ") && !line.is_empty() {
+            in_triggers = false;
+        }
+    }
+
+    Some(AgentSkill {
+        name: name?,
+        description: description.unwrap_or_default(),
+        triggers: if triggers.is_empty() {
+            None
+        } else {
+            Some(triggers)
+        },
+        source: String::new(), // Will be set by caller
+        enabled: true,         // Will be set by caller
+        path: String::new(),   // Will be set by caller
+        can_toggle: true,      // Will be set by caller
+    })
+}
+
+/// Scan a directory for SKILL.md files
+fn scan_skills_directory(dir: &Path, source: &str, enabled: bool) -> Vec<AgentSkill> {
+    let mut skills = Vec::new();
+
+    if !dir.exists() {
+        return skills;
+    }
+
+    // Skills are in subdirectories: ~/.claude/skills/{skill-name}/SKILL.md
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let skill_file = path.join("SKILL.md");
+                if skill_file.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&skill_file) {
+                        if let Some(mut skill) = parse_skill_frontmatter(&content) {
+                            skill.source = source.to_string();
+                            skill.enabled = enabled;
+                            skill.path = path.to_string_lossy().to_string();
+                            skill.can_toggle = source == "personal"; // Project skills are read-only
+                            skills.push(skill);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    skills
+}
+
+/// Get the directory for storing disabled skills for an agent
+fn disabled_skills_dir(agent_id: &str) -> Result<PathBuf, String> {
+    let config_dir = dirs::config_dir().ok_or("Could not determine config directory")?;
+    Ok(config_dir
+        .join("phantom-harness")
+        .join("disabled-skills")
+        .join(agent_id))
+}
+
+/// Get the primary skills directory for an agent
+fn get_skills_dirs(agent_id: &str, home: &Path) -> Vec<PathBuf> {
+    match agent_id {
+        "claude" => vec![
+            home.join(".claude").join("skills"),
+            home.join(".factory").join("skills"),
+        ],
+        "codex" => vec![home.join(".codex").join("skills")],
+        _ => vec![],
+    }
+}
+
+/// Scan the disabled skills directory for an agent
+fn scan_disabled_skills_directory(agent_id: &str) -> Vec<AgentSkill> {
+    let disabled_dir = match disabled_skills_dir(agent_id) {
+        Ok(dir) => dir,
+        Err(_) => return Vec::new(),
+    };
+
+    // Disabled skills have enabled=false, and they're all personal (can_toggle=true)
+    scan_skills_directory(&disabled_dir, "personal", false)
+}
+
+#[tauri::command]
+async fn get_agent_skills(
+    agent_id: String,
+    project_path: Option<String>,
+) -> Result<Vec<AgentSkill>, String> {
+    let mut all_skills = Vec::new();
+    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+
+    // Skill directories vary by agent
+    match agent_id.as_str() {
+        "claude" => {
+            // Claude Code skills
+            // Personal: ~/.claude/skills/, ~/.factory/skills/
+            all_skills.extend(scan_skills_directory(
+                &home.join(".claude").join("skills"),
+                "personal",
+                true,
+            ));
+            all_skills.extend(scan_skills_directory(
+                &home.join(".factory").join("skills"),
+                "personal",
+                true,
+            ));
+
+            // Project: .claude/skills/, .factory/skills/
+            if let Some(ref proj_path) = project_path {
+                let proj = PathBuf::from(proj_path);
+                all_skills.extend(scan_skills_directory(
+                    &proj.join(".claude").join("skills"),
+                    "project",
+                    true,
+                ));
+                all_skills.extend(scan_skills_directory(
+                    &proj.join(".factory").join("skills"),
+                    "project",
+                    true,
+                ));
+            }
+
+            // Disabled skills
+            all_skills.extend(scan_disabled_skills_directory("claude"));
+        }
+        "codex" => {
+            // Codex skills
+            // Personal: ~/.codex/skills/
+            all_skills.extend(scan_skills_directory(
+                &home.join(".codex").join("skills"),
+                "personal",
+                true,
+            ));
+
+            // Project: .codex/skills/
+            if let Some(ref proj_path) = project_path {
+                let proj = PathBuf::from(proj_path);
+                all_skills.extend(scan_skills_directory(
+                    &proj.join(".codex").join("skills"),
+                    "project",
+                    true,
+                ));
+            }
+
+            // Disabled skills
+            all_skills.extend(scan_disabled_skills_directory("codex"));
+        }
+        _ => {
+            // Unknown agent - no skills support
+            return Ok(all_skills);
+        }
+    }
+
+    // Deduplicate by name (keep first occurrence, which prioritizes project over personal due to order)
+    let mut seen = std::collections::HashSet::new();
+    all_skills.retain(|skill| seen.insert(skill.name.clone()));
+
+    // Sort by name for consistent display
+    all_skills.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(all_skills)
+}
+
+/// Toggle a skill on or off by moving it between the skills directory and disabled-skills directory
+#[tauri::command]
+async fn toggle_skill(agent_id: String, skill_name: String, enabled: bool) -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+    let disabled_dir = disabled_skills_dir(&agent_id)?;
+
+    // Get the primary skills directories for this agent
+    let skills_dirs = get_skills_dirs(&agent_id, &home);
+    if skills_dirs.is_empty() {
+        return Err(format!("Unknown agent: {}", agent_id));
+    }
+
+    if enabled {
+        // Moving from disabled to enabled
+        // The skill is currently in the disabled directory
+        let source_path = disabled_dir.join(&skill_name);
+        if !source_path.exists() {
+            return Err(format!(
+                "Skill '{}' not found in disabled skills",
+                skill_name
+            ));
+        }
+
+        // Move to the first skills directory for this agent
+        let target_dir = &skills_dirs[0];
+        std::fs::create_dir_all(target_dir)
+            .map_err(|e| format!("Failed to create skills directory: {}", e))?;
+
+        let target_path = target_dir.join(&skill_name);
+
+        // Move the skill folder
+        std::fs::rename(&source_path, &target_path)
+            .map_err(|e| format!("Failed to move skill: {}", e))?;
+
+        println!(
+            "[Skills] Enabled skill '{}' for agent '{}': {:?} -> {:?}",
+            skill_name, agent_id, source_path, target_path
+        );
+    } else {
+        // Moving from enabled to disabled
+        // Find the skill in any of the skills directories
+        let mut source_path = None;
+        for dir in &skills_dirs {
+            let candidate = dir.join(&skill_name);
+            if candidate.exists() {
+                source_path = Some(candidate);
+                break;
+            }
+        }
+
+        let source_path = source_path
+            .ok_or_else(|| format!("Skill '{}' not found in any skills directory", skill_name))?;
+
+        // Create disabled directory if needed
+        std::fs::create_dir_all(&disabled_dir)
+            .map_err(|e| format!("Failed to create disabled skills directory: {}", e))?;
+
+        let target_path = disabled_dir.join(&skill_name);
+
+        // Move the skill folder
+        std::fs::rename(&source_path, &target_path)
+            .map_err(|e| format!("Failed to move skill: {}", e))?;
+
+        println!(
+            "[Skills] Disabled skill '{}' for agent '{}': {:?} -> {:?}",
+            skill_name, agent_id, source_path, target_path
+        );
+    }
+
+    Ok(())
+}
+
+/// Get list of tasks that are currently running
+#[tauri::command]
+fn get_running_tasks(state: State<'_, AppState>) -> Result<Vec<db::TaskRecord>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let all_tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
+
+    // Filter to only running tasks
+    let running: Vec<db::TaskRecord> = all_tasks
+        .into_iter()
+        .filter(|t| t.status_state == "running")
+        .collect();
+
+    Ok(running)
+}
+
+/// Restart all agents by terminating their sessions
+/// This is used after skill changes to ensure agents reload their skills
+#[tauri::command]
+async fn restart_all_agents(
+    state: State<'_, AppState>,
+    window: tauri::Window,
+) -> Result<Vec<String>, String> {
+    println!("[Harness] Restarting all agents to apply skill changes...");
+
+    let mut restarted_task_ids = Vec::new();
+
+    // Get all active sessions and remove them
+    {
+        let mut sessions = state.sessions.lock().await;
+        let task_ids: Vec<String> = sessions.keys().cloned().collect();
+
+        for task_id in task_ids {
+            if let Some(handle) = sessions.remove(&task_id) {
+                println!(
+                    "[Harness] Terminating session for task: {} (agent: {})",
+                    task_id, handle.agent_id
+                );
+
+                // Emit status update for this task
+                let _ = window.emit(
+                    "StatusUpdate",
+                    (
+                        &task_id,
+                        "Restarting for skill changes...",
+                        "yellow",
+                        "idle",
+                    ),
+                );
+
+                // Update task status in DB
+                {
+                    let conn = state.db.lock().map_err(|e| e.to_string())?;
+                    let _ =
+                        db::update_task_status(&conn, &task_id, "Ready (skills updated)", "idle");
+                }
+
+                restarted_task_ids.push(task_id);
+
+                // The session handle (and its AgentProcessClient) will be dropped here,
+                // which terminates the subprocess
+                drop(handle);
+            }
+        }
+    }
+
+    // Emit AgentAvailabilityUpdate to trigger UI refresh
+    let _ = window.emit("AgentAvailabilityUpdate", ());
+
+    println!(
+        "[Harness] Restarted {} agent sessions",
+        restarted_task_ids.len()
+    );
+
+    Ok(restarted_task_ids)
+}
+
+#[tauri::command]
+async fn codex_login(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<CodexAuthStatus, String> {
+    let codex_cmd = resolve_codex_command();
+    println!("[Codex Login] Starting login with command: {}", codex_cmd);
+    let app_handle = app.clone();
+    let settings_handle = state.settings.clone();
+
+    let mut child = tokio::process::Command::new(&codex_cmd)
+        .arg("login")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            println!("[Codex Login] Failed to spawn: {}", err);
+            format!("codex login failed: {}", err)
+        })?;
+
+    println!("[Codex Login] Process spawned successfully");
+
+    // Codex writes the OAuth URL to stderr, not stdout
+    let stderr = child.stderr.take();
+
+    // Open browser when OAuth URL is printed
+    if let Some(stderr) = stderr {
+        let mut lines = BufReader::new(stderr).lines();
+        let mut opened = false;
+        while let Ok(Some(line)) = lines.next_line().await {
+            println!("[Codex Login] stderr line: {}", line);
+            if opened {
+                continue;
+            }
+            for token in line.split_whitespace() {
+                // Security: Validate URL against known OAuth providers
+                if token.starts_with("https://") {
+                    println!("[Codex Login] Found URL: {}", token);
+                    if validate_oauth_url(token) {
+                        println!("[Codex Login] URL validated, opening browser");
+                        use tauri_plugin_opener::OpenerExt;
+                        match app_handle.opener().open_url(token, None::<&str>) {
+                            Ok(_) => println!("[Codex Login] Browser opened successfully"),
+                            Err(e) => println!("[Codex Login] Failed to open browser: {:?}", e),
+                        }
+                        opened = true;
+                        break;
+                    } else {
+                        println!("[Codex Login] URL failed validation");
+                    }
+                }
+            }
+        }
+    } else {
+        println!("[Codex Login] No stderr available");
+    }
+
+    // Wait with 5-minute timeout to prevent indefinite hangs
+    let result = timeout(Duration::from_secs(300), child.wait()).await;
+
+    match result {
+        Ok(Ok(status)) if status.success() => {
+            // Update settings with auth method
+            let mut settings = settings_handle.lock().await;
+            settings.codex_auth_method = Some("chatgpt".to_string());
+            drop(settings); // Release lock before persist
+
+            let settings = settings_handle.lock().await;
+            persist_settings(&settings)?;
+            drop(settings);
+
+            // Return fresh auth status
+            check_codex_auth().await
+        }
+        Ok(Ok(_)) => Err("Login cancelled or failed".to_string()),
+        Ok(Err(e)) => Err(format!("Process error: {}", e)),
+        Err(_) => {
+            // Timeout - kill the process
+            let _ = child.kill().await;
+            Err("Login timed out after 5 minutes".to_string())
+        }
+    }
+}
+
+#[tauri::command]
+async fn claude_login(
+    state: State<'_, AppState>,
+    _app: tauri::AppHandle,
+) -> Result<ClaudeAuthStatus, String> {
+    let settings_handle = state.settings.clone();
+
+    // First check if already authenticated
+    let current_status = check_claude_auth().await?;
+    if current_status.authenticated {
+        // Already logged in, just update settings and return
+        let mut settings = settings_handle.lock().await;
+        settings.claude_auth_method = Some("oauth".to_string());
+        persist_settings(&settings)?;
+        return Ok(current_status);
+    }
+
+    let claude_cmd = resolve_claude_command();
+
+    // Open Terminal with claude setup-token for interactive login
+    // This allows the user to complete the OAuth flow in a visible terminal
+    let script = format!(
+        r#"tell application "Terminal"
+            do script "{} setup-token"
+        end tell"#,
+        claude_cmd.replace("\"", "\\\"")
+    );
+
+    tokio::process::Command::new("osascript")
+        .args(["-e", &script])
+        .spawn()
+        .map_err(|err| format!("Failed to open Terminal: {}", err))?;
+
+    // Wait a bit then poll for auth status (user completes flow in terminal)
+    // Poll every 2 seconds for up to 5 minutes
+    for _ in 0..150 {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        let status = check_claude_auth().await?;
+        if status.authenticated {
+            // Update settings
+            let mut settings = settings_handle.lock().await;
+            settings.claude_auth_method = Some("oauth".to_string());
+            persist_settings(&settings)?;
+            return Ok(status);
+        }
+    }
+
+    // Timeout - user didn't complete login
+    Ok(ClaudeAuthStatus {
+        authenticated: false,
+        method: None,
+        expires_at: None,
+        email: None,
+    })
+}
+
+#[tauri::command]
+async fn check_codex_auth() -> Result<CodexAuthStatus, String> {
+    let auth_path = dirs::home_dir()
+        .ok_or("home dir unavailable")?
+        .join(".codex")
+        .join("auth.json");
+
+    if !auth_path.exists() {
+        return Ok(CodexAuthStatus {
+            authenticated: false,
+            method: None,
+            expires_at: None,
+            email: None,
+        });
+    }
+
+    // Security: Verify file permissions on Unix (should be 0600)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(metadata) = std::fs::metadata(&auth_path) {
+            let mode = metadata.mode() & 0o777;
+            if mode != 0o600 {
+                eprintln!("[Security] auth.json has insecure permissions: {:o}", mode);
+            }
+        }
+    }
+
+    let content =
+        std::fs::read_to_string(&auth_path).map_err(|e| format!("read auth.json: {}", e))?;
+
+    // Security: Size limit to prevent DoS from malformed files
+    if content.len() > 1_000_000 {
+        return Err("auth.json exceeds size limit".to_string());
+    }
+
+    // Parse auth.json to check validity - don't leak parse details
+    let auth: serde_json::Value =
+        serde_json::from_str(&content).map_err(|_| "Invalid auth.json format")?;
+
+    // Check for tokens.access_token (the actual codex auth.json structure)
+    let access_token = auth
+        .get("tokens")
+        .and_then(|t| t.get("access_token"))
+        .and_then(|v| v.as_str());
+
+    let has_token = access_token.map(|s| !s.is_empty()).unwrap_or(false);
+
+    // Extract email from the JWT access token
+    let email = access_token.and_then(extract_email_from_jwt);
+
+    Ok(CodexAuthStatus {
+        authenticated: has_token,
+        method: Some("chatgpt".to_string()),
+        expires_at: auth
+            .get("last_refresh")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        email,
+    })
+}
+
+#[tauri::command]
+async fn codex_rate_limits(_state: State<'_, AppState>) -> Result<RateLimits, String> {
+    println!("[Harness] codex_rate_limits called");
+
+    // Read auth.json to get access token and account ID
+    let auth_path = dirs::home_dir()
+        .ok_or("home dir unavailable")?
+        .join(".codex")
+        .join("auth.json");
+
+    if !auth_path.exists() {
+        return Ok(RateLimits {
+            primary: None,
+            secondary: None,
+            plan_type: None,
+            not_available: Some(true),
+            error_message: Some("Not authenticated with Codex".to_string()),
+        });
+    }
+
+    let content =
+        std::fs::read_to_string(&auth_path).map_err(|e| format!("read auth.json: {}", e))?;
+
+    let auth: serde_json::Value =
+        serde_json::from_str(&content).map_err(|_| "Invalid auth.json format")?;
+
+    let access_token = auth
+        .get("tokens")
+        .and_then(|t| t.get("access_token"))
+        .and_then(|v| v.as_str())
+        .ok_or("No access token found")?;
+
+    let account_id = auth
+        .get("tokens")
+        .and_then(|t| t.get("account_id"))
+        .and_then(|v| v.as_str())
+        .ok_or("No account ID found")?;
+
+    println!("[Harness] Fetching rate limits from ChatGPT API...");
+
+    // Call ChatGPT backend API directly
+    let client = reqwest::Client::new();
+    let response = client
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("User-Agent", "codex-cli")
+        .header("ChatGPT-Account-Id", account_id)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        println!("[Harness] Rate limits API returned status: {}", status);
+        return Ok(RateLimits {
+            primary: None,
+            secondary: None,
+            plan_type: None,
+            not_available: Some(true),
+            error_message: Some(format!("API returned status {}", status)),
+        });
+    }
+
+    let api_result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    // Parse the ChatGPT API response format
+    let rate_limit = api_result.get("rate_limit");
+    let plan_type = api_result
+        .get("plan_type")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let primary = rate_limit
+        .and_then(|r| r.get("primary_window"))
+        .and_then(|p| {
+            let used_percent = p.get("used_percent")?.as_f64()?;
+            let window_secs = p.get("limit_window_seconds")?.as_i64()?;
+            let reset_at = p.get("reset_at").and_then(|v| v.as_i64());
+
+            Some(RateLimitWindow {
+                used_percent,
+                window_duration_mins: (window_secs / 60) as i32,
+                resets_at: reset_at.map(|ts| {
+                    // Convert Unix timestamp to ISO string
+                    chrono::DateTime::from_timestamp(ts, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| ts.to_string())
+                }),
+            })
+        });
+
+    let secondary = rate_limit
+        .and_then(|r| r.get("secondary_window"))
+        .and_then(|s| {
+            let used_percent = s.get("used_percent")?.as_f64()?;
+            let window_secs = s.get("limit_window_seconds")?.as_i64()?;
+            let reset_at = s.get("reset_at").and_then(|v| v.as_i64());
+
+            Some(RateLimitWindow {
+                used_percent,
+                window_duration_mins: (window_secs / 60) as i32,
+                resets_at: reset_at.map(|ts| {
+                    chrono::DateTime::from_timestamp(ts, 0)
+                        .map(|dt| dt.to_rfc3339())
+                        .unwrap_or_else(|| ts.to_string())
+                }),
+            })
+        });
+
+    let result = RateLimits {
+        primary,
+        secondary,
+        plan_type,
+        not_available: None,
+        error_message: None,
+    };
+
+    println!(
+        "[Harness] Returning rate limits: primary={:?}, secondary={:?}, plan={:?}",
+        result.primary, result.secondary, result.plan_type
+    );
+
+    Ok(result)
+}
+
+#[tauri::command]
+async fn codex_logout(state: State<'_, AppState>) -> Result<(), String> {
+    let codex_cmd = resolve_codex_command();
+
+    tokio::process::Command::new(&codex_cmd)
+        .arg("logout")
+        .status()
+        .await
+        .map_err(|e| format!("logout failed: {}", e))?;
+
+    let mut settings = state.settings.lock().await;
+    settings.codex_auth_method = None;
+    persist_settings(&settings)?;
+
+    Ok(())
+}
+
+fn get_claude_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".claude.json"))
+}
+
+#[tauri::command]
+async fn check_claude_auth() -> Result<ClaudeAuthStatus, String> {
+    // Primary check: ~/.claude.json with oauthAccount
+    if let Some(config_path) = get_claude_config_path() {
+        if config_path.exists() {
+            let content = match std::fs::read_to_string(&config_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("[Claude Auth] Failed to read config: {}", e);
+                    return Ok(ClaudeAuthStatus {
+                        authenticated: false,
+                        method: None,
+                        expires_at: None,
+                        email: None,
+                    });
+                }
+            };
+
+            // Security: Size limit (config can be larger than credentials)
+            if content.len() > 10_000_000 {
+                return Err("Config file exceeds size limit".to_string());
+            }
+
+            let config: serde_json::Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("[Claude Auth] Failed to parse config: {}", e);
+                    return Ok(ClaudeAuthStatus {
+                        authenticated: false,
+                        method: None,
+                        expires_at: None,
+                        email: None,
+                    });
+                }
+            };
+
+            // Check for oauthAccount.emailAddress - this indicates successful OAuth login
+            let email = config
+                .get("oauthAccount")
+                .and_then(|o| o.get("emailAddress"))
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            if let Some(email_addr) = email {
+                if !email_addr.is_empty() {
+                    return Ok(ClaudeAuthStatus {
+                        authenticated: true,
+                        method: Some("oauth".to_string()),
+                        expires_at: None, // OAuth tokens managed by Claude Code
+                        email: Some(email_addr),
+                    });
+                }
+            }
+
+            // Also check hasAvailableSubscription as a secondary indicator
+            let has_subscription = config
+                .get("hasAvailableSubscription")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            if has_subscription {
+                return Ok(ClaudeAuthStatus {
+                    authenticated: true,
+                    method: Some("oauth".to_string()),
+                    expires_at: None,
+                    email: None,
+                });
+            }
+        }
+    }
+
+    Ok(ClaudeAuthStatus {
+        authenticated: false,
+        method: None,
+        expires_at: None,
+        email: None,
+    })
+}
+
+const CLAUDE_TOKEN_CACHE_TTL_SECS: u64 = 86_400;
+
+struct ClaudeTokenCache {
+    token: Option<String>,
+    last_checked: Option<Instant>,
+}
+
+static CLAUDE_TOKEN_CACHE: OnceLock<StdMutex<ClaudeTokenCache>> = OnceLock::new();
+
+fn claude_token_cache() -> &'static StdMutex<ClaudeTokenCache> {
+    CLAUDE_TOKEN_CACHE.get_or_init(|| {
+        StdMutex::new(ClaudeTokenCache {
+            token: None,
+            last_checked: None,
+        })
+    })
+}
+
+/// Get Claude OAuth token from credentials file or keychain (cached).
+pub(crate) fn get_claude_oauth_token() -> Option<String> {
+    let now = Instant::now();
+    if let Ok(cache) = claude_token_cache().lock() {
+        if let Some(last_checked) = cache.last_checked {
+            if last_checked.elapsed() < Duration::from_secs(CLAUDE_TOKEN_CACHE_TTL_SECS) {
+                return cache.token.clone();
+            }
+        }
+    }
+
+    let token = fetch_claude_oauth_token();
+    if let Ok(mut cache) = claude_token_cache().lock() {
+        cache.token = token.clone();
+        cache.last_checked = Some(now);
+    }
+    token
+}
+
+fn fetch_claude_oauth_token() -> Option<String> {
+    // First try ~/.claude/.credentials.json (more common location)
+    let home = dirs::home_dir()?;
+
+    let credentials_path = home.join(".claude").join(".credentials.json");
+    if credentials_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&credentials_path) {
+            if content.len() <= 1_000_000 {
+                if let Ok(creds) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(token) = creds.get("accessToken").and_then(|v| v.as_str()) {
+                        if !token.is_empty() {
+                            return Some(token.to_string());
+                        }
+                    }
+                    if let Some(token) = creds
+                        .get("claudeAiOauth")
+                        .and_then(|o| o.get("accessToken"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if !token.is_empty() {
+                            return Some(token.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Try ~/.claude.json (alternative location)
+    let config_path = home.join(".claude.json");
+    if config_path.exists() {
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if content.len() <= 10_000_000 {
+                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(token) = config
+                        .get("oauthAccount")
+                        .and_then(|o| o.get("accessToken"))
+                        .and_then(|v| v.as_str())
+                    {
+                        if !token.is_empty() {
+                            return Some(token.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: Try macOS Keychain using security command
+    // Service: "Claude Code-credentials", Account: current username
+    let username = std::env::var("USER").unwrap_or_else(|_| "".to_string());
+    if !username.is_empty() {
+        let output = std::process::Command::new("security")
+            .args([
+                "find-generic-password",
+                "-s",
+                "Claude Code-credentials",
+                "-a",
+                &username,
+                "-w", // Output password to stdout
+            ])
+            .output()
+            .ok();
+
+        if let Some(output) = output {
+            if output.status.success() {
+                let password = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !password.is_empty() {
+                    if let Ok(keychain_data) = serde_json::from_str::<serde_json::Value>(&password)
+                    {
+                        if let Some(token) = keychain_data
+                            .get("claudeAiOauth")
+                            .and_then(|o| o.get("accessToken"))
+                            .and_then(|v| v.as_str())
+                        {
+                            return Some(token.to_string());
+                        }
+                        if let Some(token) =
+                            keychain_data.get("accessToken").and_then(|v| v.as_str())
+                        {
+                            return Some(token.to_string());
+                        }
+                    } else {
+                        return Some(password);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[tauri::command]
+async fn claude_rate_limits(_state: State<'_, AppState>) -> Result<RateLimits, String> {
+    println!("[Harness] claude_rate_limits called");
+
+    // Get OAuth token
+    let access_token = match get_claude_oauth_token() {
+        Some(token) => token,
+        None => {
+            return Ok(RateLimits {
+                primary: None,
+                secondary: None,
+                plan_type: None,
+                not_available: Some(true),
+                error_message: Some(
+                    "Claude Code credentials not found. Sign in to Claude Code first.".to_string(),
+                ),
+            });
+        }
+    };
+
+    println!("[Harness] Fetching rate limits from Anthropic OAuth API...");
+
+    // Call Anthropic OAuth usage API
+    let client = reqwest::Client::new();
+    let response = client
+        .get("https://api.anthropic.com/api/oauth/usage")
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("User-Agent", "phantom-harness")
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        println!(
+            "[Harness] Claude rate limits API returned status: {}",
+            status
+        );
+
+        // Check if token expired
+        if status.as_u16() == 401 {
+            return Ok(RateLimits {
+                primary: None,
+                secondary: None,
+                plan_type: None,
+                not_available: Some(true),
+                error_message: Some(
+                    "Claude Code token expired. Re-authenticate with Claude Code.".to_string(),
+                ),
+            });
+        }
+
+        return Ok(RateLimits {
+            primary: None,
+            secondary: None,
+            plan_type: None,
+            not_available: Some(true),
+            error_message: Some(format!("API returned status {}", status)),
+        });
+    }
+
+    let api_result: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    println!("[Harness] Claude rate limits result: {:?}", api_result);
+
+    // Parse the Anthropic OAuth usage response
+    // API returns: { five_hour: {utilization, resets_at}, seven_day: {utilization, resets_at}, ... }
+
+    let primary = api_result.get("five_hour").and_then(|window| {
+        // API uses "utilization" not "used_percent"
+        let used_percent = window.get("utilization")?.as_f64()?;
+        let reset_at = window
+            .get("resets_at")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        Some(RateLimitWindow {
+            used_percent,
+            window_duration_mins: 300, // 5 hours
+            resets_at: reset_at,
+        })
+    });
+
+    let secondary = api_result.get("seven_day").and_then(|window| {
+        // API uses "utilization" not "used_percent"
+        let used_percent = window.get("utilization")?.as_f64()?;
+        let reset_at = window
+            .get("resets_at")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        Some(RateLimitWindow {
+            used_percent,
+            window_duration_mins: 10080, // 7 days
+            resets_at: reset_at,
+        })
+    });
+
+    // Determine plan type from response if available
+    let plan_type = api_result
+        .get("plan")
+        .or_else(|| api_result.get("tier"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    let result = RateLimits {
+        primary,
+        secondary,
+        plan_type,
+        not_available: None,
+        error_message: None,
+    };
+
+    println!(
+        "[Harness] Returning Claude rate limits: primary={:?}, secondary={:?}, plan={:?}",
+        result.primary, result.secondary, result.plan_type
+    );
+
+    Ok(result)
+}
+
+#[tauri::command]
+async fn claude_logout(state: State<'_, AppState>) -> Result<(), String> {
+    let claude_cmd = resolve_claude_command();
+
+    // Try running claude logout
+    let _ = tokio::process::Command::new(&claude_cmd)
+        .arg("/logout")
+        .status()
+        .await;
+
+    // Update settings regardless of logout command success
+    let mut settings = state.settings.lock().await;
+    settings.claude_auth_method = None;
+    persist_settings(&settings)?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn load_tasks(state: State<'_, AppState>) -> Result<Vec<db::TaskRecord>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_tasks(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_task(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    // Remove from sessions HashMap (cleanup runtime)
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.remove(&task_id);
+    }
+    // Fetch task info without holding DB lock across await points.
+    let task_snapshot = {
+        if let Ok(conn) = state.db.lock() {
+            if let Ok(tasks) = db::list_tasks(&conn) {
+                tasks.into_iter().find(|t| t.id == task_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    };
+
+    // Attempt to remove git worktree / workspace directory if present.
+    if let Some(task) = task_snapshot {
+        if let Some(path) = task.worktree_path {
+            let worktree_path = PathBuf::from(path);
+            let repo_root = if let Some(project_path) = task.project_path.as_ref() {
+                resolve_repo_root(Path::new(project_path)).await
+            } else {
+                resolve_repo_root(&worktree_path).await
+            };
+
+            let mut removed = false;
+            if let Some(repo_root) = repo_root {
+                match worktree::remove_worktree(&repo_root, &worktree_path).await {
+                    Ok(_) => {
+                        removed = true;
+                    }
+                    Err(err) => {
+                        eprintln!("[Harness] Failed to remove git worktree: {}", err);
+                    }
+                }
+            }
+
+            if !removed {
+                if let Err(err) = worktree::remove_workspace_dir(&worktree_path) {
+                    eprintln!("[Harness] Failed to remove workspace: {}", err);
+                }
+            }
+        }
+    }
+    // Delete from DB
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::delete_task(&conn, &task_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_task_history(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    println!("[Harness] get_task_history: task_id={}", task_id);
+
+    // Load messages from database (persisted across restarts)
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    // Get task info
+    let task = db::list_tasks(&conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|t| t.id == task_id);
+
+    // Extract task fields for pending prompt detection and paths
+    let (agent_id, pending_prompt, status_state, title_summary, created_at, worktree_path, project_path) = match &task {
+        Some(t) => (
+            t.agent_id.clone(),
+            t.prompt.clone(),
+            t.status_state.clone(),
+            t.title_summary.clone(),
+            Some(t.created_at),
+            t.worktree_path.clone(),
+            t.project_path.clone(),
+        ),
+        None => ("Agent".to_string(), None, "idle".to_string(), None, None, None, None),
+    };
+
+    // Load messages from DB
+    let mut messages = db::get_messages(&conn, &task_id).map_err(|e| e.to_string())?;
+
+    println!(
+        "[Harness] get_task_history: loaded {} messages from DB, status_state={}",
+        messages.len(),
+        status_state
+    );
+
+    // Ensure the initial prompt is the first rendered message when available.
+    if let Some(ref prompt) = pending_prompt {
+        if !prompt.trim().is_empty() && !messages.is_empty() {
+            if let Some(idx) = messages.iter().position(|msg| {
+                msg.get("message_type").and_then(|v| v.as_str()) == Some("user_message")
+                    && msg.get("content").and_then(|v| v.as_str()) == Some(prompt.as_str())
+            }) {
+                if idx != 0 {
+                    let msg = messages.remove(idx);
+                    messages.insert(0, msg);
+                }
+            } else {
+                let ts = created_at
+                    .and_then(|t| chrono::Utc.timestamp_opt(t, 0).single())
+                    .unwrap_or_else(chrono::Utc::now)
+                    .to_rfc3339();
+                messages.insert(
+                    0,
+                    serde_json::json!({
+                        "message_type": "user_message",
+                        "content": prompt,
+                        "timestamp": ts
+                    }),
+                );
+            }
+        }
+    }
+
+    // Show pending prompt if: idle state AND has prompt AND no messages yet
+    let show_pending = status_state == "idle" && pending_prompt.is_some() && messages.is_empty();
+
+    Ok(serde_json::json!({
+        "task_id": task_id,
+        "agent_id": agent_id,
+        "messages": messages,
+        "pending_prompt": if show_pending { pending_prompt } else { None },
+        "status_state": status_state,
+        "title_summary": title_summary,
+        "worktree_path": worktree_path,
+        "project_path": project_path
+    }))
+}
+
+/// Open a directory in an external app (Ghostty, VS Code, etc.)
+/// Accepts path directly from frontend (CodexMonitor pattern) for portability.
+#[tauri::command]
+async fn open_task_directory(
+    path: String,
+    target: String,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let cwd = PathBuf::from(&path);
+
+    if !cwd.exists() {
+        return Err(format!("Path does not exist: {}", cwd.display()));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = &app_handle;
+        let app_name = match target.as_str() {
+            "ghostty" => "Ghostty",
+            "vscode" => "Visual Studio Code",
+            "cursor" => "Cursor",
+            "zed" => "Zed",
+            "antigravity" => "Antigravity",
+            "finder" => "Finder",
+            _ => return Err(format!("Unknown open target: {}", target)),
+        };
+
+        let status = Command::new("open")
+            .args(["-a", app_name, cwd.to_string_lossy().as_ref()])
+            .status()
+            .map_err(|err| format!("Failed to open {}: {}", app_name, err))?;
+
+        if !status.success() {
+            return Err(format!(
+                "Open command failed for {} (status: {})",
+                app_name, status
+            ));
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        use tauri_plugin_opener::OpenerExt;
+        app_handle
+            .opener()
+            .open_path(cwd, None::<&str>)
+            .map_err(|err| format!("Failed to open path: {:?}", err))?;
+    }
+
+    Ok(())
+}
+
+fn notification_enabled(settings: &Settings) -> bool {
+    settings.agent_notifications_enabled.unwrap_or(true)
+}
+
+fn notification_stack(settings: &Settings) -> bool {
+    settings.agent_notification_stack.unwrap_or(true)
+}
+
+fn format_notification_preview(text: &str) -> String {
+    let cleaned = text.split_whitespace().collect::<Vec<&str>>().join(" ");
+    let max_chars = 160usize;
+    let mut preview: String = cleaned.chars().take(max_chars).collect();
+    if cleaned.chars().count() > max_chars {
+        preview.push_str("...");
+    }
+    if preview.is_empty() {
+        "Agent finished and is waiting for your reply.".to_string()
+    } else {
+        preview
+    }
+}
+
+fn notification_position(app: &AppHandle, index: usize) -> Position {
+    let width = 360.0;
+    let height = 140.0;
+    let margin = 18.0;
+    let gap = 12.0;
+
+    if let Ok(Some(monitor)) = app.primary_monitor() {
+        let pos = monitor.position();
+        let size = monitor.size();
+        let scale = monitor.scale_factor();
+
+        let logical_pos_x = pos.x as f64 / scale;
+        let logical_pos_y = pos.y as f64 / scale;
+        let logical_width = size.width as f64 / scale;
+        let logical_height = size.height as f64 / scale;
+
+        let mut x = logical_pos_x + logical_width - width - margin;
+        let mut y = logical_pos_y + margin + (index as f64) * (height + gap);
+        let max_y = logical_pos_y + logical_height - height - margin;
+        if y > max_y {
+            y = max_y.max(logical_pos_y + margin);
+        }
+        if x < logical_pos_x + margin {
+            x = logical_pos_x + margin;
+        }
+        return Position::Logical(LogicalPosition { x, y });
+    }
+
+    Position::Logical(LogicalPosition { x: 100.0, y: 100.0 })
+}
+
+fn build_notification_url(
+    task_id: &str,
+    agent_id: &str,
+    preview: &str,
+) -> Result<WebviewUrl, String> {
+    let encoded_task_id = urlencoding::encode(task_id);
+    let encoded_agent = urlencoding::encode(agent_id);
+    let encoded_preview = urlencoding::encode(preview);
+
+    #[cfg(debug_assertions)]
+    let window_url = {
+        let url = format!(
+            "http://127.0.0.1:8000/agent_notification.html?taskId={}&agent={}&preview={}",
+            encoded_task_id, encoded_agent, encoded_preview
+        );
+        tauri::WebviewUrl::External(url.parse().map_err(|e| format!("Invalid URL: {}", e))?)
+    };
+
+    #[cfg(not(debug_assertions))]
+    let window_url = {
+        let path = format!(
+            "agent_notification.html?taskId={}&agent={}&preview={}",
+            encoded_task_id, encoded_agent, encoded_preview
+        );
+        tauri::WebviewUrl::App(path.into())
+    };
+
+    Ok(window_url)
+}
+
+fn build_discord_thread_name(_task_id: &str, title: &str) -> String {
+    let mut base = title.trim();
+    let lower = base.to_lowercase();
+    if lower.starts_with("task") {
+        base = base.trim_start_matches(|c: char| c == 't' || c == 'T');
+        base = base.trim_start_matches(|c: char| c == 'a' || c == 'A');
+        base = base.trim_start_matches(|c: char| c == 's' || c == 'S');
+        base = base.trim_start_matches(|c: char| c == 'k' || c == 'K');
+        base = base.trim_start_matches(|c: char| c == '-' || c == ':' || c == ' ');
+    }
+    let base = if base.is_empty() {
+        "Agent Task"
+    } else {
+        base
+    };
+    let combined = format!("{}", base);
+    truncate_str(&combined, 90)
+}
+
+fn get_task_metadata(state: &AppState, task_id: &str) -> (String, String) {
+    let conn_guard = state.db.lock().ok();
+    let tasks = conn_guard
+        .as_ref()
+        .and_then(|conn| db::list_tasks(conn).ok())
+        .unwrap_or_default();
+    tasks
+        .iter()
+        .find(|t| t.id == task_id)
+        .map(|t| {
+            (
+                t.title_summary
+                    .clone()
+                    .unwrap_or_else(|| "Agent Task".to_string()),
+                t.project_path.clone().unwrap_or_default(),
+            )
+        })
+        .unwrap_or_else(|| ("Agent Task".to_string(), String::new()))
+}
+
+async fn ensure_discord_thread(
+    state: &AppState,
+    task_id: &str,
+    intro_message: &str,
+) -> Option<serenity::model::id::ChannelId> {
+    let handle = discord_handle(state)?;
+    let (task_title, _) = get_task_metadata(state, task_id);
+    let thread_name = build_discord_thread_name(task_id, &task_title);
+    discord_bot::ensure_thread_for_task(
+        &handle,
+        state.db.clone(),
+        task_id,
+        &thread_name,
+        intro_message,
+    )
+    .await
+    .ok()
+}
+
+async fn post_discord_user_message(
+    state: &AppState,
+    task_id: &str,
+    agent_id: &str,
+    content: &str,
+) {
+    if content.trim().is_empty() {
+        return;
+    }
+    let settings = state.settings.lock().await.clone();
+    if !discord_enabled(&settings) {
+        return;
+    }
+    let handle = discord_handle(state);
+    if handle.is_none() {
+        return;
+    }
+    let intro = format!("**User message for {} `{}`**", agent_id, task_id);
+    let _ = ensure_discord_thread(state, task_id, &intro).await;
+    if let Some(handle) = handle {
+        let _ = discord_bot::post_to_thread(&handle, state.db.clone(), task_id, content).await;
+    }
+}
+
+async fn post_discord_assistant_message(
+    state: &AppState,
+    task_id: &str,
+    content: &str,
+) {
+    if content.trim().is_empty() {
+        return;
+    }
+    let settings = state.settings.lock().await.clone();
+    if !discord_enabled(&settings) {
+        return;
+    }
+    let handle = discord_handle(state);
+    if handle.is_none() {
+        return;
+    }
+    let intro = format!("**Assistant reply for task `{}`**", task_id);
+    let _ = ensure_discord_thread(state, task_id, &intro).await;
+    if let Some(handle) = handle {
+        let _ = discord_bot::post_to_thread(&handle, state.db.clone(), task_id, content).await;
+    }
+}
+
+async fn post_discord_user_input_request(
+    state: &AppState,
+    task_id: &str,
+    request_id: &str,
+    questions: &[UserInputQuestion],
+) {
+    let settings = state.settings.lock().await.clone();
+    if !discord_enabled(&settings) {
+        return;
+    }
+    let handle = discord_handle(state);
+    if handle.is_none() {
+        return;
+    }
+    let intro = format!("**User input requested for task `{}`**", task_id);
+    let _ = ensure_discord_thread(state, task_id, &intro).await;
+
+    let mut body = String::new();
+    body.push_str(&format!("**Input needed** (`request_id`: `{}`)\n", request_id));
+    for q in questions {
+        body.push_str(&format!("- **{}** ({})\n  {}\n", q.header, q.id, q.question));
+        if let Some(options) = q.options.as_ref() {
+            for opt in options {
+                body.push_str(&format!("  - {} — {}\n", opt.label, opt.description));
+            }
+        }
+    }
+    body.push_str("\nReply with `question_id: answer` per line (or a single answer for one question).");
+
+    if let Some(handle) = handle {
+        let _ = discord_bot::post_to_thread(&handle, state.db.clone(), task_id, &body).await;
+    }
+}
+
+async fn maybe_show_agent_notification(
+    app: &AppHandle,
+    state: &AppState,
+    task_id: &str,
+    agent_id: &str,
+    preview: &str,
+) -> Result<(), String> {
+    let settings = state.settings.lock().await.clone();
+    if !notification_enabled(&settings) {
+        return Ok(());
+    }
+
+    let chat_window_label = format!("chat-{}", task_id);
+    if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
+        if chat_window.is_focused().unwrap_or(false) {
+            return Ok(());
+        }
+    }
+
+    let mut notification_windows = state
+        .notification_windows
+        .lock()
+        .map_err(|e| e.to_string())?;
+    notification_windows.retain(|label| app.get_webview_window(label).is_some());
+
+    if !notification_stack(&settings) {
+        for label in notification_windows.iter() {
+            if let Some(window) = app.get_webview_window(label) {
+                let _ = window.close();
+            }
+        }
+        notification_windows.clear();
+    }
+
+    let safe_task_id = task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
+    let label = format!("notification-{}-{}", safe_task_id, uuid::Uuid::new_v4());
+    let preview_text = format_notification_preview(preview);
+    let window_url = build_notification_url(task_id, agent_id, &preview_text)?;
+
+    let notification_window = tauri::WebviewWindowBuilder::new(app, &label, window_url)
+        .title("Agent Notification")
+        .inner_size(360.0, 140.0)
+        .decorations(false)
+        .resizable(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .transparent(true)
+        .devtools(false)
+        .build()
+        .map_err(|e| format!("Failed to create notification window: {}", e))?;
+
+    let position = notification_position(app, notification_windows.len());
+    let _ = notification_window.set_position(position);
+
+    notification_windows.push(label);
+
+    if discord_enabled(&settings) {
+        if let Some(handle) = discord_handle(state) {
+            let (task_title, _project_path) = get_task_metadata(state, task_id);
+            let preview_for_discord = preview.to_string();
+            let thread_name = build_discord_thread_name(task_id, &task_title);
+            let message = if preview_for_discord.trim().is_empty() {
+                "Agent finished and is waiting for your reply.".to_string()
+            } else {
+                preview_for_discord
+            };
+            let db = state.db.clone();
+            let task_id = task_id.to_string();
+            tauri::async_runtime::spawn(async move {
+                if let Err(e) = discord_bot::post_task_notification(
+                    &handle,
+                    db,
+                    &task_id,
+                    &thread_name,
+                    &message,
+                )
+                .await
+                {
+                    println!("[Discord] Failed to send agent notification: {}", e);
+                }
+            });
+        }
+    } else if let Some(webhook_url) = settings.webhook.as_ref().filter(|s| !s.is_empty()) {
+        let webhook_url = webhook_url.clone();
+        let agent_display_name = get_agent_display_name(&state.config, agent_id);
+
+        // Fetch task details from database
+        let (task_title, project_path) = get_task_metadata(state, task_id);
+
+        let preview_for_webhook = preview.to_string();
+
+        // Spawn async task to send webhook (non-blocking)
+        tauri::async_runtime::spawn(async move {
+            let payload = webhook::build_agent_notification_payload(
+                &agent_display_name,
+                &task_title,
+                &project_path,
+                &preview_for_webhook,
+            );
+            if let Err(e) = webhook::send_webhook(&webhook_url, &payload).await {
+                println!("[Webhook] Failed to send agent notification: {}", e);
+            } else {
+                println!("[Webhook] Agent notification sent successfully");
+            }
+        });
+    }
+
+    Ok(())
+}
+
+async fn summarize_status_for_notifications(
+    state: &AppState,
+    agent_id: &str,
+    full_text: &str,
+    fallback: &str,
+) -> String {
+    let settings = state.settings.lock().await.clone();
+    if !settings.ai_summaries_enabled.unwrap_or(true) {
+        return fallback.to_string();
+    }
+
+    let summary = summarize::summarize_status(full_text, agent_id).await;
+    if summary.trim().is_empty() {
+        fallback.to_string()
+    } else {
+        summary
+    }
+}
+
+#[tauri::command]
+async fn open_chat_window(
+    task_id: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let window_label = format!(
+        "chat-{}",
+        task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
+    );
+
+    println!(
+        "[Harness] open_chat_window called: task_id={} label={}",
+        task_id, window_label
+    );
+
+    // Check if window already exists
+    if let Some(existing) = app.get_webview_window(&window_label) {
+        println!("[Harness] Window exists, focusing: {}", window_label);
+        // Focus existing window
+        existing.set_focus().map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    // Get task info for window title from database (doesn't block on sessions lock)
+    let agent_name = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::list_tasks(&conn)
+            .ok()
+            .and_then(|tasks| tasks.into_iter().find(|t| t.id == task_id))
+            .map(|t| t.agent_id)
+            .unwrap_or_else(|| "Agent".to_string())
+    };
+
+    // Build URL - in dev mode, use the dev server URL; in production, use App path
+    let encoded_task_id = urlencoding::encode(&task_id);
+
+    // Check if we're in dev mode by checking for the dev server
+    // In production builds, use WindowUrl::App; in dev, use External
+    #[cfg(debug_assertions)]
+    let window_url = {
+        let url = format!(
+            "http://127.0.0.1:8000/agent_chat_log.html?taskId={}",
+            encoded_task_id
+        );
+        println!("[Harness] Dev mode - using external URL: {}", url);
+        tauri::WebviewUrl::External(url.parse().map_err(|e| format!("Invalid URL: {}", e))?)
+    };
+
+    #[cfg(not(debug_assertions))]
+    let window_url = {
+        let path = format!("agent_chat_log.html?taskId={}", encoded_task_id);
+        println!("[Harness] Release mode - using app path: {}", path);
+        tauri::WebviewUrl::App(path.into())
+    };
+
+    println!(
+        "[Harness] Creating window: {} with title: {} Chat - {}",
+        window_label, agent_name, task_id
+    );
+
+    tauri::WebviewWindowBuilder::new(&app, &window_label, window_url)
+        .title(format!("{} Chat - {}", agent_name, task_id))
+        .inner_size(650.0, 750.0)
+        .decorations(false)
+        .transparent(true)
+        .resizable(true)
+        .center()
+        .devtools(false)
+        .build()
+        .map_err(|e| format!("Failed to create chat window: {}", e))?;
+
+    println!("[Harness] Opened chat window for task: {}", task_id);
+    Ok(())
+}
+
+pub(crate) async fn send_chat_message_internal(
+    task_id: String,
+    message: String,
+    state: &AppState,
+    app: tauri::AppHandle,
+    origin: MessageOrigin,
+) -> Result<(), String> {
+    println!(
+        "[Harness] send_chat_message: task={} message_len={}",
+        task_id,
+        message.len()
+    );
+    let from_discord = origin == MessageOrigin::Discord;
+
+    // Emit status update to chat window
+    let window_label = format!(
+        "chat-{}",
+        task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
+    );
+    if let Some(window) = app.get_webview_window(&window_label) {
+        let _ = window.emit("ChatLogStatus", (&task_id, "Working...", "running"));
+    }
+
+    // Extract session handle - IMPORTANT: We remove it from the HashMap to release the lock
+    // This allows other tasks to run concurrently
+    let mut handle = {
+        let mut sessions = state.sessions.lock().await;
+
+        // If session doesn't exist, we need to reconnect
+        if !sessions.contains_key(&task_id) {
+            println!(
+                "[Harness] Session not found, attempting to reconnect: {}",
+                task_id
+            );
+            drop(sessions); // Release lock before reconnection
+
+            // Look up task from DB to get reconnection info
+            let task = {
+                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                db::list_tasks(&conn)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .find(|t| t.id == task_id)
+            };
+
+            let task = match task {
+                Some(t) => t,
+                None => {
+                    let error_msg = "Task not found in database";
+                    println!("[Harness] send_chat_message error: {}", error_msg);
+                    if let Some(window) = app.get_webview_window(&window_label) {
+                        let _ = window.emit("ChatLogStatus", (&task_id, error_msg, "error"));
+                    }
+                    return Err(error_msg.to_string());
+                }
+            };
+
+            // Find agent config
+            let agent = match find_agent(&state.config, &task.agent_id) {
+                Some(a) => a,
+                None => {
+                    let error_msg = format!("Unknown agent: {}", task.agent_id);
+                    println!("[Harness] send_chat_message error: {}", error_msg);
+                    if let Some(window) = app.get_webview_window(&window_label) {
+                        let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+                    }
+                    return Err(error_msg);
+                }
+            };
+
+            // Set up working directory
+            let cwd = resolve_task_cwd(&task)?;
+
+            // Build environment
+            let settings = state.settings.lock().await.clone();
+            let overrides = auth_env_for(&task.agent_id, &settings);
+            let allow_missing = (task.agent_id == "codex"
+                && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+                || (task.agent_id == "claude-code"
+                    && matches!(
+                        settings.claude_auth_method.as_deref(),
+                        Some("cli") | Some("oauth")
+                    ));
+
+            let env = match build_env(&agent.required_env, &overrides, allow_missing) {
+                Ok(e) => e,
+                Err(e) => {
+                    let error_msg = format!("Auth not configured: {}", e);
+                    println!("[Harness] send_chat_message error: {}", error_msg);
+                    if let Some(window) = app.get_webview_window(&window_label) {
+                        let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+                    }
+                    return Err(error_msg);
+                }
+            };
+
+            // Reconnect with context restoration (hybrid: session/load or history injection)
+            println!("[Harness] Reconnecting Agent session for task: {}", task_id);
+            if let Some(window) = app.get_webview_window(&window_label) {
+                let _ = window.emit("ChatLogStatus", (&task_id, "Reconnecting...", "running"));
+            }
+
+            let (client, session_id, used_session_load) =
+                match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
+                    Ok(result) => result,
+                    Err(e) => {
+                        let error_msg = format!("Failed to reconnect: {}", e);
+                        println!("[Harness] send_chat_message error: {}", error_msg);
+                        if let Some(window) = app.get_webview_window(&window_label) {
+                            let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+                        }
+                        return Err(error_msg);
+                    }
+                };
+
+            let model = task.model.clone();
+
+            println!(
+                "[Harness] Session reconnected: task_id={} session_id={} (used_session_load={})",
+                task_id, session_id, used_session_load
+            );
+
+            // Spawn Claude usage watcher for reconnected chat sessions
+            let claude_watcher = if task.agent_id == "claude-code" {
+                Some(claude_usage_watcher::start_watching(
+                    &session_id,
+                    &task_id,
+                    app.clone(),
+                    state.db.clone(),
+                ))
+            } else {
+                None
+            };
+
+            // Store whether we need history injection for this session
+            // (will be used when sending the actual message)
+            let needs_history_injection = !used_session_load;
+
+            // Prepare the message with history context if needed
+            let message_with_context = if needs_history_injection {
+                let history_opt = {
+                    let conn = state.db.lock().map_err(|e| e.to_string())?;
+                    let messages_db =
+                        db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
+                    if !messages_db.is_empty() {
+                        let (history, _) =
+                            db::compact_history(&messages_db, task.prompt.as_deref(), 100_000);
+                        Some(history)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(history) = history_opt {
+                    format_message_with_history(&history, &message)
+                } else {
+                    message.clone()
+                }
+            } else {
+                message.clone()
+            };
+
+            // Store the context-injected message for later use
+            // We'll use a special field or handle it in the message sending logic
+
+            SessionHandle {
+                agent_id: task.agent_id.clone(),
+                session_id,
+                model: model.clone(),
+                client,
+                pending_prompt: Some(message_with_context), // Store the context-injected message
+                pending_attachments: Vec::new(),
+                messages: Vec::new(),
+                claude_watcher,
+            }
+        } else {
+            // Session exists - remove it from the map to release the lock
+            sessions
+                .remove(&task_id)
+                .ok_or_else(|| "Session not found".to_string())?
+        }
+    }; // Lock is released here!
+
+    let agent_id = handle.agent_id.clone();
+
+    // Load any pending attachments for this task (e.g., pasted images in chat log)
+    let attachments: Vec<db::AttachmentRecord> = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        match db::get_pending_attachments(&conn, &task_id) {
+            Ok(list) => {
+                if !list.is_empty() {
+                    let _ = db::clear_pending_attachments(&conn, &task_id);
+                }
+                list
+            }
+            Err(_) => Vec::new(),
+        }
+    };
+
+    // Load images from attachments (if any)
+    let images: Vec<ImageContent> = {
+        let mut loaded = Vec::new();
+        if !attachments.is_empty() {
+            let base_dir = attachments_dir().map_err(|e| e.to_string())?;
+            for att in &attachments {
+                let file_path = base_dir.join(&att.relative_path);
+                if file_path.exists() {
+                    match std::fs::read(&file_path) {
+                        Ok(data) => {
+                            use base64::Engine;
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                            let media_type = att
+                                .mime_type
+                                .clone()
+                                .unwrap_or_else(|| "image/png".to_string());
+                            loaded.push(ImageContent {
+                                media_type,
+                                data: encoded,
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "[Harness] Failed to read attachment {}: {}",
+                                att.relative_path, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        loaded
+    };
+
+    // Set up channel for streaming updates (same pattern as start_task)
+    let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamingUpdate>();
+
+    // Spawn a task to emit streaming updates to the chat window AND main window status
+    let app_handle = app.clone();
+    let task_id_streaming = task_id.clone();
+    let window_label_streaming = window_label.clone();
+    let state_for_stream: AppState = state.clone();
+    let stream_emit_handle = tokio::task::spawn_blocking(move || {
+        use std::time::{Duration, Instant};
+
+        // Throttle status updates to max ~10/sec for performance
+        let throttle_duration = Duration::from_millis(100);
+        let mut last_status_update = Instant::now()
+            .checked_sub(throttle_duration)
+            .unwrap_or_else(Instant::now);
+
+        while let Ok(update) = stream_rx.recv() {
+            // Emit status update to main window (throttled for non-tool updates)
+            let should_emit_status = match &update {
+                StreamingUpdate::ToolCall { .. } | StreamingUpdate::ToolReturn { .. } => true,
+                StreamingUpdate::Status { .. } => true,
+                StreamingUpdate::PermissionRequest { .. } => true,
+                StreamingUpdate::UserInputRequest { .. } => true,
+                StreamingUpdate::TextChunk { .. } | StreamingUpdate::ReasoningChunk { .. } => {
+                    last_status_update.elapsed() >= throttle_duration
+                }
+                StreamingUpdate::AvailableCommands { .. } => false,
+            };
+
+            if should_emit_status {
+                if let Some(main_window) = app_handle.get_webview_window("main") {
+                    let (status_text, color) = match &update {
+                        StreamingUpdate::ToolCall { name, arguments } => {
+                            (format_tool_status(name, arguments), "yellow")
+                        }
+                        StreamingUpdate::ToolReturn { .. } => {
+                            ("Tool completed".to_string(), "white")
+                        }
+                        StreamingUpdate::ReasoningChunk { .. } => {
+                            ("Thinking...".to_string(), "white")
+                        }
+                        StreamingUpdate::TextChunk { .. } => ("Responding...".to_string(), "white"),
+                        StreamingUpdate::Status { message } => (message.clone(), "yellow"),
+                        StreamingUpdate::PermissionRequest { tool_name, .. } => {
+                            (format!("Waiting for permission: {}", tool_name), "#4ade80")
+                        }
+                        StreamingUpdate::UserInputRequest { .. } => {
+                            ("Waiting for input...".to_string(), "#4ade80")
+                        }
+                        StreamingUpdate::AvailableCommands { .. } => continue,
+                    };
+                    let _ = main_window.emit(
+                        "StatusUpdate",
+                        (&task_id_streaming, &status_text, color, "running"),
+                    );
+                    last_status_update = Instant::now();
+                }
+            }
+
+            if let StreamingUpdate::UserInputRequest { request_id, questions } = &update {
+                let pending = PendingUserInput {
+                    request_id: request_id.clone(),
+                    questions: questions.clone(),
+                };
+                let state_clone = state_for_stream.clone();
+                let task_id = task_id_streaming.clone();
+                let request_id = request_id.clone();
+                let questions = questions.clone();
+                tauri::async_runtime::spawn(async move {
+                    {
+                        let mut guard: tokio::sync::MutexGuard<
+                            '_,
+                            std::collections::HashMap<String, PendingUserInput>,
+                        > = state_clone.pending_user_inputs.lock().await;
+                        guard.insert(task_id.clone(), pending);
+                    }
+                    post_discord_user_input_request(&state_clone, &task_id, &request_id, &questions)
+                        .await;
+                });
+            }
+
+            // Emit to chat window (always, for streaming display)
+            if let Some(chat_window) = app_handle.get_webview_window(&window_label_streaming) {
+                let chat_msg = match &update {
+                    StreamingUpdate::TextChunk { text, item_id } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "text_chunk",
+                        "content": text,
+                        "item_id": item_id
+                    }),
+                    StreamingUpdate::ReasoningChunk { text } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "reasoning_chunk",
+                        "content": text
+                    }),
+                    StreamingUpdate::ToolCall { name, arguments } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "tool_call",
+                        "name": name,
+                        "arguments": arguments
+                    }),
+                    StreamingUpdate::ToolReturn { output } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "tool_return",
+                        "content": output
+                    }),
+                    StreamingUpdate::Status { message } => serde_json::json!({
+                        "type": "streaming",
+                        "message_type": "status",
+                        "content": message
+                    }),
+                    StreamingUpdate::AvailableCommands { commands } => {
+                        // Emit available commands to all windows for slash command autocomplete
+                        if let Some(main_window) = app_handle.get_webview_window("main") {
+                            let _ = main_window
+                                .emit("AvailableCommands", (&task_id_streaming, &commands));
+                        }
+                        let _ =
+                            chat_window.emit("AvailableCommands", (&task_id_streaming, &commands));
+                        continue;
+                    }
+                    StreamingUpdate::PermissionRequest {
+                        request_id,
+                        tool_name,
+                        description,
+                        raw_input,
+                        options,
+                    } => {
+                        serde_json::json!({
+                            "type": "streaming",
+                            "message_type": "permission_request",
+                            "request_id": request_id,
+                            "tool_name": tool_name,
+                            "description": description,
+                            "raw_input": raw_input,
+                            "options": options
+                        })
+                    }
+                    StreamingUpdate::UserInputRequest {
+                        request_id,
+                        questions,
+                    } => {
+                        serde_json::json!({
+                            "type": "streaming",
+                            "message_type": "user_input_request",
+                            "request_id": request_id,
+                            "questions": questions
+                        })
+                    }
+                };
+                let _ = chat_window.emit("ChatLogStreaming", (&task_id_streaming, chat_msg));
+            }
+        }
+    });
+
+    // Use context-injected message if available (from reconnection with history injection),
+    // otherwise use the original message
+    let effective_message = handle
+        .pending_prompt
+        .take()
+        .unwrap_or_else(|| message.clone());
+
+    // Persist user message before sending so reload ordering is correct
+    let user_timestamp = chrono::Utc::now().to_rfc3339();
+    handle.messages.push(serde_json::json!({
+        "message_type": "user_message",
+        "content": message,
+        "timestamp": user_timestamp
+    }));
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let message_id = db::save_message(
+            &conn,
+            &task_id,
+            "user_message",
+            Some(&message),
+            None,
+            None,
+            None,
+            None,
+            &user_timestamp,
+        )
+        .map_err(|e| e.to_string())?;
+        let _ = db::save_message_attachments(&conn, &task_id, message_id, &attachments);
+    }
+
+    if from_discord {
+        if let Some(window) = app.get_webview_window(&window_label) {
+            let user_chat_msg = serde_json::json!({
+                "message_type": "user_message",
+                "content": message.clone(),
+                "timestamp": user_timestamp
+            });
+            let _ = window.emit("ChatLogUpdate", (&task_id, user_chat_msg));
+        }
+    } else {
+        post_discord_user_message(state, &task_id, &agent_id, &message).await;
+    }
+
+    // Send prompt to agent using STREAMING version (with images if present)
+    // Wrapped in retry logic for recoverable errors (exit code 143/SIGTERM)
+    const MAX_RECONNECT_ATTEMPTS: u32 = 2;
+    let mut attempt = 0;
+
+    let response = loop {
+        attempt += 1;
+
+        let result = if images.is_empty() {
+            handle
+                .client
+                .session_prompt_streaming(&handle.session_id, &effective_message, |update| {
+                    let _ = stream_tx.send(update);
+                })
+                .await
+        } else {
+            println!("[Harness] send_chat_message with {} image(s)", images.len());
+            handle
+                .client
+                .session_prompt_streaming_with_images(
+                    &handle.session_id,
+                    &effective_message,
+                    &images,
+                    |update| {
+                        let _ = stream_tx.send(update);
+                    },
+                )
+                .await
+        };
+
+        match result {
+            Ok(response) => break response,
+            Err(e) => {
+                let error_str = e.to_string();
+                println!(
+                    "[Harness] send_chat_message error (attempt {}): {}",
+                    attempt, error_str
+                );
+
+                // Check if this is a recoverable exit (SIGTERM/exit code 143)
+                if is_recoverable_exit(&error_str) && attempt < MAX_RECONNECT_ATTEMPTS {
+                    println!(
+                        "[Harness] Detected recoverable exit in chat, attempting reconnection..."
+                    );
+
+                    // Emit reconnection status
+                    if let Some(window) = app.get_webview_window(&window_label) {
+                        let _ = window.emit(
+                            "ChatLogStatus",
+                            (&task_id, "Session terminated, reconnecting...", "running"),
+                        );
+                    }
+
+                    // Look up task from DB to get reconnection info
+                    let task = {
+                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                        db::list_tasks(&conn)
+                            .map_err(|e| e.to_string())?
+                            .into_iter()
+                            .find(|t| t.id == task_id)
+                    };
+
+                    let task = match task {
+                        Some(t) => t,
+                        None => {
+                            let (formatted_error, _) = format_agent_error(&error_str);
+                            if let Some(window) = app.get_webview_window(&window_label) {
+                                let _ = window
+                                    .emit("ChatLogStatus", (&task_id, &formatted_error, "error"));
+                            }
+                            return Err(format!("Agent error: {}", formatted_error));
+                        }
+                    };
+
+                    // Find agent config
+                    let agent = match find_agent(&state.config, &task.agent_id) {
+                        Some(a) => a,
+                        None => {
+                            let (formatted_error, _) = format_agent_error(&error_str);
+                            if let Some(window) = app.get_webview_window(&window_label) {
+                                let _ = window
+                                    .emit("ChatLogStatus", (&task_id, &formatted_error, "error"));
+                            }
+                            return Err(format!("Agent error: {}", formatted_error));
+                        }
+                    };
+
+                    // Set up working directory
+                    let cwd = resolve_task_cwd(&task)?;
+
+                    // Build environment
+                    let settings = state.settings.lock().await.clone();
+                    let overrides = auth_env_for(&task.agent_id, &settings);
+                    let allow_missing = (task.agent_id == "codex"
+                        && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+                        || (task.agent_id == "claude-code"
+                            && matches!(
+                                settings.claude_auth_method.as_deref(),
+                                Some("cli") | Some("oauth")
+                            ));
+
+                    let env = match build_env(&agent.required_env, &overrides, allow_missing) {
+                        Ok(e) => e,
+                        Err(e) => {
+                            let error_msg = format!("Reconnection failed - auth error: {}", e);
+                            if let Some(window) = app.get_webview_window(&window_label) {
+                                let _ =
+                                    window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+                            }
+                            return Err(error_msg);
+                        }
+                    };
+
+                    // Reconnect with context restoration
+                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await
+                    {
+                        Ok((new_client, new_session_id, _used_session_load)) => {
+                            println!(
+                                "[Harness] Chat session reconnected after termination: {}",
+                                new_session_id
+                            );
+
+                            // Update the handle with the new client/session
+                            handle.client = new_client;
+                            handle.session_id = new_session_id.clone();
+
+                            // Also update Claude watcher if applicable
+                            if task.agent_id == "claude-code" {
+                                handle.claude_watcher = Some(claude_usage_watcher::start_watching(
+                                    &new_session_id,
+                                    &task_id,
+                                    app.clone(),
+                                    state.db.clone(),
+                                ));
+                            }
+
+                            // Emit status and retry
+                            if let Some(window) = app.get_webview_window(&window_label) {
+                                let _ = window.emit(
+                                    "ChatLogStatus",
+                                    (&task_id, "Reconnected, retrying...", "running"),
+                                );
+                            }
+                            continue; // Retry the prompt
+                        }
+                        Err(reconnect_err) => {
+                            let (formatted_error, _) = format_agent_error(&error_str);
+                            let error_msg = format!(
+                                "Session terminated and reconnection failed: {} (reconnect error: {})",
+                                formatted_error, reconnect_err
+                            );
+                            if let Some(window) = app.get_webview_window(&window_label) {
+                                let _ =
+                                    window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+                            }
+                            return Err(error_msg);
+                        }
+                    }
+                } else {
+                    // Not recoverable or max attempts reached
+                    let (formatted_error, _) = format_agent_error(&error_str);
+                    let error_msg = format!("Agent error: {}", formatted_error);
+                    println!("[Harness] send_chat_message error: {}", error_msg);
+                    if let Some(window) = app.get_webview_window(&window_label) {
+                        let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+                    }
+                    return Err(error_msg);
+                }
+            }
+        }
+    };
+
+    // Drop the sender to signal completion, then wait for emit task
+    drop(stream_tx);
+    let _ = stream_emit_handle.await;
+
+    // Debug: log the response
+    println!(
+        "[Harness] session_prompt_streaming response: {} messages",
+        response.messages.len()
+    );
+    for (i, msg) in response.messages.iter().enumerate() {
+        println!(
+            "[Harness]   msg[{}]: type={} content={:?}",
+            i, msg.message_type, msg.content
+        );
+    }
+
+    // Store and emit response messages to chat window
+    let mut final_status = "Ready".to_string();
+    if let Some(window) = app.get_webview_window(&window_label) {
+        for msg in &response.messages {
+            let msg_timestamp = chrono::Utc::now().to_rfc3339();
+            // Map Agent message types to our frontend types
+            let chat_msg = serde_json::json!({
+                "message_type": msg.message_type,
+                "content": msg.content,
+                "reasoning": msg.reasoning,
+                "tool_call": msg.name.as_ref().map(|name| serde_json::json!({
+                    "name": name,
+                    "arguments": msg.arguments
+                })),
+                "tool_return": msg.tool_return,
+                "timestamp": msg_timestamp
+            });
+
+            // Store message in memory
+            handle.messages.push(chat_msg.clone());
+
+            // Persist to DB
+            {
+                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                let _ = db::save_message(
+                    &conn,
+                    &task_id,
+                    &msg.message_type,
+                    msg.content.as_deref(),
+                    msg.reasoning.as_deref(),
+                    msg.name.as_deref(),
+                    msg.arguments.as_deref(),
+                    msg.tool_return.as_deref(),
+                    &msg_timestamp,
+                );
+            }
+
+            let _ = window.emit("ChatLogUpdate", (&task_id, chat_msg));
+        }
+
+        // Emit completion status
+        final_status = response
+            .messages
+            .iter()
+            .filter(|m| m.message_type == "assistant_message")
+            .filter_map(|m| m.content.as_ref())
+            .last()
+            .map(|s| truncate_str(s, 40))
+            .unwrap_or_else(|| "Ready".to_string());
+    }
+    let preview_source = response
+        .messages
+        .iter()
+        .filter(|m| m.message_type == "assistant_message")
+        .filter_map(|m| m.content.as_ref())
+        .last()
+        .cloned()
+        .unwrap_or_else(|| final_status.clone());
+    let summary_status =
+        summarize_status_for_notifications(state, &agent_id, &preview_source, &final_status).await;
+    if let Some(window) = app.get_webview_window(&window_label) {
+        let _ = window.emit("ChatLogStatus", (&task_id, &summary_status, "completed"));
+    }
+    if let Some(main_window) = app.get_webview_window("main") {
+        let _ = main_window.emit(
+            "StatusUpdate",
+            (&task_id, &summary_status, "#04d885", "completed"),
+        );
+    }
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::update_task_status(&conn, &task_id, &summary_status, "completed");
+    }
+
+    // Process token usage and update cost
+    if let Some(usage) = &response.token_usage {
+        let cost = calculate_cost_from_usage(&handle.model, usage);
+        if cost > 0.0 {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let current_cost = db::get_task_cost(&conn, &task_id).unwrap_or(0.0);
+            let new_total = current_cost + cost;
+            let _ = db::update_task_cost(&conn, &task_id, new_total);
+            // Emit to main window and chat window
+            app.emit("CostUpdate", (&task_id, new_total))
+                .map_err(|e| e.to_string())?;
+        }
+        // Emit token usage for context indicator and save to database
+        app.emit("TokenUsageUpdate", (&task_id, usage))
+            .map_err(|e| e.to_string())?;
+        // Persist token usage to database for restart recovery
+        let total_tokens = usage.total_token_usage.total_tokens;
+        let context_window = usage.model_context_window;
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::update_task_token_usage(&conn, &task_id, total_tokens, context_window);
+    }
+
+    // Re-insert the session handle back into the map for future follow-up messages
+    {
+        let mut sessions = state.sessions.lock().await;
+        sessions.insert(task_id.clone(), handle);
+    }
+
+    let _ = maybe_show_agent_notification(&app, state, &task_id, &agent_id, &summary_status).await;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn send_chat_message(
+    task_id: String,
+    message: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    send_chat_message_internal(task_id, message, state.inner(), app, MessageOrigin::Ui).await
+}
+
+#[tauri::command]
+async fn respond_to_permission(
+    task_id: String,
+    request_id: String,
+    response_id: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    println!(
+        "[Harness] respond_to_permission: task={} request={} response={}",
+        task_id, request_id, response_id
+    );
+
+    // Get session
+    let mut sessions = state.sessions.lock().await;
+    let handle = sessions
+        .get_mut(&task_id)
+        .ok_or_else(|| format!("Session not found: {}", task_id))?;
+
+    // Send permission response to the agent
+    handle
+        .client
+        .send_permission_response(&handle.session_id, &request_id, &response_id)
+        .await
+        .map_err(|e| format!("Failed to send permission response: {}", e))?;
+
+    // Emit status update to chat window
+    let window_label = format!(
+        "chat-{}",
+        task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
+    );
+    if let Some(window) = app.get_webview_window(&window_label) {
+        let status_text = if response_id == "deny" {
+            "Permission denied"
+        } else {
+            "Permission granted"
+        };
+        let _ = window.emit("ChatLogStatus", (&task_id, status_text, "running"));
+    }
+
+    // Also emit to main window
+    if let Some(main_window) = app.get_webview_window("main") {
+        let status_text = if response_id == "deny" {
+            "Permission denied"
+        } else {
+            "Continuing..."
+        };
+        let _ = main_window.emit("StatusUpdate", (&task_id, status_text, "yellow", "running"));
+    }
+
+    Ok(())
+}
+
+pub(crate) async fn respond_to_user_input_internal(
+    task_id: String,
+    request_id: String,
+    answers: serde_json::Value,
+    state: &AppState,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    println!(
+        "[Harness] respond_to_user_input: task={} request={}",
+        task_id, request_id
+    );
+
+    let mut sessions = state.sessions.lock().await;
+    let handle = sessions
+        .get_mut(&task_id)
+        .ok_or_else(|| format!("Session not found: {}", task_id))?;
+
+    handle
+        .client
+        .send_user_input_response(&request_id, answers)
+        .await
+        .map_err(|e| format!("Failed to send user input response: {}", e))?;
+
+    {
+        let mut pending = state.pending_user_inputs.lock().await;
+        pending.remove(&task_id);
+    }
+
+    // Emit status update to chat window
+    let window_label = format!(
+        "chat-{}",
+        task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
+    );
+    if let Some(window) = app.get_webview_window(&window_label) {
+        let _ = window.emit("ChatLogStatus", (&task_id, "Answered", "running"));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn respond_to_user_input(
+    task_id: String,
+    request_id: String,
+    answers: serde_json::Value,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    respond_to_user_input_internal(task_id, request_id, answers, state.inner(), app).await
+}
+
+// ============================================================================
+// Attachment handling commands
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SaveAttachmentPayload {
+    #[serde(rename = "taskId")]
+    task_id: String,
+    #[serde(rename = "fileName")]
+    file_name: String,
+    #[serde(rename = "mimeType")]
+    mime_type: String,
+    /// Base64-encoded file data
+    data: String,
+}
+
+#[tauri::command]
+async fn save_attachment(
+    payload: SaveAttachmentPayload,
+    state: State<'_, AppState>,
+) -> Result<db::AttachmentRecord, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    // Decode base64 data
+    let data = STANDARD
+        .decode(&payload.data)
+        .map_err(|e| format!("Invalid base64 data: {}", e))?;
+
+    let byte_size = data.len() as i64;
+
+    // Validate image size (max 5MB for Claude API)
+    if byte_size > 5 * 1024 * 1024 {
+        return Err("Image exceeds 5MB size limit".to_string());
+    }
+
+    // Generate unique ID and file path
+    let id = uuid::Uuid::new_v4().to_string();
+    let extension = payload.file_name.rsplit('.').next().unwrap_or("png");
+    let relative_path = format!("{}.{}", id, extension);
+
+    // Save file to disk
+    let attachments_path = attachments_dir()?;
+    let file_path = attachments_path.join(&relative_path);
+    std::fs::write(&file_path, &data).map_err(|e| format!("Failed to save attachment: {}", e))?;
+
+    let attachment = db::AttachmentRecord {
+        id: id.clone(),
+        file_name: Some(payload.file_name),
+        mime_type: Some(payload.mime_type),
+        relative_path,
+        byte_size,
+    };
+
+    // Save to database
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::save_pending_attachments(&conn, &payload.task_id, &[attachment.clone()])
+        .map_err(|e| format!("Failed to save attachment record: {}", e))?;
+
+    println!(
+        "[Harness] Saved attachment: id={} size={} bytes",
+        id, byte_size
+    );
+
+    Ok(attachment)
+}
+
+#[tauri::command]
+async fn get_pending_attachments(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<db::AttachmentRecord>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::get_pending_attachments(&conn, &task_id)
+        .map_err(|e| format!("Failed to get attachments: {}", e))
+}
+
+#[tauri::command]
+async fn delete_attachment(
+    attachment_id: String,
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    // Get attachment to find file path
+    let attachments = db::get_pending_attachments(&conn, &task_id)
+        .map_err(|e| format!("Failed to get attachments: {}", e))?;
+
+    if let Some(attachment) = attachments.iter().find(|a| a.id == attachment_id) {
+        // Delete file from disk
+        let attachments_path = attachments_dir()?;
+        let file_path = attachments_path.join(&attachment.relative_path);
+        if file_path.exists() {
+            std::fs::remove_file(&file_path)
+                .map_err(|e| format!("Failed to delete file: {}", e))?;
+        }
+
+        // Delete from database
+        conn.execute(
+            "DELETE FROM pending_attachments WHERE id = ?1",
+            rusqlite::params![attachment_id],
+        )
+        .map_err(|e| format!("Failed to delete attachment record: {}", e))?;
+
+        println!("[Harness] Deleted attachment: {}", attachment_id);
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_attachment_base64(relative_path: String) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let attachments_path = attachments_dir()?;
+    let file_path = attachments_path.join(&relative_path);
+
+    let data =
+        std::fs::read(&file_path).map_err(|e| format!("Failed to read attachment: {}", e))?;
+
+    Ok(STANDARD.encode(&data))
+}
+
+fn main() {
+    // Initialize logging first - keep the guard alive for the app lifetime
+    let _log_guard = match logger::init_logging() {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            eprintln!("[Harness] Failed to initialize logging: {}", e);
+            None
+        }
+    };
+
+    let config_path = config_path();
+    let config = match load_agents_config(&config_path) {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::error!(
+                path = %config_path.display(),
+                error = %err,
+                "Failed to load agents config"
+            );
+            AgentsConfig {
+                version: Some(1),
+                max_parallel: Some(5),
+                agents: Vec::new(),
+            }
+        }
+    };
+
+    // Initialize database
+    let db_path = db_path().expect("failed to get db path");
+    let db_conn = db::init_db(&db_path).expect("failed to initialize database");
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_opener::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, shortcut, event| {
+                    use tauri_plugin_global_shortcut::ShortcutState;
+                    if event.state() == ShortcutState::Pressed {
+                        let shortcut_str = shortcut.to_string();
+                        if shortcut_str.contains("R") {
+                            if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.eval("location.reload()");
+                            }
+                        } else if shortcut_str.contains("Alt+I")
+                            || shortcut_str.contains("Option+I")
+                        {
+                            if let Some(window) = app.get_webview_window("main") {
+                                window.open_devtools();
+                            }
+                        }
+                    }
+                })
+                .build(),
+        )
+        .setup(|app| {
+            use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+            let shortcut = "CmdOrCtrl+R"
+                .parse::<Shortcut>()
+                .map_err(|e| e.to_string())?;
+            app.global_shortcut()
+                .register(shortcut)
+                .map_err(|e| e.to_string())?;
+
+            let devtools_shortcut = "CmdOrCtrl+Alt+I"
+                .parse::<Shortcut>()
+                .map_err(|e| e.to_string())?;
+            app.global_shortcut()
+                .register(devtools_shortcut)
+                .map_err(|e| e.to_string())?;
+
+            // Optional: lightweight debug HTTP server for automation/testing.
+            // Enable with: PHANTOM_DEBUG_HTTP=1 (default port 43777)
+            if std::env::var("PHANTOM_DEBUG_HTTP").ok().as_deref() == Some("1") {
+                let state: State<AppState> = app.state();
+                let db = state.db.clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = start_debug_http(db) {
+                        eprintln!("[Harness] debug http server failed: {e}");
+                    }
+                });
+            }
+
+            {
+                let app_handle = app.handle().clone();
+                let state = app.state::<AppState>().inner().clone();
+                let settings = state.settings.blocking_lock().clone();
+                tauri::async_runtime::spawn(async move {
+                    ensure_discord_bot(&app_handle, &state, &settings).await;
+                });
+            }
+
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            let should_close = matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            );
+            if !should_close {
+                return;
+            }
+            let app = window.app_handle();
+            for (label, win) in app.webview_windows() {
+                if label.starts_with("chat-") {
+                    let _ = win.close();
+                }
+            }
+        })
+        .manage({
+            let settings = load_settings_from_disk();
+            AppState {
+                config,
+                sessions: Arc::new(Mutex::new(HashMap::new())),
+                settings: Arc::new(Mutex::new(settings)),
+                db: Arc::new(StdMutex::new(db_conn)),
+                notification_windows: Arc::new(StdMutex::new(Vec::new())),
+                agent_availability: Arc::new(StdMutex::new(HashMap::new())),
+                running_tasks: Arc::new(Mutex::new(HashSet::new())),
+                discord_bot: Arc::new(StdMutex::new(None)),
+                pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
+            }
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_agent_models,
+            get_cached_models,
+            get_all_cached_models,
+            refresh_agent_models,
+            get_enriched_models,
+            // Mode commands
+            get_agent_modes,
+            get_cached_modes,
+            get_all_cached_modes_cmd,
+            refresh_agent_modes,
+            pick_project_path,
+            get_repo_branches,
+            create_agent_session,
+            start_task,
+            start_pending_prompt,
+            get_settings,
+            save_settings,
+            test_webhook,
+            test_discord,
+            get_agent_availability,
+            refresh_agent_availability,
+            get_agent_skills,
+            toggle_skill,
+            get_running_tasks,
+            restart_all_agents,
+            codex_login,
+            codex_logout,
+            check_codex_auth,
+            codex_rate_limits,
+            claude_login,
+            claude_logout,
+            check_claude_auth,
+            claude_rate_limits,
+            load_tasks,
+            delete_task,
+            get_task_history,
+            open_task_directory,
+            open_chat_window,
+            send_chat_message,
+            respond_to_permission,
+            respond_to_user_input,
+            local_usage::local_usage_snapshot,
+            claude_local_usage::claude_local_usage_snapshot,
+            // Analytics cache commands
+            get_cached_analytics,
+            get_all_cached_analytics,
+            save_analytics_cache,
+            // Attachment commands
+            save_attachment,
+            get_pending_attachments,
+            delete_attachment,
+            get_attachment_base64
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

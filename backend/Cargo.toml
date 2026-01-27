@@ -1,0 +1,13 @@
+[package]
+name = "phantom_harness_backend"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["process", "io-util", "macros", "rt-multi-thread", "time", "net", "sync"] }
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"

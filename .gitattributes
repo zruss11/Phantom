@@ -1,0 +1,6 @@
+# LFS for large binaries
+src-tauri/bin/node-darwin-arm64/bin/node filter=lfs diff=lfs merge=lfs -text
+src-tauri/bin/codex-acp-* filter=lfs diff=lfs merge=lfs -text
+
+# Mark bundled Node.js as vendored (exclude from GitHub language stats)
+src-tauri/bin/** linguist-vendored

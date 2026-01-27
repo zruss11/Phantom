@@ -1,0 +1,2323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agent Nexus - Phantom</title>
+  <script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
+  <link rel="stylesheet" href="fonts/fonts.css" />
+  <link rel="stylesheet" type="text/css" href="main.css" />
+  <link rel="stylesheet" href="fontawesome/fontawesome-all.css" />
+  <style>
+    /* ========================================
+       SKILL TREE - GAME UI STYLES
+       ======================================== */
+
+    :root {
+      --bg-dark: #2e242c;
+      --bg-card: #1c1b1b;
+      --bg-deep: #1b1b1c;
+      --pink-primary: #f78a97;
+      --pink-glow: rgba(247, 138, 151, 0.4);
+      --green-bright: #04d885;
+      --orange-accent: #da7756;
+      --transition-standard: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .skill-tree-page {
+      position: fixed;
+      inset: 0;
+      background: radial-gradient(circle at 50% 50%, #3a2a35 0%, #1c1b1b 100%);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ========================================
+       ANIMATIONS
+       ======================================== */
+
+    @keyframes breathing {
+      0%, 100% { transform: translate(-50%, -50%) scale(1); filter: brightness(1); }
+      50% { transform: translate(-50%, -50%) scale(1.03); filter: brightness(1.2); }
+    }
+
+    @keyframes particle-float {
+      0% { transform: translateY(0) translateX(0) rotate(0deg); opacity: 0; }
+      50% { opacity: 0.6; }
+      100% { transform: translateY(-100px) translateX(20px) rotate(360deg); opacity: 0; }
+    }
+
+
+    @keyframes pulse-ring {
+      0% { transform: scale(1); opacity: 0.5; }
+      100% { transform: scale(1.5); opacity: 0; }
+    }
+
+    .particle {
+      position: absolute;
+      pointer-events: none;
+      background: var(--pink-primary);
+      border-radius: 50%;
+      filter: blur(1px);
+      animation: particle-float 4s infinite linear;
+    }
+
+    /* ========================================
+       SKILL TREE COMPONENTS
+       ======================================== */
+
+    .center-nexus {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      z-index: 50;
+      animation: breathing 4s ease-in-out infinite;
+    }
+
+    .nexus-ring {
+      position: absolute;
+      inset: -20px;
+      border: 1px solid var(--pink-primary);
+      border-radius: 50%;
+      opacity: 0.2;
+      animation: pulse-ring 3s cubic-bezier(0, 0, 0.2, 1) infinite;
+    }
+
+    .skill-node {
+      position: absolute;
+      width: 80px;
+      height: 90px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: var(--transition-standard);
+      z-index: 20;
+    }
+
+    .skill-node:hover {
+      transform: scale(1.2) !important;
+      z-index: 100;
+    }
+
+    .skill-icon-wrapper {
+      width: 56px;
+      height: 56px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      border-radius: 16px;
+      background: transparent;
+      transition: all 0.3s ease;
+    }
+
+    .skill-node:hover .skill-icon-wrapper {
+      background: rgba(247, 138, 151, 0.1);
+    }
+
+    .skill-node.project:hover .skill-icon-wrapper {
+      background: rgba(218, 119, 86, 0.1);
+    }
+
+    .skill-icon-wrapper iconify-icon {
+      font-size: 36px;
+      filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.3));
+      transition: all 0.3s ease;
+    }
+
+    .skill-node.unlocked .skill-icon-wrapper iconify-icon {
+      color: var(--pink-primary);
+      filter: drop-shadow(0 0 12px var(--pink-glow));
+    }
+
+    .skill-node.project .skill-icon-wrapper iconify-icon {
+      color: var(--orange-accent);
+      filter: drop-shadow(0 0 12px rgba(218, 119, 86, 0.4));
+    }
+
+    .skill-node:hover .skill-icon-wrapper iconify-icon {
+      transform: scale(1.1);
+      filter: drop-shadow(0 0 20px var(--pink-glow));
+    }
+
+    .skill-node.project:hover .skill-icon-wrapper iconify-icon {
+      filter: drop-shadow(0 0 20px rgba(218, 119, 86, 0.5));
+    }
+
+    /* Disabled skill visual state */
+    .skill-node.skill-disabled {
+      opacity: 0.4;
+    }
+
+    .skill-node.skill-disabled .skill-icon-wrapper iconify-icon {
+      color: rgba(255, 255, 255, 0.3) !important;
+      filter: drop-shadow(0 0 4px rgba(255, 255, 255, 0.1)) !important;
+    }
+
+    .skill-node.skill-disabled .skill-label {
+      text-decoration: line-through;
+      color: rgba(255, 255, 255, 0.3);
+    }
+
+    .skill-category-indicator {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      display: inline-block;
+      margin-right: 4px;
+      vertical-align: middle;
+      flex-shrink: 0;
+    }
+
+    .skill-category-indicator.personal {
+      background: var(--pink-primary);
+      box-shadow: 0 0 6px var(--pink-glow);
+    }
+
+    .skill-category-indicator.project {
+      background: var(--orange-accent);
+      box-shadow: 0 0 6px rgba(218, 119, 86, 0.5);
+    }
+
+    .energy-line {
+      stroke-dasharray: 8, 8;
+      animation: flow 1s linear infinite;
+    }
+
+    @keyframes flow {
+      to { stroke-dashoffset: -16; }
+    }
+
+    .skill-label {
+      font-size: 9px;
+      font-weight: 600;
+      color: rgba(255, 255, 255, 0.8);
+      text-transform: uppercase;
+      text-align: center;
+      max-width: 90px;
+      line-height: 1.2;
+      position: absolute;
+      white-space: nowrap;
+      pointer-events: none;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
+    }
+
+    /* Position labels based on node position */
+    .skill-node.label-right .skill-label {
+      left: 100%;
+      top: 50%;
+      transform: translateY(-50%);
+      margin-left: 8px;
+      text-align: left;
+    }
+
+    .skill-node.label-left .skill-label {
+      right: 100%;
+      top: 50%;
+      transform: translateY(-50%);
+      margin-right: 8px;
+      text-align: right;
+    }
+
+    .skill-node.label-bottom .skill-label {
+      top: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      margin-top: 6px;
+      text-align: center;
+    }
+
+    .skill-node.label-top .skill-label {
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%);
+      margin-bottom: 6px;
+      text-align: center;
+    }
+
+    /* Edit Button */
+    .edit-btn {
+      position: absolute;
+      top: 8px;
+      right: 4px;
+      width: 22px;
+      height: 22px;
+      background: rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: rgba(255, 255, 255, 0.6);
+      opacity: 0;
+      transition: all 0.2s;
+      z-index: 50;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+    }
+
+    .skill-node:hover .edit-btn {
+      opacity: 1;
+    }
+
+    .edit-btn:hover {
+      background: var(--pink-primary);
+      border-color: var(--pink-primary);
+      color: #000;
+      transform: scale(1.1);
+    }
+
+    /* ========================================
+       UI OVERLAY
+       ======================================== */
+
+    .game-ui-overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 1000;
+    }
+
+    .game-ui-overlay > * {
+      pointer-events: auto;
+    }
+
+    .top-nav {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      padding: 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .top-nav h1 {
+      font-size: 24px;
+      font-weight: bold;
+      color: #fff;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      margin: 0;
+    }
+
+    .top-nav h1 span {
+      color: var(--pink-primary);
+      font-weight: normal;
+    }
+
+    .top-nav .subtitle {
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 3px;
+      margin-top: 4px;
+    }
+
+    /* Agent Tabs */
+    .agent-switcher {
+      display: flex;
+      background: rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(10px);
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      padding: 4px;
+    }
+
+    .agent-switcher-btn {
+      padding: 8px 24px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: bold;
+      color: rgba(255, 255, 255, 0.4);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .agent-switcher-btn:hover {
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .agent-switcher-btn.active {
+      background: rgba(247, 138, 151, 0.2);
+      color: #fff;
+      border: 1px solid rgba(247, 138, 151, 0.5);
+    }
+
+    .agent-switcher-btn img,
+    .agent-switcher-btn svg {
+      width: 16px;
+      height: 16px;
+    }
+
+    .agent-switcher-count {
+      background: rgba(255, 255, 255, 0.1);
+      padding: 2px 6px;
+      border-radius: 8px;
+      font-size: 9px;
+    }
+
+    .agent-switcher-btn.active .agent-switcher-count {
+      background: rgba(247, 138, 151, 0.3);
+    }
+
+    /* XP Bar */
+    .xp-bar-container {
+      position: absolute;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 600px;
+      background: rgba(15, 14, 16, 0.8);
+      backdrop-filter: blur(10px);
+      padding: 12px 24px;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .xp-bar-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      margin-bottom: 8px;
+    }
+
+    .xp-bar-label {
+      font-size: 10px;
+      color: rgba(255, 255, 255, 0.4);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      font-weight: bold;
+    }
+
+    .xp-bar-level {
+      font-size: 18px;
+      font-weight: bold;
+      color: #fff;
+    }
+
+    .xp-bar-level span {
+      font-size: 12px;
+      font-weight: normal;
+      color: rgba(255, 255, 255, 0.5);
+      margin-left: 8px;
+    }
+
+    .xp-bar-value {
+      font-size: 12px;
+      color: var(--pink-primary);
+      font-weight: bold;
+      letter-spacing: 1px;
+    }
+
+    .xp-bar-track {
+      width: 100%;
+      height: 6px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .xp-bar-fill {
+      height: 100%;
+      background: linear-gradient(90deg, var(--pink-primary) 0%, #ffc0cb 100%);
+      border-radius: 3px;
+      box-shadow: 0 0 10px var(--pink-glow);
+      transition: width 0.5s ease;
+    }
+
+    .xp-bar-footer {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 12px;
+    }
+
+    .legend-items {
+      display: flex;
+      gap: 24px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 10px;
+      color: rgba(255, 255, 255, 0.6);
+      font-weight: bold;
+      text-transform: uppercase;
+    }
+
+    .legend-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+    }
+
+    .legend-dot.personal { background: var(--pink-primary); }
+    .legend-dot.project { background: var(--orange-accent); }
+    .legend-dot.locked { background: rgba(255, 255, 255, 0.2); }
+
+    .zoom-controls {
+      display: flex;
+      gap: 8px;
+    }
+
+    .zoom-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.6);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+
+    .zoom-btn:hover {
+      color: #fff;
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    /* Refresh Button */
+    .refresh-btn {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      color: #fff;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+      margin-left: 16px;
+    }
+
+    .refresh-btn:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    /* Apply Changes Button */
+    .apply-changes-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 16px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, rgba(247, 138, 151, 0.8), rgba(200, 80, 100, 0.9));
+      border: 1px solid rgba(247, 138, 151, 0.5);
+      color: #fff;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      margin-left: 12px;
+      animation: pulse-apply 2s infinite;
+    }
+
+    .apply-changes-btn:hover {
+      background: linear-gradient(135deg, rgba(247, 138, 151, 1), rgba(200, 80, 100, 1));
+      border-color: rgba(247, 138, 151, 0.8);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(247, 138, 151, 0.3);
+    }
+
+    .apply-changes-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      animation: none;
+    }
+
+    .apply-changes-btn iconify-icon {
+      font-size: 16px;
+    }
+
+    @keyframes pulse-apply {
+      0%, 100% {
+        box-shadow: 0 0 0 0 rgba(247, 138, 151, 0.4);
+      }
+      50% {
+        box-shadow: 0 0 0 8px rgba(247, 138, 151, 0);
+      }
+    }
+
+    .spin {
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    /* ========================================
+       SKILL TREE CANVAS
+       ======================================== */
+
+    .skill-tree-canvas {
+      flex: 1;
+      position: relative;
+      overflow: auto;
+      cursor: grab;
+    }
+
+    .skill-tree-canvas:active {
+      cursor: grabbing;
+    }
+
+    .skill-tree-container {
+      min-width: 1800px;
+      min-height: 1400px;
+      position: relative;
+    }
+
+    /* ========================================
+       TOOLTIP
+       ======================================== */
+
+    .skill-tooltip {
+      position: fixed;
+      z-index: 2500;
+      width: 280px;
+      padding: 16px;
+      background: rgba(0, 0, 0, 0.95);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(247, 138, 151, 0.3);
+      border-radius: 12px;
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.2s;
+      pointer-events: none;
+    }
+
+    .skill-tooltip.visible {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .tooltip-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .tooltip-icon-box {
+      width: 40px;
+      height: 40px;
+      background: rgba(247, 138, 151, 0.1);
+      border: 1px solid rgba(247, 138, 151, 0.2);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .tooltip-icon-box iconify-icon {
+      font-size: 20px;
+      color: var(--pink-primary);
+    }
+
+    .tooltip-title {
+      font-size: 14px;
+      font-weight: bold;
+      color: #fff;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .tooltip-badges {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .tooltip-badge {
+      font-size: 8px;
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-weight: bold;
+      text-transform: uppercase;
+    }
+
+    .tooltip-badge.category {
+      background: rgba(247, 138, 151, 0.2);
+      color: var(--pink-primary);
+      border: 1px solid rgba(247, 138, 151, 0.2);
+    }
+
+    .tooltip-badge.status-active {
+      background: rgba(4, 216, 133, 0.2);
+      color: var(--green-bright);
+      border: 1px solid rgba(4, 216, 133, 0.2);
+    }
+
+    .tooltip-badge.status-locked {
+      background: rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .tooltip-desc {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.7);
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+
+    .tooltip-path {
+      font-size: 9px;
+      color: rgba(255, 255, 255, 0.3);
+      font-family: 'SF Mono', Monaco, monospace;
+      padding-top: 12px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      word-break: break-all;
+    }
+
+    /* ========================================
+       MODALS
+       ======================================== */
+
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.8);
+      backdrop-filter: blur(8px);
+      z-index: 3000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      visibility: hidden;
+      transition: all 0.3s;
+    }
+
+    .modal-backdrop.active {
+      opacity: 1;
+      visibility: visible;
+    }
+
+    .modal-content {
+      background: var(--bg-dark);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 16px;
+      width: 90%;
+      max-width: 600px;
+      max-height: 85vh;
+      overflow-y: auto;
+      transform: scale(0.95);
+      transition: transform 0.3s;
+      box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+    }
+
+    .modal-backdrop.active .modal-content {
+      transform: scale(1);
+    }
+
+    .modal-content::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .modal-content::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+    }
+
+    /* Icon Picker Modal */
+    .icon-picker-header {
+      padding: 24px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .icon-picker-header h3 {
+      font-size: 18px;
+      font-weight: bold;
+      color: #fff;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      margin: 0 0 16px 0;
+    }
+
+    .icon-picker-search {
+      position: relative;
+    }
+
+    .icon-picker-search iconify-icon {
+      position: absolute;
+      left: 12px;
+      top: 50%;
+      transform: translateY(-50%);
+      color: rgba(255, 255, 255, 0.4);
+    }
+
+    .icon-picker-search:focus-within iconify-icon {
+      color: rgba(247, 138, 151, 0.8);
+    }
+
+    .icon-picker-search input {
+      width: 100%;
+      box-sizing: border-box;
+      background: var(--bg-deep);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 10px 16px 10px 40px;
+      font-size: 13px;
+      color: #fff;
+      transition: border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+    }
+
+    .icon-picker-search input::placeholder {
+      color: rgba(255, 255, 255, 0.3);
+    }
+
+    .icon-picker-search input:focus {
+      outline: none;
+      border-color: rgba(247, 138, 151, 0.5);
+      background: rgba(15, 15, 20, 0.95);
+      box-shadow: 0 0 0 2px rgba(247, 138, 151, 0.15);
+    }
+
+    .icon-grid {
+      padding: 24px;
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 12px;
+      max-height: 400px;
+      overflow-y: auto;
+    }
+
+    .icon-grid-item {
+      aspect-ratio: 1;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .icon-grid-item:hover {
+      background: rgba(247, 138, 151, 0.15);
+      border-color: var(--pink-primary);
+    }
+
+    .icon-grid-item.selected {
+      background: rgba(247, 138, 151, 0.2);
+      border-color: var(--pink-primary);
+    }
+
+    .icon-grid-item iconify-icon {
+      font-size: 24px;
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .icon-picker-footer {
+      padding: 24px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      display: flex;
+      justify-content: flex-end;
+      gap: 12px;
+    }
+
+    .btn-cancel {
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: bold;
+      color: rgba(255, 255, 255, 0.6);
+      background: transparent;
+      border: none;
+      cursor: pointer;
+      transition: color 0.2s;
+    }
+
+    .btn-cancel:hover {
+      color: #fff;
+    }
+
+    .btn-save {
+      padding: 10px 24px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: bold;
+      color: #000;
+      background: var(--pink-primary);
+      border: none;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn-save:hover {
+      background: #ffc0cb;
+    }
+
+    .btn-danger {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: bold;
+      color: #fff;
+      background: linear-gradient(135deg, #dc3545, #c82333);
+      border: none;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-danger:hover {
+      background: linear-gradient(135deg, #c82333, #bd2130);
+      transform: translateY(-1px);
+    }
+
+    .btn-danger iconify-icon {
+      font-size: 14px;
+    }
+
+    /* Skill Detail Modal */
+    .detail-modal-content {
+      padding: 32px;
+    }
+
+    .detail-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 24px;
+    }
+
+    .detail-header-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .detail-icon-box {
+      width: 64px;
+      height: 64px;
+      background: rgba(247, 138, 151, 0.1);
+      border: 1px solid rgba(247, 138, 151, 0.2);
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 20px rgba(247, 138, 151, 0.1);
+    }
+
+    .detail-icon-box iconify-icon {
+      font-size: 32px;
+      color: var(--pink-primary);
+    }
+
+    .detail-title {
+      font-size: 24px;
+      font-weight: bold;
+      color: #fff;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin: 0;
+    }
+
+    .detail-badges {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .detail-badge {
+      font-size: 10px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-weight: bold;
+      text-transform: uppercase;
+    }
+
+    .close-modal-btn {
+      background: transparent;
+      border: none;
+      color: rgba(255, 255, 255, 0.4);
+      cursor: pointer;
+      transition: color 0.2s;
+    }
+
+    .close-modal-btn:hover {
+      color: #fff;
+    }
+
+    .detail-section {
+      margin-bottom: 24px;
+    }
+
+    .detail-section-title {
+      font-size: 10px;
+      color: rgba(255, 255, 255, 0.3);
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      font-weight: bold;
+      margin-bottom: 8px;
+    }
+
+    .detail-description {
+      font-size: 14px;
+      color: rgba(255, 255, 255, 0.7);
+      line-height: 1.6;
+    }
+
+    .detail-source {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 8px;
+      padding: 12px;
+    }
+
+    .detail-source iconify-icon {
+      color: rgba(247, 138, 151, 0.6);
+    }
+
+    .detail-source-path {
+      flex: 1;
+      font-size: 11px;
+      font-family: 'SF Mono', Monaco, monospace;
+      color: rgba(255, 255, 255, 0.5);
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .copy-btn {
+      background: transparent;
+      border: none;
+      color: rgba(255, 255, 255, 0.2);
+      cursor: pointer;
+      transition: color 0.2s;
+    }
+
+    .copy-btn:hover {
+      color: #fff;
+    }
+
+    .detail-toggle-section {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-top: 24px;
+      border-top: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .detail-toggle-info h4 {
+      font-size: 14px;
+      font-weight: bold;
+      color: #fff;
+      margin: 0;
+    }
+
+    .detail-toggle-info p {
+      font-size: 12px;
+      color: rgba(255, 255, 255, 0.4);
+      margin: 4px 0 0 0;
+    }
+
+    .toggle-switch {
+      width: 48px;
+      height: 24px;
+      background: rgba(247, 138, 151, 0.3);
+      border-radius: 999px;
+      position: relative;
+      cursor: pointer;
+    }
+
+    .toggle-switch::after {
+      content: '';
+      position: absolute;
+      right: 4px;
+      top: 4px;
+      width: 16px;
+      height: 16px;
+      background: var(--pink-primary);
+      border-radius: 50%;
+      transition: right 0.2s;
+      pointer-events: none; /* Ensure clicks pass through to parent */
+    }
+
+    .toggle-switch.off {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .toggle-switch.off::after {
+      right: auto;
+      left: 4px;
+      background: rgba(255, 255, 255, 0.3);
+    }
+
+    .toggle-switch.disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+
+    /* Status badge for disabled skills */
+    .status-disabled {
+      background: rgba(255, 255, 255, 0.1) !important;
+      color: rgba(255, 255, 255, 0.5) !important;
+    }
+
+    .detail-footer {
+      margin-top: 32px;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .btn-close-detail {
+      padding: 12px 32px;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: bold;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 2px;
+      transition: background 0.2s;
+    }
+
+    .btn-close-detail:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    /* Back Button */
+    .back-btn {
+      position: absolute;
+      bottom: 24px;
+      left: 24px;
+      padding: 12px 24px;
+      border-radius: 12px;
+      font-size: 13px;
+      font-weight: bold;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s;
+      z-index: 1000;
+    }
+
+    .back-btn:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    /* Loading State */
+    .loading-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(28, 27, 27, 0.9);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 2000;
+    }
+
+    .loading-spinner {
+      width: 48px;
+      height: 48px;
+      border: 3px solid rgba(255, 255, 255, 0.1);
+      border-top-color: var(--pink-primary);
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    /* Empty State */
+    .empty-state {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      color: rgba(255, 255, 255, 0.4);
+    }
+
+    .empty-state iconify-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+      color: rgba(255, 255, 255, 0.2);
+    }
+
+    .empty-state h3 {
+      font-size: 18px;
+      margin: 0 0 8px 0;
+    }
+
+    .empty-state p {
+      font-size: 13px;
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <div class="skill-tree-page">
+    <!-- Particle Background -->
+    <div style="position: absolute; inset: 0; overflow: hidden; opacity: 0.3;">
+      <div class="particle" style="left: 20%; top: 80%; width: 4px; height: 4px; animation-delay: 0s;"></div>
+      <div class="particle" style="left: 50%; top: 70%; width: 6px; height: 6px; animation-delay: 1s;"></div>
+      <div class="particle" style="left: 80%; top: 90%; width: 3px; height: 3px; animation-delay: 2s;"></div>
+      <div class="particle" style="left: 30%; top: 40%; width: 5px; height: 5px; animation-delay: 0.5s;"></div>
+      <div class="particle" style="left: 70%; top: 20%; width: 4px; height: 4px; animation-delay: 1.5s;"></div>
+      <div class="particle" style="left: 15%; top: 30%; width: 5px; height: 5px; animation-delay: 2.5s;"></div>
+      <div class="particle" style="left: 85%; top: 60%; width: 4px; height: 4px; animation-delay: 3s;"></div>
+    </div>
+
+    <!-- UI Overlay -->
+    <div class="game-ui-overlay">
+      <!-- Top Navigation -->
+      <div class="top-nav">
+        <div>
+          <h1>Agent Skills <span>Tree</span></h1>
+          <p class="subtitle">Interactive Skill Visualization</p>
+        </div>
+
+        <div style="display: flex; align-items: center;">
+          <div class="agent-switcher">
+            <button class="agent-switcher-btn active" data-agent="codex">
+              <img src="images/codex.svg" alt="Codex" style="filter: brightness(0) invert(1);">
+              <span>Codex</span>
+              <span class="agent-switcher-count" id="codex-count">0</span>
+            </button>
+            <button class="agent-switcher-btn" data-agent="claude-code">
+              <img src="images/claude-color.png" alt="Claude Code">
+              <span>Claude</span>
+              <span class="agent-switcher-count" id="claude-count">0</span>
+            </button>
+          </div>
+          <button class="refresh-btn" id="refresh-btn" title="Refresh Skills">
+            <iconify-icon icon="lucide:refresh-cw"></iconify-icon>
+          </button>
+          <button class="apply-changes-btn" id="apply-changes-btn" title="Restart agents to apply skill changes" style="display: none;">
+            <iconify-icon icon="lucide:zap"></iconify-icon>
+            <span>Apply Changes</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- XP Bar -->
+      <div class="xp-bar-container">
+        <div class="xp-bar-header">
+          <div>
+            <div class="xp-bar-label">Skills Loaded</div>
+            <div class="xp-bar-level" id="total-skills">0 Skills <span>Active</span></div>
+          </div>
+          <div class="xp-bar-value" id="skills-ratio">0 / 0</div>
+        </div>
+        <div class="xp-bar-track">
+          <div class="xp-bar-fill" id="xp-fill" style="width: 0%;"></div>
+        </div>
+        <div class="xp-bar-footer">
+          <div class="legend-items">
+            <div class="legend-item">
+              <div class="legend-dot personal"></div>
+              <span>Personal</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot project"></div>
+              <span>Project</span>
+            </div>
+            <div class="legend-item">
+              <div class="legend-dot locked"></div>
+              <span>Inactive</span>
+            </div>
+          </div>
+          <div class="zoom-controls">
+            <button class="zoom-btn" id="zoom-out" title="Zoom Out">
+              <iconify-icon icon="lucide:minus"></iconify-icon>
+            </button>
+            <button class="zoom-btn" id="zoom-in" title="Zoom In">
+              <iconify-icon icon="lucide:plus"></iconify-icon>
+            </button>
+            <button class="zoom-btn" id="zoom-reset" title="Reset Zoom">
+              <iconify-icon icon="lucide:maximize-2"></iconify-icon>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skill Tree Canvas -->
+    <div class="skill-tree-canvas" id="tree-canvas">
+      <div class="skill-tree-container" id="tree-container">
+        <!-- SVG for connection lines -->
+        <svg id="connections-svg" style="position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;">
+          <defs>
+            <linearGradient id="line-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#f78a97" stop-opacity="0.8" />
+              <stop offset="100%" stop-color="#f78a97" stop-opacity="0.2" />
+            </linearGradient>
+            <linearGradient id="line-gradient-orange" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" stop-color="#da7756" stop-opacity="0.8" />
+              <stop offset="100%" stop-color="#da7756" stop-opacity="0.2" />
+            </linearGradient>
+          </defs>
+          <!-- Connection lines will be drawn here -->
+        </svg>
+
+        <!-- Center Agent Node -->
+        <div class="center-nexus" id="center-nexus">
+          <div class="nexus-ring"></div>
+          <div class="nexus-ring" style="animation-delay: 1s;"></div>
+          <div class="nexus-ring" style="animation-delay: 2s;"></div>
+          <div style="width: 100px; height: 100px; display: flex; align-items: center; justify-content: center; position: relative;">
+            <img id="center-agent-icon" src="images/codex.svg" alt="Agent" style="width: 72px; height: 72px; filter: drop-shadow(0 0 20px var(--pink-glow));">
+          </div>
+        </div>
+
+        <!-- Skill nodes will be dynamically inserted here -->
+        <div id="skill-nodes-container"></div>
+
+        <!-- Loading State -->
+        <div class="loading-overlay" id="loading-overlay">
+          <div class="loading-spinner"></div>
+        </div>
+
+        <!-- Empty State -->
+        <div class="empty-state" id="empty-state" style="display: none;">
+          <iconify-icon icon="lucide:package-open"></iconify-icon>
+          <h3>No Skills Found</h3>
+          <p>This agent doesn't have any skills loaded yet.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Back Button -->
+    <button class="back-btn" id="back-btn">
+      <iconify-icon icon="lucide:arrow-left"></iconify-icon>
+      Back to Skills
+    </button>
+
+    <!-- Tooltip -->
+    <div class="skill-tooltip" id="skill-tooltip">
+      <div class="tooltip-header">
+        <div class="tooltip-icon-box">
+          <iconify-icon id="tooltip-icon" icon="lucide:box"></iconify-icon>
+        </div>
+        <div>
+          <div class="tooltip-title" id="tooltip-title">Skill Name</div>
+          <div class="tooltip-badges">
+            <span class="tooltip-badge category" id="tooltip-category">Personal</span>
+            <span class="tooltip-badge status-active" id="tooltip-status">Active</span>
+          </div>
+        </div>
+      </div>
+      <p class="tooltip-desc" id="tooltip-desc">Skill description goes here.</p>
+      <p class="tooltip-path" id="tooltip-path">~/.codex/skills/name/SKILL.md</p>
+    </div>
+
+    <!-- Icon Picker Modal -->
+    <div class="modal-backdrop" id="icon-picker-modal">
+      <div class="modal-content">
+        <div class="icon-picker-header">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+            <h3>Choose Skill Icon</h3>
+            <button class="close-modal-btn" data-close-modal>
+              <iconify-icon icon="lucide:x" style="font-size: 20px;"></iconify-icon>
+            </button>
+          </div>
+          <div class="icon-picker-search">
+            <iconify-icon icon="lucide:search"></iconify-icon>
+            <input type="text" id="icon-search" placeholder="Search icons (e.g., code, rocket, zap...)">
+          </div>
+        </div>
+        <div class="icon-grid" id="icon-grid">
+          <!-- Icons will be populated dynamically -->
+        </div>
+        <div class="icon-picker-footer">
+          <button class="btn-cancel" data-close-modal>Cancel</button>
+          <button class="btn-save" id="save-icon-btn">Save Selection</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skill Detail Modal -->
+    <div class="modal-backdrop" id="skill-detail-modal">
+      <div class="modal-content">
+        <div class="detail-modal-content">
+          <div class="detail-header">
+            <div class="detail-header-left">
+              <div class="detail-icon-box">
+                <iconify-icon id="detail-icon" icon="lucide:box"></iconify-icon>
+              </div>
+              <div>
+                <h2 class="detail-title" id="detail-title">Skill Name</h2>
+                <div class="detail-badges">
+                  <span class="detail-badge tooltip-badge category" id="detail-category">Personal</span>
+                  <span class="detail-badge tooltip-badge status-active" id="detail-status">Active</span>
+                </div>
+              </div>
+            </div>
+            <button class="close-modal-btn" data-close-modal>
+              <iconify-icon icon="lucide:x" style="font-size: 24px;"></iconify-icon>
+            </button>
+          </div>
+
+          <div class="detail-section">
+            <div class="detail-section-title">Description</div>
+            <p class="detail-description" id="detail-description">
+              Skill description goes here with more detailed information about what this skill does.
+            </p>
+          </div>
+
+          <div class="detail-section" id="triggers-section" style="display: none;">
+            <div class="detail-section-title">Triggers</div>
+            <div class="detail-triggers" id="detail-triggers" style="display: flex; flex-wrap: wrap; gap: 8px;">
+              <!-- Trigger badges will be inserted here -->
+            </div>
+          </div>
+
+          <div class="detail-section">
+            <div class="detail-section-title">Source Definition</div>
+            <div class="detail-source">
+              <iconify-icon icon="lucide:file-code"></iconify-icon>
+              <span class="detail-source-path" id="detail-path">~/.codex/skills/name/SKILL.md</span>
+              <button class="copy-btn" id="copy-path-btn" title="Copy path">
+                <iconify-icon icon="lucide:copy"></iconify-icon>
+              </button>
+            </div>
+          </div>
+
+          <div class="detail-toggle-section">
+            <div class="detail-toggle-info">
+              <h4>Skill Activation</h4>
+              <p>Toggle this skill's active status</p>
+            </div>
+            <div class="toggle-switch" id="detail-toggle"></div>
+          </div>
+
+          <div class="detail-footer">
+            <button class="btn-close-detail" data-close-modal>Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Apply Changes Confirmation Modal -->
+    <div class="modal-backdrop" id="apply-changes-modal">
+      <div class="modal-content" style="max-width: 450px;">
+        <div style="padding: 24px;">
+          <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+            <iconify-icon icon="lucide:alert-triangle" style="font-size: 24px; color: #f0ad4e;"></iconify-icon>
+            <h3 style="margin: 0; font-size: 18px; font-weight: bold;">Agents Running</h3>
+          </div>
+          <p style="margin: 0 0 12px 0; color: rgba(255,255,255,0.7);">The following agents are currently running tasks:</p>
+          <ul id="running-agents-list" style="list-style: none; padding: 0; margin: 0 0 16px 0;">
+            <!-- Dynamically populated -->
+          </ul>
+          <p style="margin: 0; color: #f0ad4e; font-weight: 500;">
+            Restarting will interrupt these tasks. Are you sure?
+          </p>
+          <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px;">
+            <button class="btn-cancel" data-close-modal>Cancel</button>
+            <button class="btn-danger" id="confirm-restart-btn">
+              <iconify-icon icon="lucide:zap"></iconify-icon>
+              Restart Anyway
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/tauri-bridge.js"></script>
+  <script>
+    // ========================================
+    // SKILL TREE CONTROLLER
+    // ========================================
+
+    const SkillTree = {
+      currentAgent: 'codex',
+      skills: {},
+      skillIcons: {},
+      zoom: 1,
+      activeNode: null,
+      currentDetailSkill: null, // Skill currently shown in detail modal
+      skillsChanged: false, // Track if any skills have been toggled
+
+      // Drag state for panning
+      isDragging: false,
+      dragStartX: 0,
+      dragStartY: 0,
+      scrollStartX: 0,
+      scrollStartY: 0,
+
+      // Map frontend agent IDs to backend IDs
+      agentIdMap: {
+        'codex': 'codex',
+        'claude-code': 'claude'
+      },
+
+      // Skill paths by agent for generating display paths
+      skillPathTemplates: {
+        'codex': {
+          personal: '~/.codex/skills/{name}/SKILL.md',
+          project: '.codex/skills/{name}/SKILL.md'
+        },
+        'claude-code': {
+          personal: '~/.claude/skills/{name}/SKILL.md',
+          project: '.claude/skills/{name}/SKILL.md'
+        }
+      },
+
+      // Available icons for the picker
+      iconList: [
+        'lucide:git-commit', 'lucide:file-search', 'lucide:bug', 'lucide:test-tube',
+        'lucide:rocket', 'lucide:file-text', 'lucide:code', 'lucide:zap',
+        'lucide:terminal', 'lucide:cpu', 'lucide:box', 'lucide:database',
+        'lucide:shield', 'lucide:layers', 'lucide:settings', 'lucide:cloud',
+        'lucide:key', 'lucide:eye', 'lucide:heart', 'lucide:coffee',
+        'lucide:briefcase', 'lucide:activity', 'lucide:anchor', 'lucide:bell',
+        'lucide:camera', 'lucide:compass', 'lucide:feather', 'lucide:gift',
+        'lucide:globe', 'lucide:link', 'lucide:map', 'lucide:music',
+        'lucide:paperclip', 'lucide:search', 'lucide:star', 'lucide:target',
+        'lucide:tool', 'lucide:wand', 'lucide:wifi', 'lucide:book',
+        'lucide:pen-tool', 'lucide:scissors', 'lucide:send', 'lucide:share',
+        'lucide:sparkles', 'lucide:sun', 'lucide:moon', 'lucide:lightning-bolt'
+      ],
+
+      init() {
+        this.loadSavedIcons();
+        this.bindEvents();
+        this.populateIconGrid();
+        this.loadSkills();
+
+        // Center the canvas view after a short delay
+        setTimeout(() => this.centerCanvas(), 200);
+      },
+
+      centerCanvas() {
+        const canvas = document.getElementById('tree-canvas');
+        const container = document.getElementById('tree-container');
+
+        // Center the scroll position
+        const scrollX = (container.offsetWidth - canvas.offsetWidth) / 2;
+        const scrollY = (container.offsetHeight - canvas.offsetHeight) / 2;
+
+        canvas.scrollLeft = Math.max(0, scrollX + 200);
+        canvas.scrollTop = Math.max(0, scrollY + 100);
+      },
+
+      // Load saved icon preferences from localStorage
+      loadSavedIcons() {
+        try {
+          const saved = localStorage.getItem('skillTreeIcons');
+          if (saved) {
+            this.skillIcons = JSON.parse(saved);
+          }
+        } catch (e) {
+          console.warn('[SkillTree] Failed to load saved icons:', e);
+        }
+      },
+
+      // Save icon preferences to localStorage
+      saveIcons() {
+        try {
+          localStorage.setItem('skillTreeIcons', JSON.stringify(this.skillIcons));
+        } catch (e) {
+          console.warn('[SkillTree] Failed to save icons:', e);
+        }
+      },
+
+      // Get the current project path from localStorage (saved by main app)
+      getProjectPath() {
+        try {
+          const settings = localStorage.getItem('taskSettings');
+          if (settings) {
+            const parsed = JSON.parse(settings);
+            return parsed.taskProjectPath || null;
+          }
+        } catch (e) {
+          console.warn('[SkillTree] Failed to get project path:', e);
+        }
+        return null;
+      },
+
+      // Generate display path for a skill
+      getSkillPath(agentId, skillName, source) {
+        const templates = this.skillPathTemplates[agentId];
+        if (!templates) return `~/${skillName}/SKILL.md`;
+        const template = templates[source] || templates.personal;
+        return template.replace('{name}', skillName);
+      },
+
+      bindEvents() {
+        console.log('[SkillTree] bindEvents() called');
+
+        // Agent switcher
+        document.querySelectorAll('.agent-switcher-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            document.querySelectorAll('.agent-switcher-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            this.currentAgent = btn.dataset.agent;
+            this.updateCenterAgent();
+            this.updateXpBar();
+            this.renderSkillTree();
+          });
+        });
+
+        // Refresh button
+        document.getElementById('refresh-btn').addEventListener('click', () => {
+          this.loadSkills();
+        });
+
+        // Back button - navigate to skills page
+        document.getElementById('back-btn').addEventListener('click', () => {
+          // Use sessionStorage to signal which page to show
+          sessionStorage.setItem('navigateTo', 'skillsPage');
+          window.location.href = 'menu.html';
+        });
+
+        // Zoom controls
+        document.getElementById('zoom-in').addEventListener('click', () => this.setZoom(this.zoom + 0.1));
+        document.getElementById('zoom-out').addEventListener('click', () => this.setZoom(this.zoom - 0.1));
+        document.getElementById('zoom-reset').addEventListener('click', () => this.setZoom(1));
+
+        // Drag to pan
+        const canvas = document.getElementById('tree-canvas');
+
+        canvas.addEventListener('mousedown', (e) => {
+          // Don't start drag if clicking on a skill node or button
+          if (e.target.closest('.skill-node') || e.target.closest('button')) return;
+
+          this.isDragging = true;
+          this.dragStartX = e.clientX;
+          this.dragStartY = e.clientY;
+          this.scrollStartX = canvas.scrollLeft;
+          this.scrollStartY = canvas.scrollTop;
+          canvas.style.cursor = 'grabbing';
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+          if (!this.isDragging) return;
+
+          const dx = e.clientX - this.dragStartX;
+          const dy = e.clientY - this.dragStartY;
+
+          canvas.scrollLeft = this.scrollStartX - dx;
+          canvas.scrollTop = this.scrollStartY - dy;
+        });
+
+        canvas.addEventListener('mouseup', () => {
+          this.isDragging = false;
+          canvas.style.cursor = 'grab';
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+          this.isDragging = false;
+          canvas.style.cursor = 'grab';
+        });
+
+        // Mouse wheel zoom
+        canvas.addEventListener('wheel', (e) => {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            const delta = e.deltaY > 0 ? -0.1 : 0.1;
+            this.setZoom(this.zoom + delta);
+          }
+        }, { passive: false });
+
+        // Modal close buttons
+        document.querySelectorAll('[data-close-modal]').forEach(btn => {
+          btn.addEventListener('click', () => this.closeAllModals());
+        });
+
+        // Escape key closes modals
+        window.addEventListener('keydown', (e) => {
+          if (e.key === 'Escape') this.closeAllModals();
+        });
+
+        // Icon search
+        document.getElementById('icon-search').addEventListener('input', (e) => {
+          this.filterIcons(e.target.value);
+        });
+
+        // Save icon selection
+        document.getElementById('save-icon-btn').addEventListener('click', () => {
+          this.saveIconSelection();
+        });
+
+        // Copy path button
+        document.getElementById('copy-path-btn').addEventListener('click', () => {
+          const path = document.getElementById('detail-path').textContent;
+          navigator.clipboard.writeText(path);
+        });
+
+        // Detail toggle click handler - use event delegation on modal
+        const detailModal = document.getElementById('skill-detail-modal');
+        console.log('[SkillTree] Binding click handler to modal for toggle delegation');
+        detailModal.addEventListener('click', async (e) => {
+          // Check if click was on the toggle or its children
+          const toggle = e.target.closest('#detail-toggle');
+          if (!toggle) return;
+
+          console.log('[SkillTree] *** Toggle click registered ***');
+          const skill = this.currentDetailSkill;
+          console.log('[SkillTree] Toggle clicked, skill:', skill);
+          console.log('[SkillTree] can_toggle value:', skill?.can_toggle, 'type:', typeof skill?.can_toggle);
+
+          if (!skill) {
+            console.warn('[SkillTree] No skill selected');
+            return;
+          }
+          if (!skill.can_toggle) {
+            console.warn('[SkillTree] Skill cannot be toggled (can_toggle is falsy)');
+            return;
+          }
+
+          const newEnabled = !skill.enabled;
+          const backendId = this.agentIdMap[this.currentAgent] || this.currentAgent;
+
+          // Disable toggle while processing
+          toggle.style.pointerEvents = 'none';
+          toggle.style.opacity = '0.5';
+
+          try {
+            await window.tauriBridge.ipcRenderer.invoke('toggleSkill', backendId, skill.name, newEnabled);
+
+            // Update skill state
+            skill.enabled = newEnabled;
+
+            // Update toggle visual
+            if (newEnabled) {
+              toggle.classList.remove('off');
+            } else {
+              toggle.classList.add('off');
+            }
+
+            // Update status badge
+            const statusEl = document.getElementById('detail-status');
+            if (newEnabled) {
+              statusEl.textContent = 'ACTIVE';
+              statusEl.className = 'detail-badge tooltip-badge status-active';
+            } else {
+              statusEl.textContent = 'DISABLED';
+              statusEl.className = 'detail-badge tooltip-badge status-disabled';
+            }
+
+            // Update tooltip
+            toggle.title = newEnabled ? 'Click to disable this skill' : 'Click to enable this skill';
+
+            // Refresh the tree to show updated state
+            this.renderSkillTree();
+
+            // Show the Apply Changes button
+            this.skillsChanged = true;
+            document.getElementById('apply-changes-btn').style.display = 'inline-flex';
+
+            console.log(`[SkillTree] Skill "${skill.name}" ${newEnabled ? 'enabled' : 'disabled'}`);
+
+          } catch (err) {
+            console.error('[SkillTree] Toggle failed:', err);
+            alert(`Failed to toggle skill: ${err}`);
+          } finally {
+            toggle.style.pointerEvents = '';
+            toggle.style.opacity = '';
+          }
+        });
+
+        // Apply Changes button click handler
+        document.getElementById('apply-changes-btn').addEventListener('click', async () => {
+          console.log('[SkillTree] Apply Changes clicked');
+          await this.handleApplyChanges();
+        });
+
+        // Confirmation modal "Restart Anyway" button
+        document.getElementById('confirm-restart-btn').addEventListener('click', async () => {
+          this.closeAllModals();
+          await this.performRestart();
+        });
+
+        console.log('[SkillTree] bindEvents() completed');
+      },
+
+      // Handle Apply Changes button click
+      async handleApplyChanges() {
+        try {
+          const runningTasks = await window.tauriBridge.ipcRenderer.invoke('getRunningTasks');
+          console.log('[SkillTree] Running tasks:', runningTasks);
+
+          if (runningTasks && runningTasks.length > 0) {
+            // Populate the modal with running agents
+            const runningList = document.getElementById('running-agents-list');
+            const displayNames = {
+              'claude-code': 'Claude Code',
+              'codex': 'Codex'
+            };
+            runningList.innerHTML = runningTasks.map(task => {
+              const displayName = displayNames[task.agent_id] || task.agent_id;
+              const title = task.title_summary || (task.prompt ? task.prompt.slice(0, 50) : 'Untitled task');
+              return `<li style="padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                <iconify-icon icon="lucide:circle" style="color: #28a745; font-size: 10px;"></iconify-icon>
+                <strong style="margin-left: 8px;">${displayName}</strong>: ${title}
+              </li>`;
+            }).join('');
+
+            // Show the confirmation modal
+            document.getElementById('apply-changes-modal').classList.add('active');
+          } else {
+            // No running tasks, proceed directly
+            await this.performRestart();
+          }
+        } catch (err) {
+          console.error('[SkillTree] Error checking running tasks:', err);
+          // If we can't check, assume no running tasks and proceed
+          await this.performRestart();
+        }
+      },
+
+      // Perform the actual restart
+      async performRestart() {
+        console.log('[SkillTree] Restarting all agents...');
+        const applyBtn = document.getElementById('apply-changes-btn');
+
+        applyBtn.disabled = true;
+        applyBtn.innerHTML = '<iconify-icon icon="lucide:loader-2" class="spin"></iconify-icon> Restarting...';
+
+        try {
+          const restartedIds = await window.tauriBridge.ipcRenderer.invoke('restartAllAgents');
+          console.log('[SkillTree] Restarted agents for tasks:', restartedIds);
+
+          // Reset state
+          this.skillsChanged = false;
+
+          // Hide the button after a short delay
+          setTimeout(() => {
+            applyBtn.style.display = 'none';
+            applyBtn.disabled = false;
+            applyBtn.innerHTML = '<iconify-icon icon="lucide:zap"></iconify-icon><span>Apply Changes</span>';
+          }, 500);
+
+          // Show success message
+          const count = restartedIds?.length || 0;
+          if (count > 0) {
+            alert(`Restarted ${count} agent session${count !== 1 ? 's' : ''}. Skill changes are now active.`);
+          } else {
+            alert('Skill changes saved. They will apply to new agent sessions.');
+          }
+        } catch (err) {
+          console.error('[SkillTree] Restart failed:', err);
+          applyBtn.disabled = false;
+          applyBtn.innerHTML = '<iconify-icon icon="lucide:zap"></iconify-icon><span>Apply Changes</span>';
+          alert(`Failed to restart agents: ${err}`);
+        }
+      },
+
+      async loadSkills() {
+        document.getElementById('loading-overlay').style.display = 'flex';
+        document.getElementById('empty-state').style.display = 'none';
+
+        const projectPath = this.getProjectPath();
+        const agents = ['codex', 'claude-code'];
+
+        try {
+          // Load skills for all agents via Tauri bridge
+          if (window.tauriBridge && window.tauriBridge.ipcRenderer) {
+            const skillPromises = agents.map(async (agentId) => {
+              const backendId = this.agentIdMap[agentId] || agentId;
+              try {
+                const skills = await window.tauriBridge.ipcRenderer.invoke('getAgentSkills', backendId, projectPath);
+                return { agentId, skills: skills || [] };
+              } catch (err) {
+                console.warn(`[SkillTree] Failed to load skills for ${agentId}:`, err);
+                return { agentId, skills: [] };
+              }
+            });
+
+            const results = await Promise.all(skillPromises);
+
+            // Transform skills into the format expected by the tree
+            this.skills = {};
+            results.forEach(({ agentId, skills }) => {
+              this.skills[agentId] = {
+                personal: [],
+                project: []
+              };
+
+              skills.forEach(skill => {
+                const category = skill.source || 'personal';
+                const transformed = {
+                  name: skill.name,
+                  description: skill.description || 'No description available',
+                  path: skill.path || this.getSkillPath(agentId, skill.name, category),
+                  triggers: skill.triggers || [],
+                  icon: this.skillIcons[`${agentId}-${skill.name}`] || this.getDefaultIcon(skill.name),
+                  enabled: skill.enabled !== false, // Default to true if not specified
+                  can_toggle: skill.can_toggle !== false, // Default to true if not specified
+                  category: category
+                };
+
+                if (category === 'project') {
+                  this.skills[agentId].project.push(transformed);
+                } else {
+                  this.skills[agentId].personal.push(transformed);
+                }
+              });
+            });
+
+            console.log('[SkillTree] Loaded skills:', this.skills);
+          } else {
+            console.warn('[SkillTree] Tauri bridge not available, using mock data');
+            this.skills = this.getMockSkills();
+          }
+
+          this.updateCounts();
+          this.renderSkillTree();
+        } catch (error) {
+          console.error('[SkillTree] Failed to load skills:', error);
+          this.skills = this.getMockSkills();
+          this.updateCounts();
+          this.renderSkillTree();
+        }
+
+        document.getElementById('loading-overlay').style.display = 'none';
+      },
+
+      // Get a default icon based on skill name keywords
+      getDefaultIcon(skillName) {
+        const iconMap = {
+          'commit': 'lucide:git-commit',
+          'git': 'lucide:git-branch',
+          'review': 'lucide:file-search',
+          'pr': 'lucide:git-pull-request',
+          'debug': 'lucide:bug',
+          'test': 'lucide:test-tube',
+          'docs': 'lucide:file-text',
+          'document': 'lucide:file-text',
+          'code': 'lucide:code',
+          'refactor': 'lucide:code',
+          'search': 'lucide:search',
+          'find': 'lucide:search',
+          'plan': 'lucide:target',
+          'brainstorm': 'lucide:sparkles',
+          'analyze': 'lucide:activity',
+          'build': 'lucide:hammer',
+          'deploy': 'lucide:rocket',
+          'security': 'lucide:shield',
+          'auth': 'lucide:key',
+          'database': 'lucide:database',
+          'api': 'lucide:cloud',
+          'config': 'lucide:settings',
+          'fix': 'lucide:wrench',
+          'lint': 'lucide:check-circle',
+          'format': 'lucide:align-left',
+          'terminal': 'lucide:terminal',
+          'shell': 'lucide:terminal',
+          'hook': 'lucide:anchor',
+          'workflow': 'lucide:layers'
+        };
+
+        const lowerName = skillName.toLowerCase();
+        for (const [keyword, icon] of Object.entries(iconMap)) {
+          if (lowerName.includes(keyword)) {
+            return icon;
+          }
+        }
+        return 'lucide:box';
+      },
+
+      getMockSkills() {
+        return {
+          codex: {
+            personal: [
+              { name: 'commit', description: 'Auto-generate semantic git commits', path: '~/.codex/skills/commit/SKILL.md', icon: 'lucide:git-commit', enabled: true, can_toggle: true, category: 'personal' },
+              { name: 'review-pr', description: 'Review pull requests for issues', path: '~/.codex/skills/review-pr/SKILL.md', icon: 'lucide:file-search', enabled: true, can_toggle: true, category: 'personal' },
+              { name: 'docs', description: 'Generate documentation from code', path: '~/.codex/skills/docs/SKILL.md', icon: 'lucide:file-text', enabled: true, can_toggle: true, category: 'personal' },
+              { name: 'analyze', description: 'Analyze codebase structure', path: '~/.codex/skills/analyze/SKILL.md', icon: 'lucide:activity', enabled: true, can_toggle: true, category: 'personal' },
+            ],
+            project: [
+              { name: 'debug', description: 'Interactive debugging assistant', path: '.codex/skills/debug/SKILL.md', icon: 'lucide:bug', enabled: true, can_toggle: false, category: 'project' },
+              { name: 'test', description: 'Generate unit and integration tests', path: '.codex/skills/test/SKILL.md', icon: 'lucide:test-tube', enabled: true, can_toggle: false, category: 'project' },
+            ]
+          },
+          'claude-code': {
+            personal: [
+              { name: 'brainstorm', description: 'Collaborative brainstorming sessions', path: '~/.claude/skills/brainstorm/SKILL.md', icon: 'lucide:sparkles', enabled: true, can_toggle: true, category: 'personal' },
+              { name: 'refactor', description: 'Code refactoring suggestions', path: '~/.claude/skills/refactor/SKILL.md', icon: 'lucide:code', enabled: true, can_toggle: true, category: 'personal' },
+            ],
+            project: [
+              { name: 'plan', description: 'Project planning and task breakdown', path: '.claude/skills/plan/SKILL.md', icon: 'lucide:target', enabled: true, can_toggle: false, category: 'project' },
+            ]
+          }
+        };
+      },
+
+      updateCounts() {
+        const agents = ['codex', 'claude-code'];
+
+        // Update agent switcher counts
+        agents.forEach(agent => {
+          const agentSkills = this.skills[agent] || { personal: [], project: [] };
+          const count = (agentSkills.personal?.length || 0) + (agentSkills.project?.length || 0);
+
+          const countEl = document.getElementById(`${agent === 'claude-code' ? 'claude' : agent}-count`);
+          if (countEl) countEl.textContent = count;
+        });
+
+        // Update XP bar with current agent's stats
+        this.updateXpBar();
+      },
+
+      updateXpBar() {
+        const agentSkills = this.skills[this.currentAgent] || { personal: [], project: [] };
+        const personalCount = agentSkills.personal?.length || 0;
+        const projectCount = agentSkills.project?.length || 0;
+        const totalCount = personalCount + projectCount;
+
+        const agentNames = {
+          'codex': 'Codex',
+          'claude-code': 'Claude Code'
+        };
+
+        document.getElementById('total-skills').innerHTML = `${totalCount} Skills <span>for ${agentNames[this.currentAgent]}</span>`;
+        document.getElementById('skills-ratio').textContent = `${personalCount} personal / ${projectCount} project`;
+
+        // XP bar shows ratio of personal to project (or just full if no project skills)
+        const fillPercent = totalCount > 0 ? 100 : 0;
+        document.getElementById('xp-fill').style.width = `${fillPercent}%`;
+      },
+
+      updateCenterAgent() {
+        const agentIcons = {
+          'codex': 'images/codex.svg',
+          'claude-code': 'images/claude-color.png'
+        };
+
+        document.getElementById('center-agent-icon').src = agentIcons[this.currentAgent];
+      },
+
+      renderSkillTree() {
+        const container = document.getElementById('skill-nodes-container');
+        const svg = document.getElementById('connections-svg');
+        container.innerHTML = '';
+
+        // Clear existing connection lines (keep defs)
+        const defs = svg.querySelector('defs');
+        svg.innerHTML = '';
+        svg.appendChild(defs);
+
+        const agentSkills = this.skills[this.currentAgent] || { personal: [], project: [] };
+        const allSkills = [
+          ...(agentSkills.personal || []).map(s => ({ ...s, category: 'personal' })),
+          ...(agentSkills.project || []).map(s => ({ ...s, category: 'project' }))
+        ];
+
+        if (allSkills.length === 0) {
+          document.getElementById('empty-state').style.display = 'block';
+          return;
+        }
+
+        document.getElementById('empty-state').style.display = 'none';
+
+        // Calculate positions in a multi-ring radial layout
+        const centerX = 900;
+        const centerY = 700;
+
+        // Determine number of rings based on skill count
+        const maxPerRing = 16; // Max skills per ring for comfortable spacing
+        const skillCount = allSkills.length;
+        const numRings = Math.ceil(skillCount / maxPerRing);
+
+        // Ring configuration
+        const baseRadius = 160;
+        const ringSpacing = 100;
+
+        // Distribute skills across rings
+        let skillIndex = 0;
+        for (let ring = 0; ring < numRings; ring++) {
+          const radius = baseRadius + (ring * ringSpacing);
+          const skillsInThisRing = Math.min(maxPerRing, skillCount - skillIndex);
+
+          // Stagger odd rings slightly for better visual distribution
+          const angleOffset = ring % 2 === 1 ? Math.PI / skillsInThisRing : 0;
+
+          for (let i = 0; i < skillsInThisRing; i++) {
+            if (skillIndex >= allSkills.length) break;
+
+            const skill = allSkills[skillIndex];
+            const angle = (i / skillsInThisRing) * 2 * Math.PI - Math.PI / 2 + angleOffset;
+            const x = centerX + radius * Math.cos(angle) - 40;
+            const y = centerY + radius * Math.sin(angle) - 45;
+
+            // Create skill node with angle for smart label positioning
+            const node = this.createSkillNode(skill, x, y, skillIndex, angle);
+            container.appendChild(node);
+
+            // Draw connection line to center (or to previous ring node if in outer ring)
+            const line = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+            const gradient = skill.category === 'project' ? 'url(#line-gradient-orange)' : 'url(#line-gradient)';
+
+            // Connect to center for first ring, or towards center for outer rings
+            const targetX = centerX;
+            const targetY = centerY;
+
+            line.setAttribute('d', `M ${targetX} ${targetY} L ${x + 40} ${y + 45}`);
+            line.setAttribute('stroke', gradient);
+            line.setAttribute('stroke-width', '1.5');
+            line.setAttribute('fill', 'none');
+            line.setAttribute('opacity', ring === 0 ? '1' : String(0.7 - ring * 0.15));
+            line.classList.add('energy-line');
+            svg.appendChild(line);
+
+            skillIndex++;
+          }
+        }
+      },
+
+      createSkillNode(skill, x, y, index, angle) {
+        const node = document.createElement('div');
+
+        // Determine label position based on angle
+        // Normalize angle to 0-360 range
+        const normalizedAngle = ((angle * 180 / Math.PI) + 360) % 360;
+        let labelPosition;
+
+        if (normalizedAngle >= 315 || normalizedAngle < 45) {
+          labelPosition = 'label-right';  // Right side of circle
+        } else if (normalizedAngle >= 45 && normalizedAngle < 135) {
+          labelPosition = 'label-bottom'; // Bottom of circle
+        } else if (normalizedAngle >= 135 && normalizedAngle < 225) {
+          labelPosition = 'label-left';   // Left side of circle
+        } else {
+          labelPosition = 'label-top';    // Top of circle
+        }
+
+        const disabledClass = !skill.enabled ? 'skill-disabled' : '';
+        node.className = `skill-node unlocked ${skill.category === 'project' ? 'project' : ''} ${labelPosition} ${disabledClass}`;
+        node.style.left = `${x}px`;
+        node.style.top = `${y}px`;
+        node.dataset.skillName = skill.name;
+        node.dataset.skillPath = skill.path;
+        node.dataset.skillDesc = skill.description;
+        node.dataset.skillCategory = skill.category;
+        node.dataset.skillIndex = index;
+        node.dataset.skillTriggers = JSON.stringify(skill.triggers || []);
+        node.dataset.skillEnabled = skill.enabled;
+        node.dataset.skillCanToggle = skill.can_toggle;
+
+        const savedIcon = this.skillIcons[`${this.currentAgent}-${skill.name}`] || skill.icon || 'lucide:box';
+
+        node.innerHTML = `
+          <button class="edit-btn" title="Change icon">
+            <iconify-icon icon="lucide:pencil" style="font-size: 12px;"></iconify-icon>
+          </button>
+          <div class="skill-icon-wrapper">
+            <iconify-icon icon="${savedIcon}"></iconify-icon>
+          </div>
+          <span class="skill-label"><span class="skill-category-indicator ${skill.category}"></span>${skill.name}</span>
+        `;
+
+        // Tooltip events
+        node.addEventListener('mouseenter', (e) => this.showTooltip(skill, savedIcon, e));
+        node.addEventListener('mousemove', (e) => this.updateTooltipPosition(e));
+        node.addEventListener('mouseleave', () => this.hideTooltip());
+
+        // Click events
+        node.addEventListener('click', (e) => {
+          if (e.target.closest('.edit-btn')) {
+            this.activeNode = node;
+            this.openIconPicker();
+          } else {
+            this.openSkillDetail(skill, savedIcon);
+          }
+        });
+
+        return node;
+      },
+
+      showTooltip(skill, icon, e) {
+        const tooltip = document.getElementById('skill-tooltip');
+        document.getElementById('tooltip-icon').setAttribute('icon', icon);
+        document.getElementById('tooltip-title').textContent = skill.name;
+        document.getElementById('tooltip-category').textContent = skill.category;
+
+        // Set status based on enabled state
+        const statusEl = document.getElementById('tooltip-status');
+        if (skill.enabled) {
+          statusEl.textContent = 'Active';
+          statusEl.className = 'tooltip-badge status-active';
+        } else {
+          statusEl.textContent = 'Disabled';
+          statusEl.className = 'tooltip-badge status-disabled';
+        }
+
+        document.getElementById('tooltip-desc').textContent = skill.description;
+        document.getElementById('tooltip-path').textContent = skill.path;
+
+        tooltip.classList.add('visible');
+        this.updateTooltipPosition(e);
+      },
+
+      updateTooltipPosition(e) {
+        const tooltip = document.getElementById('skill-tooltip');
+        const x = Math.min(e.clientX + 20, window.innerWidth - tooltip.offsetWidth - 20);
+        const y = Math.min(e.clientY + 20, window.innerHeight - tooltip.offsetHeight - 20);
+        tooltip.style.left = `${x}px`;
+        tooltip.style.top = `${y}px`;
+      },
+
+      hideTooltip() {
+        document.getElementById('skill-tooltip').classList.remove('visible');
+      },
+
+      populateIconGrid() {
+        const grid = document.getElementById('icon-grid');
+        grid.innerHTML = '';
+
+        this.iconList.forEach(icon => {
+          const item = document.createElement('div');
+          item.className = 'icon-grid-item';
+          item.dataset.icon = icon;
+          item.innerHTML = `<iconify-icon icon="${icon}"></iconify-icon>`;
+
+          item.addEventListener('click', () => {
+            document.querySelectorAll('.icon-grid-item').forEach(i => i.classList.remove('selected'));
+            item.classList.add('selected');
+          });
+
+          grid.appendChild(item);
+        });
+      },
+
+      filterIcons(query) {
+        const grid = document.getElementById('icon-grid');
+        const items = grid.querySelectorAll('.icon-grid-item');
+        const lowerQuery = query.toLowerCase();
+
+        items.forEach(item => {
+          const iconName = item.dataset.icon.toLowerCase();
+          item.style.display = iconName.includes(lowerQuery) ? 'flex' : 'none';
+        });
+      },
+
+      openIconPicker() {
+        document.getElementById('icon-picker-modal').classList.add('active');
+        document.getElementById('icon-search').value = '';
+        this.filterIcons('');
+        document.querySelectorAll('.icon-grid-item').forEach(i => i.classList.remove('selected'));
+      },
+
+      saveIconSelection() {
+        const selected = document.querySelector('.icon-grid-item.selected');
+        if (selected && this.activeNode) {
+          const newIcon = selected.dataset.icon;
+          const skillName = this.activeNode.dataset.skillName;
+
+          // Save icon preference to memory and localStorage
+          this.skillIcons[`${this.currentAgent}-${skillName}`] = newIcon;
+          this.saveIcons();
+
+          // Update the node
+          const iconEl = this.activeNode.querySelector('.skill-icon-wrapper iconify-icon');
+          iconEl.setAttribute('icon', newIcon);
+        }
+        this.closeAllModals();
+      },
+
+      openSkillDetail(skill, icon) {
+        // Store reference to currently viewed skill
+        this.currentDetailSkill = skill;
+        console.log('[SkillTree] Opening skill detail:', skill);
+        console.log('[SkillTree] Skill can_toggle:', skill.can_toggle, 'enabled:', skill.enabled);
+
+        document.getElementById('detail-icon').setAttribute('icon', icon);
+        document.getElementById('detail-title').textContent = skill.name;
+        document.getElementById('detail-category').textContent = skill.category === 'project' ? 'PROJECT' : 'PERSONAL';
+        document.getElementById('detail-category').className = `detail-badge tooltip-badge category`;
+
+        // Set status based on enabled state
+        const statusEl = document.getElementById('detail-status');
+        if (skill.enabled) {
+          statusEl.textContent = 'ACTIVE';
+          statusEl.className = 'detail-badge tooltip-badge status-active';
+        } else {
+          statusEl.textContent = 'DISABLED';
+          statusEl.className = 'detail-badge tooltip-badge status-disabled';
+        }
+
+        document.getElementById('detail-description').textContent = skill.description;
+        document.getElementById('detail-path').textContent = skill.path;
+
+        // Set toggle state
+        const toggle = document.getElementById('detail-toggle');
+        if (skill.enabled) {
+          toggle.classList.remove('off');
+        } else {
+          toggle.classList.add('off');
+        }
+
+        // Disable toggle for project skills
+        if (!skill.can_toggle) {
+          toggle.classList.add('disabled');
+          toggle.title = 'Project skills cannot be toggled';
+        } else {
+          toggle.classList.remove('disabled');
+          toggle.title = skill.enabled ? 'Click to disable this skill' : 'Click to enable this skill';
+        }
+
+        // Handle triggers section
+        const triggersSection = document.getElementById('triggers-section');
+        const triggersContainer = document.getElementById('detail-triggers');
+        const triggers = skill.triggers || [];
+
+        if (triggers.length > 0) {
+          triggersSection.style.display = 'block';
+          triggersContainer.innerHTML = triggers.map(trigger =>
+            `<span style="background: rgba(247, 138, 151, 0.1); border: 1px solid rgba(247, 138, 151, 0.2); color: var(--pink-primary); padding: 4px 10px; border-radius: 6px; font-size: 11px; font-family: 'SF Mono', Monaco, monospace;">/${trigger}</span>`
+          ).join('');
+        } else {
+          triggersSection.style.display = 'none';
+          triggersContainer.innerHTML = '';
+        }
+
+        document.getElementById('skill-detail-modal').classList.add('active');
+      },
+
+      closeAllModals() {
+        document.querySelectorAll('.modal-backdrop').forEach(m => m.classList.remove('active'));
+        this.activeNode = null;
+      },
+
+      setZoom(level) {
+        this.zoom = Math.max(0.5, Math.min(2, level));
+        document.getElementById('tree-container').style.transform = `scale(${this.zoom})`;
+        document.getElementById('tree-container').style.transformOrigin = 'center center';
+      }
+    };
+
+    // Initialize on load
+    document.addEventListener('DOMContentLoaded', () => {
+      SkillTree.init();
+    });
+  </script>
+</body>
+</html>
