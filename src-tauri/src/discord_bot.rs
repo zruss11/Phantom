@@ -7,8 +7,7 @@ use serenity::builder::{
     CreateMessage, CreateThread,
 };
 use serenity::http::Http;
-use serenity::model::application::interaction::Interaction;
-use serenity::model::application::component::ButtonStyle;
+use serenity::all::{Interaction, ButtonStyle};
 use serenity::model::channel::Message;
 use serenity::model::id::{ChannelId, UserId};
 use serenity::prelude::*;

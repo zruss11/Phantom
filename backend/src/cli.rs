@@ -766,7 +766,18 @@ impl CodexAppServerClient {
                         .unwrap_or(Value::Array(vec![]));
 
                     let modes: Vec<CodexModeInfo> =
-                        serde_json::from_value(data).unwrap_or_default();
+                        serde_json::from_value(data.clone()).unwrap_or_default();
+
+                    // Backfill `id` from `mode` when needed (Codex uses `mode` field).
+                    let modes: Vec<CodexModeInfo> = modes
+                        .into_iter()
+                        .map(|mut mode| {
+                            if mode.id.is_none() {
+                                mode.id = mode.mode.clone();
+                            }
+                            mode
+                        })
+                        .collect();
 
                     if !modes.is_empty() {
                         return Ok(Some(modes));
@@ -869,7 +880,7 @@ pub struct CodexModelInfo {
 /// Mode info returned by Codex app-server mode/list
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CodexModeInfo {
-    #[serde(default, alias = "mode")]
+    #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
     pub mode: Option<String>,
