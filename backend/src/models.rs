@@ -269,10 +269,13 @@ pub async fn get_codex_modes(config: AgentLaunchConfig) -> Result<Vec<ModeOption
     // Convert CodexModeInfo to ModeOption
     let mut modes: Vec<ModeOption> = codex_modes
         .into_iter()
-        .map(|m| ModeOption {
-            value: m.id,
-            name: m.name,
-            description: m.description,
+        .filter_map(|m| {
+            let value = m.id.or(m.mode)?;
+            Some(ModeOption {
+                value,
+                name: m.name,
+                description: m.description,
+            })
         })
         .collect();
 
@@ -290,8 +293,13 @@ pub async fn get_codex_modes(config: AgentLaunchConfig) -> Result<Vec<ModeOption
 
 impl From<&CodexModeInfo> for ModeOption {
     fn from(mode: &CodexModeInfo) -> Self {
+        let value = mode
+            .id
+            .clone()
+            .or_else(|| mode.mode.clone())
+            .unwrap_or_default();
         ModeOption {
-            value: mode.id.clone(),
+            value,
             name: mode.name.clone(),
             description: mode.description.clone(),
         }

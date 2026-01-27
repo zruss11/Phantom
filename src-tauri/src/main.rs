@@ -35,6 +35,8 @@ use std::time::Instant;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, Manager, Position, State, WebviewUrl, WebviewWindow,
 };
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
@@ -390,6 +392,7 @@ struct Settings {
 pub(crate) struct PendingUserInput {
     request_id: String,
     questions: Vec<UserInputQuestion>,
+    answers: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2647,6 +2650,8 @@ async fn start_task(
                 StreamingUpdate::PermissionRequest { .. } => true,
                 // User input requests are always important - user needs to answer
                 StreamingUpdate::UserInputRequest { .. } => true,
+                // Plan updates should surface immediately
+                StreamingUpdate::PlanUpdate { .. } => true,
                 // Text/reasoning chunks are throttled to prevent UI overload
                 StreamingUpdate::TextChunk { .. } | StreamingUpdate::ReasoningChunk { .. } => {
                     last_status_update.elapsed() >= throttle_duration
@@ -2674,6 +2679,9 @@ async fn start_task(
                         }
                         StreamingUpdate::UserInputRequest { .. } => {
                             ("Waiting for input...".to_string(), "#4ade80")
+                        }
+                        StreamingUpdate::PlanUpdate { .. } => {
+                            ("Plan updated".to_string(), "white")
                         }
                         StreamingUpdate::AvailableCommands { .. } => {
                             // Handled separately, won't reach here due to should_emit_status check
@@ -2756,6 +2764,29 @@ async fn start_task(
                                 &ts,
                             )
                         }
+                        StreamingUpdate::PlanUpdate {
+                            turn_id,
+                            explanation,
+                            steps,
+                        } => {
+                            let payload = serde_json::json!({
+                                "turnId": turn_id,
+                                "explanation": explanation,
+                                "plan": steps
+                            });
+                            let content = serde_json::to_string(&payload).unwrap_or_default();
+                            db::save_message(
+                                &conn,
+                                &task_id_clone,
+                                "plan_update",
+                                Some(&content),
+                                None,
+                                None,
+                                None,
+                                None,
+                                &ts,
+                            )
+                        }
                         StreamingUpdate::AvailableCommands { .. } => Ok(0),
                     };
                 }
@@ -2765,6 +2796,7 @@ async fn start_task(
                 let pending = PendingUserInput {
                     request_id: request_id.clone(),
                     questions: questions.clone(),
+                    answers: std::collections::HashMap::new(),
                 };
                 let state_clone = state_for_stream.clone();
                 let task_id = task_id_clone.clone();
@@ -2849,6 +2881,19 @@ async fn start_task(
                             "message_type": "user_input_request",
                             "request_id": request_id,
                             "questions": questions
+                        })
+                    }
+                    StreamingUpdate::PlanUpdate {
+                        turn_id,
+                        explanation,
+                        steps,
+                    } => {
+                        serde_json::json!({
+                            "type": "streaming",
+                            "message_type": "plan_update",
+                            "turn_id": turn_id,
+                            "explanation": explanation,
+                            "plan": steps
                         })
                     }
                 };
@@ -4790,10 +4835,22 @@ async fn post_discord_user_input_request(
             }
         }
     }
-    body.push_str("\nReply with `question_id: answer` per line (or a single answer for one question).");
+    body.push_str("\nUse the buttons below when available, or reply with `question_id: answer` per line (or a single answer for one question).");
 
     if let Some(handle) = handle {
         let _ = discord_bot::post_to_thread(&handle, state.db.clone(), task_id, &body).await;
+        for q in questions {
+            if q.options.as_ref().map(|o| !o.is_empty()).unwrap_or(false) {
+                let _ = discord_bot::post_user_input_question(
+                    &handle,
+                    state.db.clone(),
+                    task_id,
+                    request_id,
+                    q,
+                )
+                .await;
+            }
+        }
     }
 }
 
@@ -5259,6 +5316,7 @@ pub(crate) async fn send_chat_message_internal(
                 StreamingUpdate::Status { .. } => true,
                 StreamingUpdate::PermissionRequest { .. } => true,
                 StreamingUpdate::UserInputRequest { .. } => true,
+                StreamingUpdate::PlanUpdate { .. } => true,
                 StreamingUpdate::TextChunk { .. } | StreamingUpdate::ReasoningChunk { .. } => {
                     last_status_update.elapsed() >= throttle_duration
                 }
@@ -5285,6 +5343,9 @@ pub(crate) async fn send_chat_message_internal(
                         StreamingUpdate::UserInputRequest { .. } => {
                             ("Waiting for input...".to_string(), "#4ade80")
                         }
+                        StreamingUpdate::PlanUpdate { .. } => {
+                            ("Plan updated".to_string(), "white")
+                        }
                         StreamingUpdate::AvailableCommands { .. } => continue,
                     };
                     let _ = main_window.emit(
@@ -5299,6 +5360,7 @@ pub(crate) async fn send_chat_message_internal(
                 let pending = PendingUserInput {
                     request_id: request_id.clone(),
                     questions: questions.clone(),
+                    answers: std::collections::HashMap::new(),
                 };
                 let state_clone = state_for_stream.clone();
                 let task_id = task_id_streaming.clone();
@@ -5383,6 +5445,19 @@ pub(crate) async fn send_chat_message_internal(
                             "message_type": "user_input_request",
                             "request_id": request_id,
                             "questions": questions
+                        })
+                    }
+                    StreamingUpdate::PlanUpdate {
+                        turn_id,
+                        explanation,
+                        steps,
+                    } => {
+                        serde_json::json!({
+                            "type": "streaming",
+                            "message_type": "plan_update",
+                            "turn_id": turn_id,
+                            "explanation": explanation,
+                            "plan": steps
                         })
                     }
                 };
@@ -5967,6 +6042,58 @@ async fn get_attachment_base64(relative_path: String) -> Result<String, String> 
     Ok(STANDARD.encode(&data))
 }
 
+// =============================================================================
+// AUTO-UPDATE COMMANDS
+// =============================================================================
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+async fn check_for_updates(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let info = serde_json::json!({
+                "version": update.version,
+                "notes": update.body,
+                "date": update.date.map(|d| d.to_string())
+            });
+            // Emit event for frontend
+            let _ = app.emit("update-available", &info);
+            Ok(Some(info))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => Err(format!("Update check failed: {}", e)),
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    let updater = app.updater().map_err(|e| e.to_string())?;
+
+    if let Some(update) = updater.check().await.map_err(|e| e.to_string())? {
+        let app_clone = app.clone();
+
+        update
+            .download_and_install(
+                move |downloaded, total| {
+                    if let Some(total) = total {
+                        let progress = (downloaded as f64 / total as f64) * 100.0;
+                        let _ = app_clone.emit("update-progress", progress);
+                    }
+                },
+                || {
+                    // Called before the installation - we could emit an event here
+                },
+            )
+            .await
+            .map_err(|e| format!("Install failed: {}", e))?;
+    }
+
+    Ok(())
+}
+
 fn main() {
     // Initialize logging first - keep the guard alive for the app lifetime
     let _log_guard = match logger::init_logging() {
@@ -6023,6 +6150,7 @@ fn main() {
                 })
                 .build(),
         )
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
             let shortcut = "CmdOrCtrl+R"
@@ -6146,7 +6274,10 @@ fn main() {
             save_attachment,
             get_pending_attachments,
             delete_attachment,
-            get_attachment_base64
+            get_attachment_base64,
+            // Auto-update commands
+            check_for_updates,
+            install_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

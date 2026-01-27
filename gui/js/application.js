@@ -4960,3 +4960,120 @@ init();
     init();
   }
 })();
+
+// =============================================================================
+// AUTO-UPDATE HANDLING
+// =============================================================================
+(function() {
+  'use strict';
+
+  var tauri = window.__TAURI__ || null;
+  var tauriCore = tauri && tauri.core ? tauri.core : null;
+  var tauriInvoke = tauriCore && tauriCore.invoke ? tauriCore.invoke : null;
+  var tauriEvents = tauri && tauri.event ? tauri.event : null;
+
+  var updateAvailable = null;
+
+  // Check for updates on app startup (after a short delay)
+  setTimeout(async function() {
+    if (!tauriInvoke) {
+      console.log('[Auto-Update] Not available in browser mode');
+      return;
+    }
+    try {
+      console.log('[Auto-Update] Checking for updates...');
+      var result = await tauriInvoke('check_for_updates');
+      if (result) {
+        console.log('[Auto-Update] Update available:', result.version);
+        showUpdateToast(result.version, result.notes);
+      } else {
+        console.log('[Auto-Update] No updates available');
+      }
+    } catch (err) {
+      console.log('[Auto-Update] Check failed:', err);
+    }
+  }, 3000); // Check 3 seconds after startup
+
+  // Listen for update-available event from backend
+  if (tauriEvents && typeof tauriEvents.listen === 'function') {
+    tauriEvents.listen('update-available', function(event) {
+      var payload = event.payload || {};
+      console.log('[Auto-Update] update-available event:', payload);
+      showUpdateToast(payload.version, payload.notes);
+    });
+
+    // Listen for download progress
+    tauriEvents.listen('update-progress', function(event) {
+      var progress = event.payload;
+      console.log('[Auto-Update] Download progress:', progress);
+      updateProgressBar(progress);
+    });
+  }
+
+  function showUpdateToast(version, notes) {
+    updateAvailable = { version: version, notes: notes };
+
+    var versionEl = document.getElementById('update-version');
+    var toastEl = document.getElementById('update-toast');
+    var progressBarEl = document.getElementById('update-progress-bar');
+    var installBtn = document.getElementById('update-install-btn');
+
+    if (versionEl) versionEl.textContent = version || 'unknown';
+    if (toastEl) toastEl.classList.remove('hidden');
+    if (progressBarEl) progressBarEl.classList.add('hidden');
+    if (installBtn) {
+      installBtn.disabled = false;
+      installBtn.textContent = 'Install';
+    }
+  }
+
+  function hideUpdateToast() {
+    var toastEl = document.getElementById('update-toast');
+    if (toastEl) toastEl.classList.add('hidden');
+  }
+
+  function updateProgressBar(percent) {
+    var fillEl = document.getElementById('update-progress-fill');
+    if (fillEl) fillEl.style.width = percent + '%';
+  }
+
+  // Install button click handler
+  document.addEventListener('DOMContentLoaded', function() {
+    var installBtn = document.getElementById('update-install-btn');
+    var dismissBtn = document.getElementById('update-dismiss-btn');
+
+    if (installBtn) {
+      installBtn.addEventListener('click', async function() {
+        if (!tauriInvoke) return;
+
+        installBtn.disabled = true;
+        installBtn.textContent = 'Installing...';
+
+        // Show progress bar
+        var progressBarEl = document.getElementById('update-progress-bar');
+        if (progressBarEl) progressBarEl.classList.remove('hidden');
+        updateProgressBar(0);
+
+        try {
+          await tauriInvoke('install_update');
+          // App will restart automatically after install
+        } catch (err) {
+          console.error('[Auto-Update] Install failed:', err);
+          installBtn.disabled = false;
+          installBtn.textContent = 'Retry';
+          if (typeof sendNotification === 'function') {
+            sendNotification('Update failed: ' + err, 'red');
+          }
+        }
+      });
+    }
+
+    if (dismissBtn) {
+      dismissBtn.addEventListener('click', function() {
+        hideUpdateToast();
+      });
+    }
+  });
+
+  console.log('[Auto-Update] Module initialized');
+})();

@@ -4050,3 +4050,209 @@ input:checked + .slider:before {
 .cost-cell {
   display: none !important;
 }
+
+/* =============================================================================
+   Plan panel (Codex plan mode)
+   ============================================================================= */
+.chat-message.plan-panel {
+  background: transparent;
+  padding: 0;
+}
+
+.plan-card {
+  background: linear-gradient(180deg, rgba(44, 30, 38, 0.96), rgba(28, 18, 24, 0.96));
+  border: 1px solid rgba(247, 138, 151, 0.25);
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.plan-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: #f8d9df;
+}
+
+.plan-header i {
+  color: #f78a97;
+}
+
+.plan-progress {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.6);
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.plan-explanation {
+  margin-top: 10px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.plan-steps {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plan-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.plan-step i {
+  width: 16px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.plan-step.completed {
+  color: #b9f1d0;
+}
+
+.plan-step.completed i {
+  color: #41b588;
+}
+
+.plan-step.in-progress {
+  color: #f8d9df;
+}
+
+.plan-step.in-progress i {
+  color: #f78a97;
+}
+
+/* =============================================================================
+   Update Toast Notification - Bottom Right
+   ============================================================================= */
+.update-toast {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: linear-gradient(135deg, #2c1e26 0%, #1c1218 100%);
+  border: 1px solid rgba(247, 138, 151, 0.25);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  z-index: 10000;
+  min-width: 300px;
+  animation: updateToastSlideIn 0.3s ease-out;
+}
+
+.update-toast.hidden {
+  display: none;
+}
+
+@keyframes updateToastSlideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+.update-toast-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.update-toast-icon {
+  font-size: 28px;
+  color: #4ade80;
+}
+
+.update-toast-text {
+  flex: 1;
+}
+
+.update-toast-title {
+  font-weight: 600;
+  color: #fff;
+  font-size: 14px;
+}
+
+.update-toast-version {
+  color: #94a3b8;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.update-toast-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-btn-install {
+  background: #4ade80;
+  color: #000;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.update-btn-install:hover {
+  background: #22c55e;
+}
+
+.update-btn-install:disabled {
+  background: #4b5563;
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.update-btn-dismiss {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  line-height: 1;
+}
+
+.update-btn-dismiss:hover {
+  color: #fff;
+}
+
+/* Progress bar */
+.update-progress-bar {
+  height: 4px;
+  background: #1e293b;
+  border-radius: 2px;
+  margin-top: 12px;
+  overflow: hidden;
+}
+
+.update-progress-bar.hidden {
+  display: none;
+}
+
+.update-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4ade80, #22d3ee);
+  border-radius: 2px;
+  width: 0%;
+  transition: width 0.2s ease;
+}

@@ -201,6 +201,9 @@ impl CodexAppServerClient {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                if !line.trim().is_empty() {
+                    tracing::info!("[CodexAppServer][stdout] {}", line);
+                }
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
                     // JSON-RPC responses have an id AND a result/error.
                     if let Some(id) = v.get("id").and_then(|x| x.as_u64()) {
@@ -253,7 +256,6 @@ impl CodexAppServerClient {
         }
 
         let req = json!({
-            "jsonrpc": "2.0",
             "id": id,
             "method": method,
             "params": params,
@@ -308,23 +310,17 @@ impl CodexAppServerClient {
         cwd: &Path,
         model: Option<&str>,
         reasoning_effort: Option<&str>,
-        mode: Option<&str>,
+        _mode: Option<&str>,
     ) -> Result<String> {
         let mut params = json!({
             "cwd": cwd.to_string_lossy(),
             "model": model,
             "approvalPolicy": "never",
-            "sandbox": "danger-full-access"
+            "sandboxPolicy": { "type": "dangerFullAccess" }
         });
         // Add reasoningEffort if specified
         if let Some(effort) = reasoning_effort {
             params["reasoningEffort"] = json!(effort);
-        }
-        // Add mode/agentType if specified
-        if let Some(m) = mode {
-            if m != "default" && !m.is_empty() {
-                params["agentType"] = json!(m);
-            }
         }
         let resp = self.request("thread/start", params).await?;
         let thread_id = resp
@@ -342,24 +338,18 @@ impl CodexAppServerClient {
         cwd: &Path,
         model: Option<&str>,
         reasoning_effort: Option<&str>,
-        mode: Option<&str>,
+        _mode: Option<&str>,
     ) -> Result<String> {
         let mut params = json!({
             "threadId": thread_id,
             "cwd": cwd.to_string_lossy(),
             "model": model,
             "approvalPolicy": "never",
-            "sandbox": "danger-full-access"
+            "sandboxPolicy": { "type": "dangerFullAccess" }
         });
         // Add reasoningEffort if specified
         if let Some(effort) = reasoning_effort {
             params["reasoningEffort"] = json!(effort);
-        }
-        // Add mode/agentType if specified
-        if let Some(m) = mode {
-            if m != "default" && !m.is_empty() {
-                params["agentType"] = json!(m);
-            }
         }
         let resp = self.request("thread/resume", params).await?;
         let thread_id = resp
@@ -371,19 +361,64 @@ impl CodexAppServerClient {
         Ok(thread_id.to_string())
     }
 
-    async fn turn_start_streaming<F>(&mut self, thread_id: &str, prompt: &str, _model: Option<&str>, _cwd: &Path, on_update: &mut F) -> Result<(String, Option<TokenUsageInfo>)>
+    async fn turn_start_streaming<F>(
+        &mut self,
+        thread_id: &str,
+        prompt: &str,
+        model: Option<&str>,
+        cwd: &Path,
+        effort: Option<&str>,
+        mode: Option<&str>,
+        on_update: &mut F,
+    ) -> Result<(String, Option<TokenUsageInfo>)>
     where
         F: FnMut(StreamingUpdate),
     {
-        let _ = self
-            .request(
-                "turn/start",
-                json!({
-                    "threadId": thread_id,
-                    "input": [{"type": "text", "text": prompt}]
-                }),
-            )
-            .await?;
+        // Build params with all turn configuration - Codex requires these per-turn
+        let mut params = json!({
+            "threadId": thread_id,
+            "input": [{"type": "text", "text": prompt}],
+            "cwd": cwd.to_string_lossy(),
+            "approvalPolicy": "never",
+            "sandboxPolicy": { "type": "dangerFullAccess" }
+        });
+        if let Some(m) = model {
+            params["model"] = json!(m);
+        }
+        // Build collaborationMode with nested settings object
+        // The Codex CollaborationMode format: { "mode": "plan", "settings": { "model": "...", "reasoning_effort": "..." } }
+        if let Some(mode_val) = mode {
+            if mode_val != "default" && !mode_val.is_empty() {
+                let mut settings = json!({});
+                // model is REQUIRED in the Settings struct
+                if let Some(m) = model {
+                    settings["model"] = json!(m);
+                } else {
+                    // Fallback to a default model if none specified
+                    settings["model"] = json!("gpt-4.1");
+                }
+                // reasoning_effort is optional but include it if provided
+                if let Some(e) = effort {
+                    settings["reasoning_effort"] = json!(e);
+                }
+                // Include developer_instructions if available for this mode
+                if let Some(instr) = self.mode_developer_instructions(mode_val).await {
+                    settings["developer_instructions"] = json!(instr);
+                }
+                params["collaborationMode"] = json!({
+                    "mode": mode_val,
+                    "settings": settings
+                });
+            } else if let Some(e) = effort {
+                // Only add top-level reasoningEffort if NOT using collaborationMode
+                params["reasoningEffort"] = json!(e);
+            }
+        } else if let Some(e) = effort {
+            // No mode specified, add reasoningEffort at top level
+            params["reasoningEffort"] = json!(e);
+        }
+        eprintln!("[Codex] turn/start params: {}", serde_json::to_string_pretty(&params).unwrap_or_default());
+        let _ = self.request("turn/start", params).await?;
 
         let mut full = String::new();
         let mut captured_usage: Option<TokenUsageInfo> = None;
@@ -626,6 +661,30 @@ impl CodexAppServerClient {
                         output: "web search completed".to_string(),
                     });
                 }
+                "turn/plan/updated" => {
+                    let payload = params.get("msg").unwrap_or(&params);
+                    let explanation = payload
+                        .get("explanation")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let turn_id = payload
+                        .get("turnId")
+                        .or_else(|| payload.get("turn_id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    let plan_val = payload
+                        .get("plan")
+                        .or_else(|| payload.get("steps"))
+                        .cloned()
+                        .unwrap_or(Value::Array(vec![]));
+                    let steps: Vec<PlanStep> =
+                        serde_json::from_value(plan_val).unwrap_or_default();
+                    on_update(StreamingUpdate::PlanUpdate {
+                        turn_id,
+                        explanation,
+                        steps,
+                    });
+                }
                 "thread/tokenUsage/updated" => {
                     // Capture token usage from Codex notification
                     if let Some(params) = next.get("params") {
@@ -759,16 +818,32 @@ impl CodexAppServerClient {
         // Fallback to hardcoded modes
         Ok(vec![
             CodexModeInfo {
-                id: "default".to_string(),
+                id: Some("default".to_string()),
+                mode: None,
                 name: Some("Default".to_string()),
                 description: Some("Standard coding mode".to_string()),
+                developer_instructions: None,
+                reasoning_effort: None,
+                model: None,
             },
             CodexModeInfo {
-                id: "plan".to_string(),
+                id: Some("plan".to_string()),
+                mode: None,
                 name: Some("Plan".to_string()),
                 description: Some("Creates implementation plans before coding".to_string()),
+                developer_instructions: None,
+                reasoning_effort: None,
+                model: None,
             },
         ])
+    }
+
+    async fn mode_developer_instructions(&mut self, mode: &str) -> Option<String> {
+        let modes = self.mode_list().await.ok()?;
+        modes
+            .into_iter()
+            .find(|m| m.matches_mode(mode))
+            .and_then(|m| m.developer_instructions)
     }
 }
 
@@ -793,13 +868,27 @@ pub struct CodexModelInfo {
 
 /// Mode info returned by Codex app-server mode/list
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct CodexModeInfo {
-    pub id: String,
+    #[serde(default, alias = "mode")]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default, alias = "developer_instructions", alias = "developerInstructions")]
+    pub developer_instructions: Option<String>,
+    #[serde(default, alias = "reasoning_effort", alias = "reasoningEffort")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+impl CodexModeInfo {
+    fn matches_mode(&self, mode: &str) -> bool {
+        self.id.as_deref() == Some(mode) || self.mode.as_deref() == Some(mode)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -931,6 +1020,12 @@ pub struct AvailableCommand {
     pub description: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlanStep {
+    pub step: String,
+    pub status: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum StreamingUpdate {
     ToolCall {
@@ -961,6 +1056,12 @@ pub enum StreamingUpdate {
     UserInputRequest {
         request_id: String,
         questions: Vec<UserInputQuestion>,
+    },
+    /// Codex turn/plan/updated notification.
+    PlanUpdate {
+        turn_id: Option<String>,
+        explanation: Option<String>,
+        steps: Vec<PlanStep>,
     },
     AvailableCommands {
         commands: Vec<AvailableCommand>,
@@ -1252,6 +1353,8 @@ impl AgentProcessClient {
                     content,
                     self.model.as_deref(),
                     &self.cwd,
+                    self.reasoning_effort.as_deref(),
+                    self.codex_mode.as_deref(),
                     on_update,
                 )
                 .await?;

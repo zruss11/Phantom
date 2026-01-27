@@ -1,8 +1,14 @@
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use serenity::async_trait;
-use serenity::builder::{CreateMessage, CreateThread};
+use serenity::builder::{
+    CreateActionRow, CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateMessage, CreateThread,
+};
 use serenity::http::Http;
+use serenity::model::application::interaction::Interaction;
+use serenity::model::application::component::ButtonStyle;
 use serenity::model::channel::Message;
 use serenity::model::id::{ChannelId, UserId};
 use serenity::prelude::*;
@@ -48,6 +54,22 @@ impl DiscordBotHandle {
     ) -> Result<(), String> {
         thread_id
             .send_message(&self.http, CreateMessage::new().content(content))
+            .await
+            .map_err(|e| format!("Discord thread send_message failed: {e}"))?;
+        Ok(())
+    }
+
+    pub async fn send_thread_message_with_components(
+        &self,
+        thread_id: ChannelId,
+        content: &str,
+        components: Vec<CreateActionRow>,
+    ) -> Result<(), String> {
+        thread_id
+            .send_message(
+                &self.http,
+                CreateMessage::new().content(content).components(components),
+            )
             .await
             .map_err(|e| format!("Discord thread send_message failed: {e}"))?;
         Ok(())
@@ -107,7 +129,7 @@ impl EventHandler for DiscordEventHandler {
         };
 
         if let Some(pending_req) = pending {
-            let answers = parse_user_input_answers(&pending_req, content);
+            let answers = parse_user_input_answers(&pending_req, content, &pending_req.answers);
             if let Err(err) = crate::respond_to_user_input_internal(
                 task_id.clone(),
                 pending_req.request_id.clone(),
@@ -134,15 +156,185 @@ impl EventHandler for DiscordEventHandler {
             println!("[Discord] Failed to send chat message: {err}");
         }
     }
+
+    async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
+        let Interaction::Component(component) = interaction else {
+            return;
+        };
+
+        let custom_id = component.data.custom_id.as_str();
+        if !custom_id.starts_with("user_input:") {
+            return;
+        }
+
+        let thread_id = component.channel_id.get();
+
+        let state = self.app.state::<crate::AppState>().inner().clone();
+        let task_id_opt = {
+            let conn = match state.db.lock() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            db::get_task_id_for_discord_thread(&conn, thread_id).ok().flatten()
+        };
+        let Some(task_id) = task_id_opt else {
+            let _ = component
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("No task bound to this thread.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        };
+
+        let Some((request_id, question_id, option_idx)) =
+            parse_user_input_custom_id(custom_id)
+        else {
+            let _ = component
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Unsupported input action.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        };
+
+        let mut pending_guard = state.pending_user_inputs.lock().await;
+        let Some(pending) = pending_guard.get_mut(&task_id) else {
+            let _ = component
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("No pending input for this task.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        };
+
+        if pending.request_id != request_id {
+            let _ = component
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("This input request has expired.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        }
+
+        let Some(question) = pending.questions.iter().find(|q| q.id == question_id) else {
+            let _ = component
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Unknown question.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        };
+
+        let Some(options) = question.options.as_ref() else {
+            let _ = component
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("This question needs a typed response.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        };
+
+        let Some(option) = options.get(option_idx) else {
+            let _ = component
+                .create_response(
+                    &ctx.http,
+                    CreateInteractionResponse::Message(
+                        CreateInteractionResponseMessage::new()
+                            .content("Option not found.")
+                            .ephemeral(true),
+                    ),
+                )
+                .await;
+            return;
+        };
+
+        pending.answers.insert(question.id.clone(), option.label.clone());
+        let ready = pending_complete(pending);
+        let answers_payload = if ready {
+            build_answers_payload(&pending.answers)
+        } else {
+            serde_json::Value::Null
+        };
+        let request_id = pending.request_id.clone();
+        drop(pending_guard);
+
+        let ack_message = if ready {
+            "Answer recorded. Submitting your responses..."
+        } else {
+            "Answer recorded. Please answer the remaining questions."
+        };
+        let _ = component
+            .create_response(
+                &ctx.http,
+                CreateInteractionResponse::Message(
+                    CreateInteractionResponseMessage::new()
+                        .content(ack_message)
+                        .ephemeral(true),
+                ),
+            )
+            .await;
+
+        if ready {
+            if let Err(err) = crate::respond_to_user_input_internal(
+                task_id,
+                request_id,
+                answers_payload,
+                &state,
+                self.app.clone(),
+            )
+            .await
+            {
+                println!("[Discord] Failed to respond to user input: {err}");
+            }
+        }
+    }
 }
 
-fn parse_user_input_answers(pending: &PendingUserInput, content: &str) -> serde_json::Value {
+fn parse_user_input_answers(
+    pending: &PendingUserInput,
+    content: &str,
+    seed: &HashMap<String, String>,
+) -> serde_json::Value {
     let mut answers: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     let lines: Vec<&str> = content
         .lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty())
         .collect();
+
+    for (qid, value) in seed {
+        answers.insert(qid.clone(), serde_json::json!({ "answers": [value] }));
+    }
 
     if pending.questions.len() == 1 {
         let q = &pending.questions[0];
@@ -185,6 +377,38 @@ fn normalize_answer_value(question: &phantom_harness_backend::cli::UserInputQues
         }
     }
     raw.to_string()
+}
+
+fn parse_user_input_custom_id(custom_id: &str) -> Option<(String, String, usize)> {
+    let mut parts = custom_id.split(':');
+    let prefix = parts.next()?;
+    if prefix != "user_input" {
+        return None;
+    }
+    let request_id = parts.next()?.to_string();
+    let question_id = parts.next()?.to_string();
+    let idx = parts.next()?.parse::<usize>().ok()?;
+    Some((request_id, question_id, idx))
+}
+
+fn build_answers_payload(answers: &HashMap<String, String>) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for (qid, value) in answers {
+        map.insert(qid.clone(), serde_json::json!({ "answers": [value] }));
+    }
+    serde_json::Value::Object(map)
+}
+
+fn pending_complete(pending: &PendingUserInput) -> bool {
+    for q in &pending.questions {
+        if q.options.is_none() && !pending.answers.contains_key(&q.id) {
+            return false;
+        }
+        if q.options.is_some() && !pending.answers.contains_key(&q.id) {
+            return false;
+        }
+    }
+    true
 }
 
 pub async fn start_discord_bot(
@@ -304,5 +528,56 @@ pub async fn post_to_thread(
     };
     handle
         .send_thread_message(ChannelId::new(thread_id), content)
+        .await
+}
+
+pub async fn post_user_input_question(
+    handle: &DiscordBotHandle,
+    db_conn: Arc<StdMutex<rusqlite::Connection>>,
+    task_id: &str,
+    request_id: &str,
+    question: &phantom_harness_backend::cli::UserInputQuestion,
+) -> Result<(), String> {
+    let thread_id = {
+        let conn = db_conn.lock().map_err(|e| e.to_string())?;
+        db::get_discord_thread_id(&conn, task_id)
+            .map_err(|e| e.to_string())?
+    };
+    let thread_id = match thread_id {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    let mut rows: Vec<CreateActionRow> = Vec::new();
+    let mut current_row: Vec<CreateButton> = Vec::new();
+
+    let Some(options) = question.options.as_ref() else {
+        return Ok(());
+    };
+
+    for (idx, opt) in options.iter().enumerate() {
+        let custom_id = format!("user_input:{}:{}:{}", request_id, question.id, idx);
+        let button = CreateButton::new(custom_id)
+            .label(opt.label.clone())
+            .style(ButtonStyle::Primary);
+        current_row.push(button);
+        if current_row.len() == 5 {
+            rows.push(CreateActionRow::Buttons(current_row));
+            current_row = Vec::new();
+        }
+        if rows.len() == 5 {
+            break;
+        }
+    }
+    if !current_row.is_empty() && rows.len() < 5 {
+        rows.push(CreateActionRow::Buttons(current_row));
+    }
+
+    let content = format!(
+        "**{}** (`{}`)\n{}",
+        question.header, question.id, question.question
+    );
+    handle
+        .send_thread_message_with_components(ChannelId::new(thread_id), &content, rows)
         .await
 }

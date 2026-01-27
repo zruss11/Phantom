@@ -966,6 +966,12 @@
         });
         updateStatus("Waiting for input...", "running");
         break;
+
+      case "plan_update":
+        finalizeStreamingMessage();
+        upsertPlanPanel(update);
+        updateStatus("Plan updated", "running");
+        break;
     }
   }
 
@@ -986,6 +992,93 @@
     }
 
     return existing + delta;
+  }
+
+  function normalizePlanStatus(status) {
+    if (!status) return "pending";
+    const compact = status.toString().toLowerCase().replace(/[\s_-]/g, "");
+    if (compact === "inprogress") return "inProgress";
+    if (compact === "completed" || compact === "done") return "completed";
+    return "pending";
+  }
+
+  function normalizePlanPayload(payload) {
+    const explanation = (payload?.explanation || "").toString().trim() || null;
+    const rawSteps = Array.isArray(payload?.plan) ? payload.plan : [];
+    const steps = rawSteps
+      .map((step) => ({
+        step: (step?.step || "").toString().trim(),
+        status: normalizePlanStatus(step?.status),
+      }))
+      .filter((step) => step.step.length > 0);
+    return { explanation, steps };
+  }
+
+  function renderPlanPanel(payload) {
+    const normalized = normalizePlanPayload(payload);
+    const steps = normalized.steps;
+    const total = steps.length;
+    const completed = steps.filter((s) => s.status === "completed").length;
+    const progressText = total > 0 ? `${completed}/${total} complete` : "No steps yet";
+
+    const stepsHtml = steps
+      .map((s) => {
+        const statusClass =
+          s.status === "completed"
+            ? "completed"
+            : s.status === "inProgress"
+              ? "in-progress"
+              : "pending";
+        const icon =
+          s.status === "completed"
+            ? "fa-check-circle"
+            : s.status === "inProgress"
+              ? "fa-spinner fa-spin"
+              : "fa-circle";
+        return `
+          <li class="plan-step ${statusClass}">
+            <i class="fal ${icon}"></i>
+            <span>${escapeHtml(s.step)}</span>
+          </li>
+        `;
+      })
+      .join("");
+
+    return `
+      <div class="plan-card">
+        <div class="plan-header">
+          <i class="fal fa-clipboard-list"></i>
+          <span>Plan</span>
+          <span class="plan-progress">${escapeHtml(progressText)}</span>
+        </div>
+        ${
+          normalized.explanation
+            ? `<div class="plan-explanation">${escapeHtml(normalized.explanation)}</div>`
+            : ""
+        }
+        <ul class="plan-steps">${stepsHtml || "<li class=\"plan-step pending\"><i class=\"fal fa-circle\"></i><span>Waiting for plan details</span></li>"}</ul>
+      </div>
+    `;
+  }
+
+  function upsertPlanPanel(payload) {
+    const container = $("#chatContainer");
+    const existing = container.find(".plan-panel").first();
+    const html = renderPlanPanel(payload);
+
+    if (existing.length) {
+      existing.html(html);
+      return;
+    }
+
+    // Remove empty state if present
+    container.find(".chat-empty").remove();
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "chat-message plan-panel";
+    wrapper.innerHTML = html;
+    // Insert at top of chat for visibility
+    container.prepend(wrapper);
   }
 
   // Append content to the current streaming message, creating one if needed
@@ -1313,6 +1406,19 @@
 
     const type = message.type || message.message_type || "system";
     const content = message.content || message.text || "";
+
+    if (type === "plan_update") {
+      let payload = message;
+      if (typeof message.content === "string") {
+        try {
+          payload = JSON.parse(message.content);
+        } catch (e) {
+          payload = message;
+        }
+      }
+      upsertPlanPanel(payload);
+      return;
+    }
 
     // Skip duplicate assistant messages (already rendered via streaming)
     if ((type === "assistant" || type === "assistant_message") && streamingType === "assistant") {
@@ -1836,6 +1942,20 @@
           </div>
         `;
         break;
+
+      case "plan_update": {
+        div.className += " plan-panel";
+        let payload = message;
+        if (typeof message.content === "string") {
+          try {
+            payload = JSON.parse(message.content);
+          } catch (e) {
+            payload = message;
+          }
+        }
+        div.innerHTML = renderPlanPanel(payload);
+        break;
+      }
 
       case "system":
       default:

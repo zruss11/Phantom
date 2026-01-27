@@ -8,6 +8,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "resources": [
       "bin/node-darwin-arm64",
       "../backend/config/agents.toml"
@@ -24,7 +25,14 @@
   "mainBinaryName": "Phantom",
   "version": "1.0.0",
   "identifier": "com.phantom.app",
-  "plugins": {},
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/zachrussell/Phantom-Harness/releases/latest/download/latest.json"
+      ],
+      "pubkey": ""
+    }
+  },
   "app": {
     "withGlobalTauri": true,
     "macOSPrivateApi": true,

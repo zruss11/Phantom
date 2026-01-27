@@ -1496,6 +1496,26 @@
       </div>
     </footer>
 
+    <!-- Update Toast Notification -->
+    <div id="update-toast" class="update-toast hidden">
+      <div class="update-toast-content">
+        <div class="update-toast-icon">
+          <i class="fas fa-arrow-circle-up"></i>
+        </div>
+        <div class="update-toast-text">
+          <div class="update-toast-title">Update Available</div>
+          <div class="update-toast-version">Version <span id="update-version">0.0.0</span> ready</div>
+        </div>
+        <div class="update-toast-actions">
+          <button id="update-install-btn" class="update-btn-install">Install</button>
+          <button id="update-dismiss-btn" class="update-btn-dismiss">&times;</button>
+        </div>
+      </div>
+      <div id="update-progress-bar" class="update-progress-bar hidden">
+        <div id="update-progress-fill" class="update-progress-fill"></div>
+      </div>
+    </div>
+
     <script src="js/gui.js"></script>
     <!-- Mock Electron layer for browser compatibility -->
     <script src="js/tauri-bridge.js"></script>
