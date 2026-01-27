@@ -5883,6 +5883,10 @@ pub(crate) async fn respond_to_user_input_internal(
         "[Harness] respond_to_user_input: task={} request={}",
         task_id, request_id
     );
+    tracing::info!(
+        "[Harness] respond_to_user_input payload: {}",
+        answers
+    );
 
     let mut sessions = state.sessions.lock().await;
     let handle = sessions

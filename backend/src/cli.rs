@@ -276,14 +276,16 @@ impl CodexAppServerClient {
     }
 
     async fn respond_server_request(&mut self, request_id: &str, result: Value) -> Result<()> {
-        let id_num: u64 = request_id
-            .parse()
-            .context("invalid request_id for codex server request")?;
+        let id_value = match request_id.parse::<u64>() {
+            Ok(id) => json!(id),
+            Err(_) => json!(request_id),
+        };
         let resp = json!({
             "jsonrpc": "2.0",
-            "id": id_num,
+            "id": id_value,
             "result": result,
         });
+        tracing::info!("[CodexAppServer][response] {}", resp);
         self.stdin.write_all(resp.to_string().as_bytes()).await?;
         self.stdin.write_all(b"\n").await?;
         self.stdin.flush().await?;
