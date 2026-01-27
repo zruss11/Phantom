@@ -439,11 +439,16 @@ impl CodexAppServerClient {
             // Server requests include an id.
             if let Some(req_id) = next.get("id").and_then(|x| x.as_u64()) {
                 let method = next.get("method").and_then(|m| m.as_str()).unwrap_or("");
-                if method == "item/tool/requestUserInput" {
+                if method == "item/tool/requestUserInput" || method == "tool/requestUserInput" {
                     // Surface questions to the UI; Codex will pause until we respond.
                     let questions_val = next
                         .get("params")
                         .and_then(|p| p.get("questions"))
+                        .or_else(|| {
+                            next.get("params")
+                                .and_then(|p| p.get("msg"))
+                                .and_then(|m| m.get("questions"))
+                        })
                         .cloned()
                         .unwrap_or(Value::Array(vec![]));
                     let questions: Vec<UserInputQuestion> =
