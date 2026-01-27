@@ -1317,6 +1317,11 @@ impl AgentProcessClient {
     ) -> Result<()> {
         if let Some(codex) = &self.codex_app_server {
             let mut codex = codex.lock().await;
+            tracing::info!(
+                "[CodexAppServer] sending requestUserInput response id={} payload={}",
+                request_id,
+                answers
+            );
             return codex
                 .respond_server_request(request_id, json!({ "answers": answers }))
                 .await;

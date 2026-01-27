@@ -2,13 +2,13 @@ mod claude_local_usage;
 mod claude_usage_watcher;
 mod db;
 mod debug_http;
+mod discord_bot;
 mod local_usage;
 mod logger;
 mod namegen;
 mod summarize;
 mod utils;
 mod webhook;
-mod discord_bot;
 mod worktree;
 
 use utils::truncate_str;
@@ -2680,9 +2680,7 @@ async fn start_task(
                         StreamingUpdate::UserInputRequest { .. } => {
                             ("Waiting for input...".to_string(), "#4ade80")
                         }
-                        StreamingUpdate::PlanUpdate { .. } => {
-                            ("Plan updated".to_string(), "white")
-                        }
+                        StreamingUpdate::PlanUpdate { .. } => ("Plan updated".to_string(), "white"),
                         StreamingUpdate::AvailableCommands { .. } => {
                             // Handled separately, won't reach here due to should_emit_status check
                             continue;
@@ -2748,7 +2746,10 @@ async fn start_task(
                             None,
                             &ts,
                         ),
-                        StreamingUpdate::UserInputRequest { request_id, questions } => {
+                        StreamingUpdate::UserInputRequest {
+                            request_id,
+                            questions,
+                        } => {
                             // Persist request_id + questions payload so we can reconstruct state on reload.
                             let payload = serde_json::json!({
                                 "requestId": request_id,
@@ -2796,7 +2797,11 @@ async fn start_task(
                 }
             }
 
-            if let StreamingUpdate::UserInputRequest { request_id, questions } = &update {
+            if let StreamingUpdate::UserInputRequest {
+                request_id,
+                questions,
+            } = &update
+            {
                 let pending = PendingUserInput {
                     request_id: request_id.clone(),
                     questions: questions.clone(),
@@ -2814,8 +2819,13 @@ async fn start_task(
                         > = state_clone.pending_user_inputs.lock().await;
                         guard.insert(task_id.clone(), pending);
                     }
-                    post_discord_user_input_request(&state_clone, &task_id, &request_id, &questions)
-                        .await;
+                    post_discord_user_input_request(
+                        &state_clone,
+                        &task_id,
+                        &request_id,
+                        &questions,
+                    )
+                    .await;
                 });
             }
 
@@ -3318,7 +3328,8 @@ async fn test_discord(state: State<'_, AppState>, app: tauri::AppHandle) -> Resu
         return Err("Discord bot is disabled in settings".to_string());
     }
     ensure_discord_bot(&app, state.inner(), &settings).await;
-    let handle = discord_handle(state.inner()).ok_or_else(|| "Discord bot not running".to_string())?;
+    let handle =
+        discord_handle(state.inner()).ok_or_else(|| "Discord bot not running".to_string())?;
     handle
         .send_channel_message("Phantom Harness Discord test message")
         .await?;
@@ -4437,7 +4448,32 @@ fn load_tasks(state: State<'_, AppState>) -> Result<Vec<db::TaskRecord>, String>
 }
 
 #[tauri::command]
-async fn delete_task(task_id: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn delete_task(
+    task_id: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let safe_task_id = task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
+    let chat_window_label = format!("chat-{}", safe_task_id);
+    if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
+        let _ = chat_window.close();
+    }
+
+    let notification_prefix = format!("notification-{}-", safe_task_id);
+    for (label, window) in app.webview_windows() {
+        if label.starts_with(&notification_prefix) {
+            let _ = window.close();
+        }
+    }
+    {
+        let mut notification_windows = state
+            .notification_windows
+            .lock()
+            .map_err(|e| e.to_string())?;
+        notification_windows.retain(|label| {
+            !label.starts_with(&notification_prefix) && app.get_webview_window(label).is_some()
+        });
+    }
     // Remove from sessions HashMap (cleanup runtime)
     {
         let mut sessions = state.sessions.lock().await;
@@ -4507,7 +4543,15 @@ async fn get_task_history(
         .find(|t| t.id == task_id);
 
     // Extract task fields for pending prompt detection and paths
-    let (agent_id, pending_prompt, status_state, title_summary, created_at, worktree_path, project_path) = match &task {
+    let (
+        agent_id,
+        pending_prompt,
+        status_state,
+        title_summary,
+        created_at,
+        worktree_path,
+        project_path,
+    ) = match &task {
         Some(t) => (
             t.agent_id.clone(),
             t.prompt.clone(),
@@ -4517,7 +4561,15 @@ async fn get_task_history(
             t.worktree_path.clone(),
             t.project_path.clone(),
         ),
-        None => ("Agent".to_string(), None, "idle".to_string(), None, None, None, None),
+        None => (
+            "Agent".to_string(),
+            None,
+            "idle".to_string(),
+            None,
+            None,
+            None,
+            None,
+        ),
     };
 
     // Load messages from DB
@@ -4717,11 +4769,7 @@ fn build_discord_thread_name(_task_id: &str, title: &str) -> String {
         base = base.trim_start_matches(|c: char| c == 'k' || c == 'K');
         base = base.trim_start_matches(|c: char| c == '-' || c == ':' || c == ' ');
     }
-    let base = if base.is_empty() {
-        "Agent Task"
-    } else {
-        base
-    };
+    let base = if base.is_empty() { "Agent Task" } else { base };
     let combined = format!("{}", base);
     truncate_str(&combined, 90)
 }
@@ -4765,12 +4813,7 @@ async fn ensure_discord_thread(
     .ok()
 }
 
-async fn post_discord_user_message(
-    state: &AppState,
-    task_id: &str,
-    agent_id: &str,
-    content: &str,
-) {
+async fn post_discord_user_message(state: &AppState, task_id: &str, agent_id: &str, content: &str) {
     if content.trim().is_empty() {
         return;
     }
@@ -4789,11 +4832,7 @@ async fn post_discord_user_message(
     }
 }
 
-async fn post_discord_assistant_message(
-    state: &AppState,
-    task_id: &str,
-    content: &str,
-) {
+async fn post_discord_assistant_message(state: &AppState, task_id: &str, content: &str) {
     if content.trim().is_empty() {
         return;
     }
@@ -4830,9 +4869,15 @@ async fn post_discord_user_input_request(
     let _ = ensure_discord_thread(state, task_id, &intro).await;
 
     let mut body = String::new();
-    body.push_str(&format!("**Input needed** (`request_id`: `{}`)\n", request_id));
+    body.push_str(&format!(
+        "**Input needed** (`request_id`: `{}`)\n",
+        request_id
+    ));
     for q in questions {
-        body.push_str(&format!("- **{}** ({})\n  {}\n", q.header, q.id, q.question));
+        body.push_str(&format!(
+            "- **{}** ({})\n  {}\n",
+            q.header, q.id, q.question
+        ));
         if let Some(options) = q.options.as_ref() {
             for opt in options {
                 body.push_str(&format!("  - {} — {}\n", opt.label, opt.description));
@@ -5347,9 +5392,7 @@ pub(crate) async fn send_chat_message_internal(
                         StreamingUpdate::UserInputRequest { .. } => {
                             ("Waiting for input...".to_string(), "#4ade80")
                         }
-                        StreamingUpdate::PlanUpdate { .. } => {
-                            ("Plan updated".to_string(), "white")
-                        }
+                        StreamingUpdate::PlanUpdate { .. } => ("Plan updated".to_string(), "white"),
                         StreamingUpdate::AvailableCommands { .. } => continue,
                     };
                     let _ = main_window.emit(
@@ -5360,7 +5403,11 @@ pub(crate) async fn send_chat_message_internal(
                 }
             }
 
-            if let StreamingUpdate::UserInputRequest { request_id, questions } = &update {
+            if let StreamingUpdate::UserInputRequest {
+                request_id,
+                questions,
+            } = &update
+            {
                 let pending = PendingUserInput {
                     request_id: request_id.clone(),
                     questions: questions.clone(),
@@ -5378,8 +5425,13 @@ pub(crate) async fn send_chat_message_internal(
                         > = state_clone.pending_user_inputs.lock().await;
                         guard.insert(task_id.clone(), pending);
                     }
-                    post_discord_user_input_request(&state_clone, &task_id, &request_id, &questions)
-                        .await;
+                    post_discord_user_input_request(
+                        &state_clone,
+                        &task_id,
+                        &request_id,
+                        &questions,
+                    )
+                    .await;
                 });
             }
 
@@ -5883,10 +5935,7 @@ pub(crate) async fn respond_to_user_input_internal(
         "[Harness] respond_to_user_input: task={} request={}",
         task_id, request_id
     );
-    tracing::info!(
-        "[Harness] respond_to_user_input payload: {}",
-        answers
-    );
+    tracing::info!("[Harness] respond_to_user_input payload: {}", answers);
 
     let mut sessions = state.sessions.lock().await;
     let handle = sessions
@@ -5897,7 +5946,14 @@ pub(crate) async fn respond_to_user_input_internal(
         .client
         .send_user_input_response(&request_id, answers)
         .await
-        .map_err(|e| format!("Failed to send user input response: {}", e))?;
+        .map_err(|e| {
+            tracing::error!(
+                "[Harness] respond_to_user_input send failed: request_id={} error={}",
+                request_id,
+                e
+            );
+            format!("Failed to send user input response: {}", e)
+        })?;
 
     tracing::info!(
         "[Harness] respond_to_user_input sent for request_id={}",
@@ -5919,7 +5975,10 @@ pub(crate) async fn respond_to_user_input_internal(
     }
 
     if let Some(main_window) = app.get_webview_window("main") {
-        let _ = main_window.emit("StatusUpdate", (&task_id, "Continuing...", "yellow", "running"));
+        let _ = main_window.emit(
+            "StatusUpdate",
+            (&task_id, "Continuing...", "yellow", "running"),
+        );
     }
 
     Ok(())
