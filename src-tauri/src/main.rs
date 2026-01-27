@@ -2748,10 +2748,14 @@ async fn start_task(
                             None,
                             &ts,
                         ),
-                        StreamingUpdate::UserInputRequest { questions, .. } => {
-                            // Persist the questions payload so we can reconstruct state on reload.
+                        StreamingUpdate::UserInputRequest { request_id, questions } => {
+                            // Persist request_id + questions payload so we can reconstruct state on reload.
+                            let payload = serde_json::json!({
+                                "requestId": request_id,
+                                "questions": questions,
+                            });
                             let questions_json =
-                                serde_json::to_string(questions).unwrap_or_default();
+                                serde_json::to_string(&payload).unwrap_or_default();
                             db::save_message(
                                 &conn,
                                 &task_id_clone,

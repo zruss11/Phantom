@@ -1872,8 +1872,25 @@
 
       case "user_input_request":
         div.className += " permission-request user-input-request";
-        div.setAttribute("data-request-id", message.request_id || "");
-        const questions = Array.isArray(message.questions) ? message.questions : [];
+        let requestId = message.request_id;
+        let questions = Array.isArray(message.questions) ? message.questions : [];
+        if ((!requestId || questions.length === 0) && typeof message.content === "string") {
+          try {
+            const parsed = JSON.parse(message.content);
+            if (!requestId && parsed && typeof parsed.requestId === "string") {
+              requestId = parsed.requestId;
+            }
+            if (questions.length === 0 && Array.isArray(parsed?.questions)) {
+              questions = parsed.questions;
+            }
+            if (questions.length === 0 && Array.isArray(parsed)) {
+              questions = parsed;
+            }
+          } catch (e) {
+            // ignore parse errors
+          }
+        }
+        div.setAttribute("data-request-id", requestId || "");
 
         const qHtml = questions
           .map((q) => {
