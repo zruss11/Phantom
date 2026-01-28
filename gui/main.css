@@ -316,6 +316,7 @@ textarea {
   flex: 1 1 0;
   min-width: 100px;
   max-width: 180px;
+  position: relative;
   transition:
     border-color 0.2s ease,
     box-shadow 0.2s ease,
@@ -350,6 +351,25 @@ textarea {
   color: #fff;
   fill: currentColor;
   filter: drop-shadow(0 6px 12px rgba(0, 0, 0, 0.4));
+}
+
+.create-tasks-page .agent-card .beta-badge {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 9px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: #2b1a05;
+  background: linear-gradient(135deg, #ffd76a, #f0a84c);
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+  z-index: 1;
 }
 
 .create-tasks-page .agent-card:hover {

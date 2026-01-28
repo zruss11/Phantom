@@ -2621,24 +2621,24 @@
       context.push("No upstream branch exists yet (will be created on push).");
     }
 
-    let prompt = "The user wants to create a pull request.\n\n";
-    prompt += "## Current State\n\n";
-    prompt += context.join("\n") + "\n\n";
-    prompt += "## Instructions\n\n";
-    prompt += "Follow these **exact steps** to create a PR:\n\n";
+    let prompt = "Create a new pull request for the current work.\n\n";
+    prompt += "## Snapshot\n\n";
+    prompt += "- " + context.join("\n- ") + "\n\n";
+    prompt += "## Action Plan\n\n";
+    prompt += "Do the following in order:\n\n";
 
     if (uncommittedChanges > 0) {
-      prompt += "1. There are uncommitted changes. Ask the user whether to commit them first or proceed without them.\n\n";
-      prompt += "2. Use `git diff origin/" + targetBranch + "...` to review the changes that will be in the PR.\n\n";
-      prompt += "3. Use `gh pr create --base " + targetBranch + "` to create a PR onto the target branch:\n";
+      prompt += "1. Uncommitted changes exist. Ask whether to commit them first or proceed without committing.\n\n";
+      prompt += "2. Review the diff with `git diff origin/" + targetBranch + "...`.\n\n";
+      prompt += "3. Open the PR using `gh pr create --base " + targetBranch + "`:\n";
     } else {
-      prompt += "1. Use `git diff origin/" + targetBranch + "...` to review the changes that will be in the PR.\n\n";
-      prompt += "2. Use `gh pr create --base " + targetBranch + "` to create a PR onto the target branch:\n";
+      prompt += "1. Review the diff with `git diff origin/" + targetBranch + "...`.\n\n";
+      prompt += "2. Open the PR using `gh pr create --base " + targetBranch + "`:\n";
     }
 
     prompt += "   - Keep the title under 80 characters\n";
     prompt += "   - Write a clear, concise description (under 5 sentences unless more context is needed)\n";
-    prompt += "   - If there's a PR template in the repo, use it\n\n";
+    prompt += "   - If a PR template exists in the repo, follow it\n\n";
 
     if (!hasUpstream) {
       prompt += (uncommittedChanges > 0 ? "4" : "3") + ". The branch hasn't been pushed yet. Push it first with `git push -u origin " + branchName + "`\n\n";
@@ -2648,7 +2648,7 @@
 
     // Include PR template if found
     if (prTemplate) {
-      prompt += "\n\n## PR Template\n\nThis workspace has a PR template. Use it for the PR description:\n\n```markdown\n" + prTemplate + "\n```";
+      prompt += "\n\n## Template\n\nA PR template was found. Use it for the PR description:\n\n```markdown\n" + prTemplate + "\n```";
     }
 
     return prompt;
