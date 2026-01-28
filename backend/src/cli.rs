@@ -1783,6 +1783,20 @@ impl AgentProcessClient {
                 eprintln!("[Harness] agent stdout: {}", line);
             }
 
+            // File logging: write raw NDJSON to a log file for debugging tasks/todos
+            // Set PHANTOM_CLAUDE_LOG_FILE=/path/to/claude_raw.log to enable
+            if let Ok(log_path) = std::env::var("PHANTOM_CLAUDE_LOG_FILE") {
+                use std::io::Write;
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log_path)
+                {
+                    let timestamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f");
+                    let _ = writeln!(file, "[{}] {}", timestamp, line);
+                }
+            }
+
             if let Ok(value) = serde_json::from_str::<Value>(&line) {
                 if observed_session_id.is_none() {
                     observed_session_id = find_session_id(&value);

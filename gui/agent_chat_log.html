@@ -283,6 +283,38 @@
         object-fit: contain;
       }
 
+      /* Code Review Dropdown */
+      .code-review-icon {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 12px;
+        color: #f78a97;
+      }
+
+      .code-review-trigger.loading .log-switcher-label {
+        color: rgba(255, 255, 255, 0.5);
+      }
+
+      .code-review-trigger.loading .log-switcher-caret {
+        display: none;
+      }
+
+      .code-review-spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        border: 2px solid rgba(247, 138, 151, 0.3);
+        border-top-color: #f78a97;
+        animation: spin 0.8s linear infinite;
+        margin-left: 6px;
+      }
+
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+
       .chat-header-actions button {
         background: transparent;
         border: none;
@@ -2511,6 +2543,32 @@
             />
             Finder
           </button>
+        </div>
+      </div>
+      <div class="chat-header-switcher" id="codeReviewWrap">
+        <button
+          class="log-switcher code-review-trigger"
+          id="codeReviewBtn"
+          type="button"
+          aria-haspopup="true"
+          aria-expanded="false"
+          aria-label="AI Code Review"
+          title="AI Code Review"
+          data-tauri-drag-region="false"
+        >
+          <span class="log-switcher-icon code-review-icon">
+            <i class="fal fa-magnifying-glass-chart"></i>
+          </span>
+          <span class="log-switcher-label" id="codeReviewLabel">Code Review</span>
+          <span class="log-switcher-caret"><i class="fal fa-chevron-down"></i></span>
+        </button>
+        <div
+          class="log-switcher-menu"
+          id="codeReviewMenu"
+          role="menu"
+          data-tauri-drag-region="false"
+        >
+          <!-- Populated by JS -->
         </div>
       </div>
       <div class="diff-counter" id="diffCounter" style="display: none;">

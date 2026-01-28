@@ -577,6 +577,17 @@
             console.log('[Tauri Bridge Mock] Restart all agents');
             resolve([]);
             break;
+          case 'gatherCodeReviewContext':
+            // Mock code review context for browser dev mode
+            console.log('[Tauri Bridge Mock] Gather code review context:', args[0]);
+            resolve({
+              current_branch: 'feat/mock-branch',
+              base_branch: 'main',
+              diff: '--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,6 +10,8 @@ fn main() {\n     println!("Hello, world!");\n+    // New feature added\n+    do_something_cool();\n }',
+              commit_log: 'abc1234 feat: add cool feature (Dev, 2 hours ago)\ndef5678 fix: minor bug fix (Dev, 1 day ago)',
+              diff_truncated: false
+            });
+            break;
           case 'loadTasks':
             resolve(mockData.tasks);
             break;
