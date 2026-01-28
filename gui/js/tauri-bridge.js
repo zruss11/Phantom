@@ -424,6 +424,9 @@
         if (channel === 'getRepoBranches') {
           return tauriInvoke('get_repo_branches', { projectPath: args[0] || null });
         }
+        if (channel === 'getPrReadyState') {
+          return tauriInvoke('get_pr_ready_state', { projectPath: args[0] || null });
+        }
         if (channel === 'getSettings') {
           return tauriInvoke('get_settings');
         }

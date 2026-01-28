@@ -296,6 +296,38 @@
         color: #fff;
       }
 
+      /* PR Creation Button */
+      .pr-action-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: linear-gradient(135deg, rgba(88, 166, 255, 0.12), rgba(88, 166, 255, 0.06));
+        border: 1px solid rgba(88, 166, 255, 0.25);
+        color: rgba(88, 166, 255, 0.85);
+        border-radius: 6px;
+        padding: 5px 10px;
+        margin-right: 4px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .pr-action-btn:hover {
+        background: linear-gradient(135deg, rgba(88, 166, 255, 0.2), rgba(88, 166, 255, 0.12));
+        color: #58a6ff;
+        border-color: rgba(88, 166, 255, 0.4);
+      }
+
+      .pr-action-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .pr-action-btn i {
+        font-size: 13px;
+      }
+
       .chat-container {
         flex: 1;
         overflow-y: auto;
@@ -2535,6 +2567,15 @@
         <span id="diffCount">0</span>
       </div>
       <div class="chat-header-actions">
+        <button
+          id="createPrButton"
+          class="pr-action-btn"
+          title="Create Pull Request"
+          data-tauri-drag-region="false"
+        >
+          <i class="fab fa-github"></i>
+          <span>Create PR</span>
+        </button>
         <button
           id="minimizeWindow"
           title="Minimize"
