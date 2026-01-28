@@ -1128,6 +1128,11 @@ pub enum StreamingUpdate {
     AvailableCommands {
         commands: Vec<AvailableCommand>,
     },
+    /// Plan content from Write/Create tool creating a plan.md file
+    PlanContent {
+        file_path: String,
+        content: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1742,6 +1747,11 @@ impl AgentProcessClient {
         let mut token_usage: Option<TokenUsageInfo> = None;
         let mut observed_session_id: Option<String> = None;
 
+        // Track Claude Code sub-agent Tasks for progress pill.
+        // Maps tool_use_id -> (description, status) where status is
+        // "in_progress" or "completed".
+        let mut claude_tasks: Vec<(String, String, String)> = Vec::new();
+
         // Claude's CLI may keep the process alive after emitting a final `type: result`.
         // We treat `result` as terminal for this prompt and then terminate the subprocess.
         let mut saw_result = false;
@@ -1846,6 +1856,122 @@ impl AgentProcessClient {
                     for update in parse_streaming_updates(&value) {
                         on_update(update);
                     }
+
+                    // Track Claude Code progress for the pill via two mechanisms:
+                    // 1. TodoWrite tool: explicit todo list with content/status/activeForm
+                    // 2. Task tool: sub-agent spawns (track start/completion)
+                    //
+                    // TodoWrite is preferred when present (explicit user-facing progress).
+                    // Task tracking is for sub-agent work when no TodoWrite is used.
+                    let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    
+                    if event_type == "assistant" {
+                        if let Some(items) = value
+                            .get("message")
+                            .and_then(|m| m.get("content"))
+                            .and_then(|c| c.as_array())
+                        {
+                            for item in items {
+                                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                if item_type == "tool_use" {
+                                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    
+                                    // Handle TodoWrite - extract todos directly as PlanSteps
+                                    if name == "TodoWrite" {
+                                        if let Some(todos) = item
+                                            .get("input")
+                                            .and_then(|i| i.get("todos"))
+                                            .and_then(|t| t.as_array())
+                                        {
+                                            let steps: Vec<PlanStep> = todos
+                                                .iter()
+                                                .filter_map(|t| {
+                                                    let content = t.get("content").and_then(|c| c.as_str())?;
+                                                    let status = t.get("status")
+                                                        .and_then(|s| s.as_str())
+                                                        .unwrap_or("pending")
+                                                        .to_string();
+                                                    Some(PlanStep {
+                                                        step: content.to_string(),
+                                                        status,
+                                                    })
+                                                })
+                                                .collect();
+                                            if !steps.is_empty() {
+                                                on_update(StreamingUpdate::PlanUpdate {
+                                                    turn_id: None,
+                                                    explanation: None,
+                                                    steps,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    // Handle Task - track sub-agent spawn
+                                    else if name == "Task" {
+                                        let tool_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let desc = item
+                                            .get("input")
+                                            .and_then(|i| i.get("description"))
+                                            .and_then(|d| d.as_str())
+                                            .unwrap_or("Working…")
+                                            .to_string();
+                                        if !tool_id.is_empty() {
+                                            claude_tasks.push((tool_id, desc, "in_progress".to_string()));
+                                            let steps: Vec<PlanStep> = claude_tasks.iter().map(|(_, d, s)| {
+                                                PlanStep { step: d.clone(), status: s.clone() }
+                                            }).collect();
+                                            on_update(StreamingUpdate::PlanUpdate {
+                                                turn_id: None,
+                                                explanation: None,
+                                                steps,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Task completion: user event with parent_tool_use_id=null,
+                    // tool_use_result.status="completed", and content[].tool_use_id matching a task
+                    else if event_type == "user" && !claude_tasks.is_empty() {
+                        let parent_id = value.get("parent_tool_use_id").and_then(|v| v.as_str());
+                        let result_status = value
+                            .get("tool_use_result")
+                            .and_then(|r| r.get("status"))
+                            .and_then(|s| s.as_str());
+                        
+                        // Only mark complete when parent_tool_use_id is null AND status is "completed"
+                        if parent_id.is_none() && result_status == Some("completed") {
+                            if let Some(items) = value
+                                .get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_array())
+                            {
+                                let mut changed = false;
+                                for item in items {
+                                    if let Some(tool_use_id) = item.get("tool_use_id").and_then(|v| v.as_str()) {
+                                        for task in claude_tasks.iter_mut() {
+                                            if task.0 == tool_use_id && task.2 != "completed" {
+                                                task.2 = "completed".to_string();
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                }
+                                if changed {
+                                    let steps: Vec<PlanStep> = claude_tasks.iter().map(|(_, d, s)| {
+                                        PlanStep { step: d.clone(), status: s.clone() }
+                                    }).collect();
+                                    on_update(StreamingUpdate::PlanUpdate {
+                                        turn_id: None,
+                                        explanation: None,
+                                        steps,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
                     for msg in parse_prompt_messages(
                         &value,
                         &mut current_assistant_text,
@@ -1857,7 +1983,7 @@ impl AgentProcessClient {
                         token_usage = Some(usage);
                     }
 
-                    if value.get("type").and_then(|v| v.as_str()) == Some("result") {
+                    if event_type == "result" {
                         saw_result = true;
                         break;
                     }
@@ -2493,10 +2619,39 @@ fn parse_streaming_updates(value: &Value) -> Vec<StreamingUpdate> {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("tool")
                                 .to_string();
-                            let arguments = item
-                                .get("input")
+                            let input = item.get("input");
+                            let arguments = input
                                 .map(|v| v.to_string())
                                 .unwrap_or_else(|| "{}".to_string());
+
+                            // Detect plan.md file creation from Write/Create tools
+                            let name_lower = name.to_lowercase();
+                            if name_lower == "write"
+                                || name_lower == "create"
+                                || name_lower == "proxy_create"
+                            {
+                                if let Some(input_obj) = input {
+                                    let file_path = input_obj
+                                        .get("file_path")
+                                        .or_else(|| input_obj.get("filePath"))
+                                        .or_else(|| input_obj.get("path"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    let content = input_obj
+                                        .get("content")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if file_path.to_lowercase().ends_with("plan.md")
+                                        && !content.is_empty()
+                                    {
+                                        out.push(StreamingUpdate::PlanContent {
+                                            file_path: file_path.to_string(),
+                                            content: content.to_string(),
+                                        });
+                                    }
+                                }
+                            }
+
                             out.push(StreamingUpdate::ToolCall { name, arguments });
                         }
                         "tool_result" => {
