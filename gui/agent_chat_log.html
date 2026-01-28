@@ -663,6 +663,23 @@
         }
       }
 
+      .status-bar-right {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .session-cost {
+        color: #41b588;
+        font-family: "Roboto Mono", monospace;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .session-cost:empty {
+        display: none;
+      }
+
       .elapsed-time {
         color: rgba(255, 255, 255, 0.5);
         font-family: "Roboto Mono", monospace;
@@ -2539,7 +2556,10 @@
         <div class="status-dot" id="statusDot"></div>
         <span id="statusText">Ready</span>
       </div>
-      <span class="elapsed-time" id="elapsedTime"></span>
+      <div class="status-bar-right">
+        <span class="session-cost" id="sessionCost"></span>
+        <span class="elapsed-time" id="elapsedTime"></span>
+      </div>
     </div>
 
     <div class="chat-container" id="chatContainer">

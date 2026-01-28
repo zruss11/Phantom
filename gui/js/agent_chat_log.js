@@ -953,6 +953,14 @@
       }
     });
 
+    // Handle cost updates
+    ipcRenderer.on("CostUpdate", function (e, taskId, cost) {
+      if (taskId === currentTaskId && typeof cost === "number" && cost > 0) {
+        const formatted = cost < 0.01 ? "<$0.01" : "$" + cost.toFixed(2);
+        $("#sessionCost").text(formatted);
+      }
+    });
+
     // Open markdown links in the user's browser, not inside the webview
     $(document).on("click", "a[data-external='true']", function (e) {
       const href = $(this).attr("href");
