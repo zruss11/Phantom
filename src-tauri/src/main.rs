@@ -374,6 +374,8 @@ struct Settings {
     // Task creation settings (sticky between restarts)
     #[serde(rename = "taskProjectPath")]
     task_project_path: Option<String>,
+    #[serde(rename = "taskProjectAllowlist", default)]
+    task_project_allowlist: Option<Vec<String>>,
     #[serde(rename = "taskPlanMode")]
     task_plan_mode: Option<bool>,
     #[serde(rename = "taskThinking")]
@@ -401,6 +403,7 @@ pub(crate) struct PendingDiscordTask {
     prompt: String,
     requester_id: u64,
     channel_id: u64,
+    project_path: Option<String>,
     agent_id: Option<String>,
     model: Option<String>,
     created_at: i64,
@@ -2298,15 +2301,39 @@ pub(crate) async fn create_task_from_discord(
     state: &AppState,
     prompt: String,
     agent_id: String,
+    project_path: String,
     model: String,
 ) -> Result<String, String> {
+    fn normalize_allowlist_path(path: &str) -> PathBuf {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return PathBuf::new();
+        }
+        std::fs::canonicalize(trimmed).unwrap_or_else(|_| PathBuf::from(trimmed))
+    }
+
+    fn project_path_allowed(allowlist: &[String], project_path: &str) -> bool {
+        let project_path = normalize_allowlist_path(project_path);
+        allowlist.iter().any(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return false;
+            }
+            let allowed_path = normalize_allowlist_path(entry);
+            if allowed_path.as_os_str().is_empty() {
+                return false;
+            }
+            project_path.starts_with(&allowed_path)
+        })
+    }
+
     let settings = state.settings.lock().await.clone();
     let agent_models = settings.task_agent_models.clone().unwrap_or_default();
     let prefs = agent_models.get(&agent_id).cloned().unwrap_or_default();
 
     let plan_mode = settings.task_plan_mode.unwrap_or(false);
     let thinking = settings.task_thinking.unwrap_or(true);
-    let use_worktree = settings.task_use_worktree.unwrap_or(false);
+    let use_worktree = true;
     let base_branch = settings.task_base_branch.clone();
 
     let agents_with_own_permissions = [
@@ -2364,10 +2391,39 @@ pub(crate) async fn create_task_from_discord(
         model
     };
 
+    let project_path = if project_path.trim().is_empty() {
+        None
+    } else {
+        Some(project_path)
+    };
+    let allowlist = settings
+        .task_project_allowlist
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect::<Vec<_>>();
+    if !allowlist.is_empty() {
+        let Some(project_path_value) = project_path
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        else {
+            return Err("Discord tasks require a project selection.".to_string());
+        };
+        if !project_path_allowed(&allowlist, project_path_value) {
+            return Err(
+                "Project path is not in the allowlist. Update Settings > Project Allowlist."
+                    .to_string(),
+            );
+        }
+    }
+
     let payload = CreateAgentPayload {
         agent_id: agent_id.clone(),
         prompt,
-        project_path: settings.task_project_path.clone(),
+        project_path,
         base_branch,
         plan_mode,
         thinking,
@@ -2382,6 +2438,32 @@ pub(crate) async fn create_task_from_discord(
     };
 
     let result = create_agent_session_internal(app.clone(), payload, state).await?;
+    if let Some(window) = app.get_webview_window("main") {
+        let task_snapshot = if let Ok(conn) = state.db.lock() {
+            db::list_tasks(&conn)
+                .ok()
+                .and_then(|tasks| tasks.into_iter().find(|task| task.id == result.task_id))
+        } else {
+            None
+        };
+
+        if let Some(task) = task_snapshot {
+            let payload = serde_json::json!({
+                "ID": task.id,
+                "agent": task.agent_id,
+                "model": task.model,
+                "Status": task.status,
+                "statusState": task.status_state,
+                "cost": task.cost,
+                "worktreePath": task.worktree_path,
+                "totalTokens": task.total_tokens,
+                "contextWindow": task.context_window,
+                "projectPath": task.project_path,
+                "branch": task.branch,
+            });
+            let _ = window.emit("AddTask", (&result.task_id, payload));
+        }
+    }
     let window = app.get_webview_window("main");
     start_task_internal(result.task_id.clone(), state, app, window).await?;
 
@@ -4504,13 +4586,16 @@ fn refresh_claude_oauth_token(refresh_token: &str) -> Result<ClaudeOAuthTokens, 
         .map(String::from);
 
     // Calculate expires_at from expires_in (typically 3600 seconds = 1 hour)
-    let expires_at = json.get("expires_in").and_then(|v: &serde_json::Value| v.as_i64()).map(|secs| {
-        chrono::Utc::now().timestamp() + secs
-    });
+    let expires_at = json
+        .get("expires_in")
+        .and_then(|v: &serde_json::Value| v.as_i64())
+        .map(|secs| chrono::Utc::now().timestamp() + secs);
 
     let new_tokens = ClaudeOAuthTokens {
         access_token: access_token.clone(),
-        refresh_token: new_refresh_token.clone().or_else(|| Some(refresh_token.to_string())),
+        refresh_token: new_refresh_token
+            .clone()
+            .or_else(|| Some(refresh_token.to_string())),
         expires_at,
     };
 
@@ -4519,7 +4604,10 @@ fn refresh_claude_oauth_token(refresh_token: &str) -> Result<ClaudeOAuthTokens, 
         println!("[Harness] Warning: Failed to update keychain: {}", e);
     }
 
-    println!("[Harness] Token refresh successful, new expiry: {:?}", expires_at);
+    println!(
+        "[Harness] Token refresh successful, new expiry: {:?}",
+        expires_at
+    );
     Ok(new_tokens)
 }
 

@@ -28,7 +28,8 @@
       openaiApiKey: '',
       anthropicApiKey: '',
       codexAuthMethod: '',
-      claudeAuthMethod: ''
+      claudeAuthMethod: '',
+      taskProjectAllowlist: []
     },
     projectPath: '~',
     taskIdCounter: 1
@@ -102,7 +103,8 @@
                 Status: 'Ready',
                 statusState: 'idle',
                 cost: 0,
-                worktreePath: result.worktreePath || null
+                worktreePath: result.worktreePath || null,
+                projectPath: payload.projectPath || null
               };
 
               // Emit AddTask event - handler will append to DOM

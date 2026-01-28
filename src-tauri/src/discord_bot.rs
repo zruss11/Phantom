@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use chrono::Utc;
@@ -96,42 +97,34 @@ impl EventHandler for DiscordEventHandler {
         if let Ok(channel) = self.channel_id.to_channel(&ctx.http).await {
             if let Channel::Guild(guild_channel) = channel {
                 let guild_id = guild_channel.guild_id;
-                let existing = guild_id.get_commands(&ctx.http).await;
-                let has_task = existing
-                    .as_ref()
-                    .ok()
-                    .map(|commands| commands.iter().any(|cmd| cmd.name == "task"))
-                    .unwrap_or(false);
-                if !has_task {
-                    let command = CreateCommand::new("task")
-                        .description("Create a Phantom task")
-                        .add_option(
-                            CreateCommandOption::new(
-                                CommandOptionType::String,
-                                "prompt",
-                                "Task prompt",
-                            )
-                            .required(true),
+                let command = CreateCommand::new("task")
+                    .description("Create a Phantom task")
+                    .add_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "prompt",
+                            "Task prompt",
                         )
-                        .add_option(
-                            CreateCommandOption::new(
-                                CommandOptionType::String,
-                                "agent",
-                                "Agent id",
-                            )
-                            .required(false),
+                        .required(true),
+                    )
+                    .add_option(
+                        CreateCommandOption::new(
+                            CommandOptionType::String,
+                            "project",
+                            "Project name or path",
                         )
-                        .add_option(
-                            CreateCommandOption::new(
-                                CommandOptionType::String,
-                                "model",
-                                "Model id",
-                            )
+                        .required(true),
+                    )
+                    .add_option(
+                        CreateCommandOption::new(CommandOptionType::String, "agent", "Agent id")
                             .required(false),
-                        );
-                    if let Err(err) = guild_id.create_command(&ctx.http, command).await {
-                        println!("[Discord] Failed to register /task: {err}");
-                    }
+                    )
+                    .add_option(
+                        CreateCommandOption::new(CommandOptionType::String, "model", "Model id")
+                            .required(false),
+                    );
+                if let Err(err) = guild_id.create_command(&ctx.http, command).await {
+                    println!("[Discord] Failed to register /task: {err}");
                 }
             }
         }
@@ -146,6 +139,8 @@ impl EventHandler for DiscordEventHandler {
         let app = self.app.clone();
 
         if msg.channel_id == self.channel_id {
+            let settings = state.settings.lock().await.clone();
+            let allowlist = project_allowlist(&settings);
             let bot_user_id = self.bot_user_id.lock().ok().and_then(|g| *g);
             if let Some(bot_user_id) = bot_user_id {
                 let mentioned = msg.mentions.iter().any(|user| user.id == bot_user_id);
@@ -164,30 +159,49 @@ impl EventHandler for DiscordEventHandler {
                         return;
                     }
 
+                    if allowlist.is_empty() {
+                        let _ = msg
+                            .channel_id
+                            .send_message(
+                                &ctx.http,
+                                CreateMessage::new().content(
+                                    "No project allowlist configured. Update Settings > Task Projects.",
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+
                     let pending_id = Uuid::new_v4().to_string();
                     let pending = PendingDiscordTask {
                         prompt,
                         requester_id: msg.author.id.get(),
                         channel_id: msg.channel_id.get(),
+                        project_path: None,
                         agent_id: None,
                         model: None,
                         created_at: Utc::now().timestamp(),
                         ephemeral: false,
                     };
-                    let components = build_agent_action_rows(&state, &pending_id);
+                    let (components, truncated) =
+                        build_project_action_rows(&allowlist, &pending_id);
                     {
                         let mut pending_guard = state.pending_discord_tasks.lock().await;
                         prune_pending_discord_tasks(&mut pending_guard);
                         pending_guard.insert(pending_id.clone(), pending);
                     }
 
+                    let mut content = "Pick a project for this task:".to_string();
+                    if truncated {
+                        content.push_str(
+                            " (Too many projects; reply with `project: <name>` to use another.)",
+                        );
+                    }
                     let _ = msg
                         .channel_id
                         .send_message(
                             &ctx.http,
-                            CreateMessage::new()
-                                .content("Pick an agent for this task:")
-                                .components(components),
+                            CreateMessage::new().content(content).components(components),
                         )
                         .await;
                     return;
@@ -213,7 +227,20 @@ impl EventHandler for DiscordEventHandler {
                         None => return,
                     };
 
-                    if key == "agent" {
+                    if key == "project" {
+                        match resolve_project_match(&allowlist, &value) {
+                            Ok(path) => {
+                                pending.project_path = Some(path);
+                            }
+                            Err(err) => {
+                                let _ = msg
+                                    .channel_id
+                                    .send_message(&ctx.http, CreateMessage::new().content(err))
+                                    .await;
+                                return;
+                            }
+                        }
+                    } else if key == "agent" {
                         if !agent_exists(&state, &value) {
                             let _ = msg
                                 .channel_id
@@ -233,6 +260,25 @@ impl EventHandler for DiscordEventHandler {
 
                     let pending_snapshot = pending.clone();
                     drop(pending_guard);
+
+                    if pending_snapshot.project_path.is_none() {
+                        let (components, truncated) =
+                            build_project_action_rows(&allowlist, &pending_id);
+                        let mut content = "Pick a project for this task:".to_string();
+                        if truncated {
+                            content.push_str(
+                                " (Too many projects; reply with `project: <name>` to use another.)",
+                            );
+                        }
+                        let _ = msg
+                            .channel_id
+                            .send_message(
+                                &ctx.http,
+                                CreateMessage::new().content(content).components(components),
+                            )
+                            .await;
+                        return;
+                    }
 
                     if pending_snapshot.agent_id.is_none() {
                         let components = build_agent_action_rows(&state, &pending_id);
@@ -275,6 +321,7 @@ impl EventHandler for DiscordEventHandler {
                         .agent_id
                         .clone()
                         .unwrap_or_else(|| "default".to_string());
+                    let project_path = pending_snapshot.project_path.clone().unwrap_or_default();
                     let model = pending_snapshot
                         .model
                         .clone()
@@ -292,6 +339,7 @@ impl EventHandler for DiscordEventHandler {
                         &state,
                         pending_snapshot.prompt,
                         agent_id,
+                        project_path,
                         model,
                     )
                     .await
@@ -402,14 +450,18 @@ impl EventHandler for DiscordEventHandler {
                 }
 
                 let state = self.app.state::<crate::AppState>().inner().clone();
+                let settings = state.settings.lock().await.clone();
+                let allowlist = project_allowlist(&settings);
 
                 let mut prompt = None;
+                let mut project = None;
                 let mut agent_id = None;
                 let mut model = None;
                 for option in &command.data.options {
                     if let CommandDataOptionValue::String(value) = &option.value {
                         match option.name.as_str() {
                             "prompt" => prompt = Some(value.clone()),
+                            "project" => project = Some(value.clone()),
                             "agent" => agent_id = Some(value.clone()),
                             "model" => model = Some(value.clone()),
                             _ => {}
@@ -426,6 +478,40 @@ impl EventHandler for DiscordEventHandler {
                                 CreateInteractionResponse::Message(
                                     CreateInteractionResponseMessage::new()
                                         .content("Provide a task prompt.")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+                };
+
+                let project = match project {
+                    Some(project) if !project.trim().is_empty() => project,
+                    _ => {
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("Provide a project from the allowlist.")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+                };
+
+                let project_path = match resolve_project_match(&allowlist, &project) {
+                    Ok(path) => path,
+                    Err(err) => {
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content(err)
                                         .ephemeral(true),
                                 ),
                             )
@@ -455,6 +541,7 @@ impl EventHandler for DiscordEventHandler {
                     prompt,
                     requester_id: command.user.id.get(),
                     channel_id: command.channel_id.get(),
+                    project_path: Some(project_path.clone()),
                     agent_id: agent_id.clone(),
                     model: model.clone(),
                     created_at: Utc::now().timestamp(),
@@ -474,12 +561,14 @@ impl EventHandler for DiscordEventHandler {
                     let app = self.app.clone();
                     let http = ctx.http.clone();
                     let command = command.clone();
+                    let project_path = project_path.clone();
                     tauri::async_runtime::spawn(async move {
                         let result = crate::create_task_from_discord(
                             app,
                             &state,
                             pending.prompt,
                             agent_id,
+                            project_path,
                             model,
                         )
                         .await;
@@ -548,6 +637,8 @@ impl EventHandler for DiscordEventHandler {
                 let custom_id = component.data.custom_id.as_str();
                 if let Some(action) = parse_task_create_action(custom_id) {
                     let state = self.app.state::<crate::AppState>().inner().clone();
+                    let settings = state.settings.lock().await.clone();
+                    let allowlist = project_allowlist(&settings);
                     let selected_value =
                         action.value.clone().or_else(|| match &component.data.kind {
                             ComponentInteractionDataKind::StringSelect { values } => {
@@ -607,6 +698,26 @@ impl EventHandler for DiscordEventHandler {
                     }
 
                     match action.kind {
+                        TaskCreateKind::Project => {
+                            match resolve_project_match(&allowlist, &selected_value) {
+                                Ok(path) => {
+                                    pending.project_path = Some(path);
+                                }
+                                Err(err) => {
+                                    let _ = component
+                                        .create_response(
+                                            &ctx.http,
+                                            CreateInteractionResponse::Message(
+                                                CreateInteractionResponseMessage::new()
+                                                    .content(err)
+                                                    .ephemeral(true),
+                                            ),
+                                        )
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
                         TaskCreateKind::Agent => {
                             if !agent_exists(&state, &selected_value) {
                                 let _ = component
@@ -630,6 +741,43 @@ impl EventHandler for DiscordEventHandler {
 
                     let pending_snapshot = pending.clone();
                     drop(pending_guard);
+
+                    if pending_snapshot.project_path.is_none() {
+                        if allowlist.is_empty() {
+                            let _ = component
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content(
+                                                "No project allowlist configured. Update Settings > Task Projects.",
+                                            )
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                        let (components, truncated) =
+                            build_project_action_rows(&allowlist, &action.pending_id);
+                        let mut content = "Pick a project for this task:".to_string();
+                        if truncated {
+                            content.push_str(
+                                " (Too many projects; reply with `project: <name>` to use another.)",
+                            );
+                        }
+                        let _ = component
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::UpdateMessage(
+                                    CreateInteractionResponseMessage::new()
+                                        .content(content)
+                                        .components(components),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
 
                     let Some(agent_id) = pending_snapshot.agent_id.clone() else {
                         let components = build_agent_action_rows(&state, &action.pending_id);
@@ -672,6 +820,7 @@ impl EventHandler for DiscordEventHandler {
                         .model
                         .clone()
                         .unwrap_or_else(|| "default".to_string());
+                    let project_path = pending_snapshot.project_path.clone().unwrap_or_default();
                     {
                         let mut pending_guard = state.pending_discord_tasks.lock().await;
                         pending_guard.remove(&action.pending_id);
@@ -697,6 +846,7 @@ impl EventHandler for DiscordEventHandler {
                             &state,
                             pending_snapshot.prompt,
                             agent_id,
+                            project_path,
                             model,
                         )
                         .await;
@@ -979,6 +1129,7 @@ fn pending_complete(pending: &PendingUserInput) -> bool {
 
 #[derive(Debug, Clone)]
 enum TaskCreateKind {
+    Project,
     Agent,
     Model,
 }
@@ -1012,7 +1163,7 @@ fn parse_task_override(content: &str) -> Option<(String, String)> {
         if value.is_empty() {
             continue;
         }
-        if key == "agent" || key == "model" {
+        if key == "agent" || key == "model" || key == "project" {
             return Some((key, value.to_string()));
         }
     }
@@ -1026,6 +1177,7 @@ fn parse_task_create_action(custom_id: &str) -> Option<TaskCreateAction> {
         return None;
     }
     let kind = match parts.next()? {
+        "project" => TaskCreateKind::Project,
         "agent" => TaskCreateKind::Agent,
         "model" => TaskCreateKind::Model,
         _ => return None,
@@ -1037,6 +1189,123 @@ fn parse_task_create_action(custom_id: &str) -> Option<TaskCreateAction> {
         pending_id,
         value,
     })
+}
+
+fn project_allowlist(settings: &Settings) -> Vec<String> {
+    settings
+        .task_project_allowlist
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+        .collect()
+}
+
+fn normalize_project_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn project_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn compact_path(path: &str, max_len: usize) -> String {
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() <= max_len {
+        return path.to_string();
+    }
+    let tail_len = max_len.saturating_sub(4);
+    let tail = chars[chars.len().saturating_sub(tail_len)..]
+        .iter()
+        .collect::<String>();
+    format!("…{}", tail)
+}
+
+fn resolve_project_match(allowlist: &[String], query: &str) -> Result<String, String> {
+    if allowlist.is_empty() {
+        return Err(
+            "No project allowlist configured. Update Settings > Task Projects.".to_string(),
+        );
+    }
+    let normalized_query = normalize_project_token(query.trim());
+    if normalized_query.is_empty() {
+        return Err("Provide a project name from the allowlist.".to_string());
+    }
+
+    let mut matches: Vec<(i32, String, String)> = Vec::new();
+    for path in allowlist {
+        let base = project_label(path);
+        let base_norm = normalize_project_token(&base);
+        let path_norm = normalize_project_token(path);
+
+        let mut score = 0;
+        if !base_norm.is_empty() {
+            if base_norm == normalized_query {
+                score = score.max(4);
+            } else if base_norm.starts_with(&normalized_query) {
+                score = score.max(3);
+            } else if base_norm.contains(&normalized_query) {
+                score = score.max(2);
+            }
+        }
+        if !path_norm.is_empty() {
+            if path_norm == normalized_query {
+                score = score.max(3);
+            } else if path_norm.contains(&normalized_query) {
+                score = score.max(2);
+            }
+        }
+
+        if score > 0 {
+            matches.push((score, path.clone(), base));
+        }
+    }
+
+    if matches.is_empty() {
+        let names = allowlist
+            .iter()
+            .map(|path| project_label(path))
+            .take(6)
+            .collect::<Vec<_>>();
+        let hint = if names.is_empty() {
+            "".to_string()
+        } else {
+            format!(" Available: {}", names.join(", "))
+        };
+        return Err(format!("No project matches `{}`.{}", query.trim(), hint));
+    }
+
+    matches.sort_by(|a, b| b.0.cmp(&a.0));
+    let best_score = matches[0].0;
+    let best_matches: Vec<(String, String)> = matches
+        .into_iter()
+        .filter(|(score, _, _)| *score == best_score)
+        .map(|(_, path, base)| (path, base))
+        .collect();
+
+    if best_matches.len() > 1 {
+        let names = best_matches
+            .iter()
+            .map(|(_, base)| base.clone())
+            .take(6)
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "Multiple projects match `{}`: {}. Be more specific.",
+            query.trim(),
+            names.join(", ")
+        ));
+    }
+
+    Ok(best_matches[0].0.clone())
 }
 
 fn latest_pending_for_user(
@@ -1059,6 +1328,40 @@ fn prune_pending_discord_tasks(pending: &mut HashMap<String, PendingDiscordTask>
 
 fn agent_exists(state: &AppState, agent_id: &str) -> bool {
     state.config.agents.iter().any(|agent| agent.id == agent_id)
+}
+
+fn build_project_action_rows(
+    allowlist: &[String],
+    pending_id: &str,
+) -> (Vec<CreateActionRow>, bool) {
+    let mut seen = HashSet::new();
+    let mut options: Vec<CreateSelectMenuOption> = Vec::new();
+    for path in allowlist {
+        let trimmed = path.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        let label = project_label(trimmed);
+        let description = compact_path(trimmed, 90);
+        let mut option = CreateSelectMenuOption::new(label, trimmed.to_string());
+        if !description.is_empty() {
+            option = option.description(description);
+        }
+        options.push(option);
+    }
+
+    let truncated = options.len() > 25;
+    let options = options.into_iter().take(25).collect::<Vec<_>>();
+
+    let menu = CreateSelectMenu::new(
+        format!("task_create:project:{}", pending_id),
+        CreateSelectMenuKind::String { options },
+    )
+    .placeholder("Select a project")
+    .min_values(1)
+    .max_values(1);
+
+    (vec![CreateActionRow::SelectMenu(menu)], truncated)
 }
 
 fn build_agent_action_rows(state: &AppState, pending_id: &str) -> Vec<CreateActionRow> {

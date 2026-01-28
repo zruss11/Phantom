@@ -3409,6 +3409,70 @@ input:checked + .slider:before {
   color: rgba(255, 255, 255, 0.3);
 }
 
+.settings-page #taskProjectAllowlistList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-page #taskProjectAllowlistList .project-allowlist-item {
+  background: linear-gradient(
+    140deg,
+    rgba(255, 255, 255, 0.08),
+    rgba(255, 255, 255, 0.02)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  padding: 10px 12px;
+  color: rgba(255, 255, 255, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(233, 30, 99, 0.05);
+}
+
+.settings-page #taskProjectAllowlistList .project-allowlist-item:hover {
+  border-color: rgba(233, 30, 99, 0.4);
+  background: linear-gradient(
+    140deg,
+    rgba(255, 255, 255, 0.12),
+    rgba(255, 255, 255, 0.04)
+  );
+}
+
+.settings-page #taskProjectAllowlistList .project-allowlist-item .text-truncate {
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.settings-page .project-allowlist-star {
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.6);
+  width: 36px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: all 0.2s ease;
+}
+
+.settings-page .project-allowlist-star:hover {
+  border-color: rgba(233, 30, 99, 0.6);
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(233, 30, 99, 0.15);
+  transform: translateY(-1px);
+}
+
+.settings-page #taskProjectAllowlistList .project-allowlist-item .fas.fa-star {
+  color: #f6c45e;
+  text-shadow: 0 0 8px rgba(246, 196, 94, 0.35);
+}
+
+.settings-page .project-allowlist-empty {
+  padding: 6px 4px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
 .settings-page .input-group .form-control {
   border-top-right-radius: 0;
   border-bottom-right-radius: 0;

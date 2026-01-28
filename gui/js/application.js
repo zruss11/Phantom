@@ -221,6 +221,7 @@ async function refreshBaseBranchOptions() {
 // webFrame.setVisualZoomLevelLimits(1, 1)
 // webFrame.setLayoutZoomLevelLimits(0, 0);
 let currentSettings = {};
+let recentProjectPaths = [];
 
 function collectAuthInputs() {
   const auth = {};
@@ -235,11 +236,86 @@ function collectAuthInputs() {
   return auth;
 }
 
+function getProjectAllowlist() {
+  return Array.isArray(currentSettings.taskProjectAllowlist)
+    ? currentSettings.taskProjectAllowlist
+    : [];
+}
+
+function addRecentProjectPath(path) {
+  const trimmed = (path || "").trim();
+  if (!trimmed) return;
+  recentProjectPaths = recentProjectPaths.filter((entry) => entry !== trimmed);
+  recentProjectPaths.unshift(trimmed);
+  recentProjectPaths = recentProjectPaths.slice(0, 12);
+}
+
+function projectPathLabel(path) {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+function renderProjectAllowlist() {
+  const container = $("#taskProjectAllowlistList");
+  if (!container.length) return;
+
+  const allowlist = getProjectAllowlist()
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  const allowSet = new Set(allowlist);
+  const entries = [];
+
+  recentProjectPaths.forEach((path) => {
+    if (!path) return;
+    entries.push({ path: path, starred: allowSet.has(path) });
+  });
+
+  allowlist.forEach((path) => {
+    if (!entries.find((entry) => entry.path === path)) {
+      entries.push({ path: path, starred: true });
+    }
+  });
+
+  container.empty();
+
+  if (!entries.length) {
+    container.append(
+      '<div class="text-muted small project-allowlist-empty">No recent projects yet.</div>',
+    );
+    return;
+  }
+
+  entries.forEach((entry) => {
+    const name = projectPathLabel(entry.path);
+    const starClass = entry.starred ? "fas" : "fal";
+    const item = $(
+      '<div class="list-group-item project-allowlist-item d-flex align-items-center justify-content-between"></div>',
+    );
+    const label = $("<div></div>")
+      .addClass("text-truncate")
+      .text(name)
+      .attr("title", entry.path);
+    const button = $(
+      '<button type="button" class="btn btn-sm btn-outline-secondary project-allowlist-star"></button>',
+    );
+    button.data("path", entry.path);
+    button.append(`<i class="${starClass} fa-star"></i>`);
+    item.append(label, button);
+    container.append(item);
+  });
+}
+
+function updateProjectAllowlist(nextAllowlist) {
+  currentSettings.taskProjectAllowlist = nextAllowlist;
+  saveSettingsFromUi();
+  renderProjectAllowlist();
+}
+
 async function saveSettingsFromUi() {
   let discordBotToken = $("#discordBotToken").val();
   let discordChannelId = $("#discordChannelId").val();
   let retryDelay = $("#retryDelay").val();
   let errorDelay = $("#errorDelay").val();
+  let taskProjectAllowlist = getProjectAllowlist();
   let pl = Object.assign(
     {},
     currentSettings,
@@ -253,6 +329,7 @@ async function saveSettingsFromUi() {
       agentNotificationsEnabled: $("#agentNotificationsEnabled").is(":checked"),
       agentNotificationStack: $("#agentNotificationStack").is(":checked"),
       aiSummariesEnabled: $("#aiSummariesEnabled").is(":checked"),
+      taskProjectAllowlist: taskProjectAllowlist,
     },
     collectAuthInputs(),
   );
@@ -269,6 +346,16 @@ async function saveSettingsFromUi() {
 // Auto-save settings on any change (inputs and toggles)
 $("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay").on("change", saveSettingsFromUi);
 $("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #aiSummariesEnabled").on("change", saveSettingsFromUi);
+
+$(document).on("click", ".project-allowlist-star", function () {
+  const path = $(this).data("path");
+  if (!path) return;
+  const allowlist = getProjectAllowlist();
+  const nextAllowlist = allowlist.includes(path)
+    ? allowlist.filter((entry) => entry !== path)
+    : allowlist.concat(path);
+  updateProjectAllowlist(nextAllowlist);
+});
 
 document.querySelectorAll("[data-auth-save]").forEach((button) => {
   button.addEventListener("click", (event) => {
@@ -981,11 +1068,17 @@ ipcRenderer.on("AddTask", (e, ID, Task) => {
   const statusState = Task.statusState || "idle";
   const cost = Task.cost || 0;
   const worktreePath = Task.worktreePath || Task.worktree_path || null;
+  const projectPath = Task.projectPath || Task.project_path || null;
   const branch = Task.branch || null; // Git branch name (may differ from folder after async rename)
   const totalTokens = Task.totalTokens || null;
   const contextWindow = Task.contextWindow || null;
   const agentLogo = AGENT_LOGOS[agent] || AGENT_LOGOS["codex"];
   const animationClass = getAnimationClass(statusState);
+
+  if (projectPath) {
+    addRecentProjectPath(projectPath);
+    renderProjectAllowlist();
+  }
 
   // Store task data for sorting
   taskDataMap[ID] = {
@@ -1672,6 +1765,17 @@ async function getSettings() {
     $("#aiSummariesEnabled").prop("checked", true);
   }
 
+  if (settingsPayload.taskProjectAllowlist !== undefined) {
+    currentSettings.taskProjectAllowlist = Array.isArray(
+      settingsPayload.taskProjectAllowlist,
+    )
+      ? settingsPayload.taskProjectAllowlist
+      : [];
+  } else {
+    currentSettings.taskProjectAllowlist = [];
+  }
+  renderProjectAllowlist();
+
 
   document.querySelectorAll("[data-auth-key]").forEach((input) => {
     const key = input.dataset.authKey;
@@ -1967,6 +2071,9 @@ function init() {
         if (Array.isArray(tasks)) {
           console.log("[Harness] Loading", tasks.length, "persisted tasks");
           tasks.forEach(function (task) {
+            if (task.project_path) {
+              addRecentProjectPath(task.project_path);
+            }
             // Emit AddTask for each persisted task
             window.tauriEmitEvent("AddTask", null, task.id, {
               ID: task.id,
@@ -1980,6 +2087,7 @@ function init() {
               contextWindow: task.contextWindow,
             });
           });
+          renderProjectAllowlist();
         }
       })
       .catch(function (err) {
@@ -2984,6 +3092,8 @@ init();
   $("#projectPath").on("change", () => {
     saveTaskSettings();
     refreshBaseBranchOptions();
+    addRecentProjectPath(getProjectPath());
+    renderProjectAllowlist();
   });
 
   $("#pickProjectPath").on("click", async () => {
@@ -2993,6 +3103,8 @@ init();
         setProjectPath(picked);
         saveTaskSettings();
         refreshBaseBranchOptions();
+        addRecentProjectPath(picked);
+        renderProjectAllowlist();
       }
     } catch (err) {
       console.log("[Harness] Project picker unavailable");
