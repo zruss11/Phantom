@@ -260,6 +260,7 @@ pub(crate) struct AppState {
     running_tasks: Arc<Mutex<HashSet<String>>>,
     discord_bot: Arc<StdMutex<Option<discord_bot::DiscordBotHandle>>>,
     pending_user_inputs: Arc<Mutex<HashMap<String, PendingUserInput>>>,
+    pending_discord_tasks: Arc<Mutex<HashMap<String, PendingDiscordTask>>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -393,6 +394,17 @@ pub(crate) struct PendingUserInput {
     request_id: String,
     questions: Vec<UserInputQuestion>,
     answers: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingDiscordTask {
+    prompt: String,
+    requester_id: u64,
+    channel_id: u64,
+    agent_id: Option<String>,
+    model: Option<String>,
+    created_at: i64,
+    ephemeral: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1893,6 +1905,14 @@ async fn create_agent_session(
     payload: CreateAgentPayload,
     state: State<'_, AppState>,
 ) -> Result<CreateAgentResult, String> {
+    create_agent_session_internal(app, payload, state.inner()).await
+}
+
+async fn create_agent_session_internal(
+    app: AppHandle,
+    payload: CreateAgentPayload,
+    state: &AppState,
+) -> Result<CreateAgentResult, String> {
     let agent = find_agent(&state.config, &payload.agent_id)
         .ok_or_else(|| format!("Unknown agent id: {}", payload.agent_id))?;
 
@@ -2273,11 +2293,125 @@ async fn create_agent_session(
     })
 }
 
+pub(crate) async fn create_task_from_discord(
+    app: AppHandle,
+    state: &AppState,
+    prompt: String,
+    agent_id: String,
+    model: String,
+) -> Result<String, String> {
+    let settings = state.settings.lock().await.clone();
+    let agent_models = settings.task_agent_models.clone().unwrap_or_default();
+    let prefs = agent_models.get(&agent_id).cloned().unwrap_or_default();
+
+    let plan_mode = settings.task_plan_mode.unwrap_or(false);
+    let thinking = settings.task_thinking.unwrap_or(true);
+    let use_worktree = settings.task_use_worktree.unwrap_or(false);
+    let base_branch = settings.task_base_branch.clone();
+
+    let agents_with_own_permissions = [
+        "codex",
+        "claude-code",
+        "droid",
+        "factory-droid",
+        "amp",
+        "opencode",
+    ];
+    let permission_mode = if agents_with_own_permissions.contains(&agent_id.as_str()) {
+        "bypassPermissions".to_string()
+    } else {
+        prefs
+            .permission_mode
+            .clone()
+            .unwrap_or_else(|| "default".to_string())
+    };
+
+    let reasoning_effort = prefs
+        .reasoning_effort
+        .clone()
+        .filter(|value| value != "default");
+    let agent_mode = if agent_id == "opencode" {
+        Some(
+            prefs
+                .agent_mode
+                .clone()
+                .unwrap_or_else(|| "build".to_string()),
+        )
+    } else {
+        prefs.agent_mode.clone()
+    };
+    let codex_mode = if agent_id == "codex" {
+        let mode = if plan_mode {
+            "plan".to_string()
+        } else {
+            prefs
+                .agent_mode
+                .clone()
+                .unwrap_or_else(|| "default".to_string())
+        };
+        if mode == "default" {
+            None
+        } else {
+            Some(mode)
+        }
+    } else {
+        None
+    };
+
+    let exec_model = if model.trim().is_empty() {
+        "default".to_string()
+    } else {
+        model
+    };
+
+    let payload = CreateAgentPayload {
+        agent_id: agent_id.clone(),
+        prompt,
+        project_path: settings.task_project_path.clone(),
+        base_branch,
+        plan_mode,
+        thinking,
+        use_worktree,
+        permission_mode,
+        exec_model,
+        reasoning_effort,
+        agent_mode,
+        codex_mode,
+        attachments: Vec::new(),
+        multi_create: false,
+    };
+
+    let result = create_agent_session_internal(app.clone(), payload, state).await?;
+    let window = app.get_webview_window("main");
+    start_task_internal(result.task_id.clone(), state, app, window).await?;
+
+    if discord_enabled(&settings) {
+        let intro_message = format!("**Discord task started** `{}`", result.task_id);
+        let _ = ensure_discord_thread(state, &result.task_id, &intro_message).await;
+    }
+    Ok(result.task_id)
+}
+
 #[tauri::command]
 async fn start_task(
     task_id: String,
     state: State<'_, AppState>,
     window: WebviewWindow,
+) -> Result<(), String> {
+    start_task_internal(
+        task_id,
+        state.inner(),
+        window.app_handle().clone(),
+        Some(window),
+    )
+    .await
+}
+
+async fn start_task_internal(
+    task_id: String,
+    state: &AppState,
+    app: AppHandle,
+    window: Option<WebviewWindow>,
 ) -> Result<(), String> {
     // Prevent duplicate starts for the same task id (rapid-clicking Start).
     // If a run is already in-flight, treat this as a no-op.
@@ -2297,6 +2431,18 @@ async fn start_task(
         }
     }
 
+    let window_ref = window.as_ref();
+    let emit_status = |message: &str, color: &str, status_state: &str| -> Result<(), String> {
+        if let Some(window) = window_ref {
+            window
+                .emit("StatusUpdate", (&task_id, message, color, status_state))
+                .map_err(|e| e.to_string())?;
+        } else if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("StatusUpdate", (&task_id, message, color, status_state));
+        }
+        Ok(())
+    };
+
     {
         let mut set = state.running_tasks.lock().await;
         if set.contains(&task_id) {
@@ -2313,12 +2459,7 @@ async fn start_task(
         running_tasks: state.running_tasks.clone(),
     };
     // Emit initial status
-    window
-        .emit(
-            "StatusUpdate",
-            (&task_id, "Starting...", "yellow", "running"),
-        )
-        .map_err(|e| e.to_string())?;
+    emit_status("Starting...", "yellow", "running")?;
 
     // Update DB status to running
     {
@@ -2354,9 +2495,7 @@ async fn start_task(
             None => {
                 let error_msg = "Task not found in database";
                 println!("[Harness] start_task reconnect error: {}", error_msg);
-                window
-                    .emit("StatusUpdate", (&task_id, error_msg, "red", "error"))
-                    .map_err(|e| e.to_string())?;
+                emit_status(error_msg, "red", "error")?;
                 return Err(error_msg.to_string());
             }
         };
@@ -2367,9 +2506,7 @@ async fn start_task(
             None => {
                 let error_msg = format!("Unknown agent: {}", task.agent_id);
                 println!("[Harness] start_task reconnect error: {}", error_msg);
-                window
-                    .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
-                    .map_err(|e| e.to_string())?;
+                emit_status(&error_msg, "red", "error")?;
                 return Err(error_msg);
             }
         };
@@ -2393,9 +2530,7 @@ async fn start_task(
             Err(e) => {
                 let error_msg = format!("Auth not configured: {}", e);
                 println!("[Harness] start_task reconnect error: {}", error_msg);
-                window
-                    .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
-                    .map_err(|e| e.to_string())?;
+                emit_status(&error_msg, "red", "error")?;
                 return Err(error_msg);
             }
         };
@@ -2405,12 +2540,7 @@ async fn start_task(
             "[Harness] Reconnecting Agent session for start_task: {}",
             task_id
         );
-        window
-            .emit(
-                "StatusUpdate",
-                (&task_id, "Reconnecting...", "yellow", "running"),
-            )
-            .map_err(|e| e.to_string())?;
+        emit_status("Reconnecting...", "yellow", "running")?;
 
         let (client, session_id, used_session_load) =
             match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
@@ -2418,9 +2548,7 @@ async fn start_task(
                 Err(e) => {
                     let error_msg = format!("Failed to reconnect: {}", e);
                     println!("[Harness] start_task reconnect error: {}", error_msg);
-                    window
-                        .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
-                        .map_err(|e| e.to_string())?;
+                    emit_status(&error_msg, "red", "error")?;
                     return Err(error_msg);
                 }
             };
@@ -2472,7 +2600,7 @@ async fn start_task(
             Some(claude_usage_watcher::start_watching(
                 &session_id,
                 &task_id,
-                window.app_handle().clone(),
+                app.clone(),
                 state.db.clone(),
             ))
         } else {
@@ -2607,7 +2735,7 @@ async fn start_task(
         })
         .collect();
 
-    if let Some(chat_window) = window.app_handle().get_webview_window(&chat_window_label) {
+    if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
         let user_chat_msg = if chat_attachments.is_empty() {
             serde_json::json!({
                 "message_type": "user_message",
@@ -2625,15 +2753,10 @@ async fn start_task(
         let _ = chat_window.emit("ChatLogUpdate", (&task_id, user_chat_msg));
     }
 
-    post_discord_user_message(state.inner(), &task_id, &agent_id, &prompt).await;
+    post_discord_user_message(state, &task_id, &agent_id, &prompt).await;
 
     // Send prompt to agent
-    window
-        .emit(
-            "StatusUpdate",
-            (&task_id, "Sending to agent...", "yellow", "running"),
-        )
-        .map_err(|e| e.to_string())?;
+    emit_status("Sending to agent...", "yellow", "running")?;
 
     let chat_window_label_streaming = chat_window_label.clone();
 
@@ -2641,10 +2764,10 @@ async fn start_task(
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamingUpdate>();
 
     // Spawn a task to emit streaming updates to the chat window AND main window status
-    let app_handle = window.app_handle().clone();
+    let app_handle = app.clone();
     let task_id_clone = task_id.clone();
     let db_for_stream = state.db.clone();
-    let state_for_stream: AppState = state.inner().clone();
+    let state_for_stream: AppState = state.clone();
     let stream_emit_handle = tokio::task::spawn_blocking(move || {
         use std::time::{Duration, Instant};
 
@@ -2970,15 +3093,8 @@ async fn start_task(
                     println!("[Harness] Detected recoverable exit, attempting reconnection...");
 
                     // Emit reconnection status
-                    let _ = window.emit(
-                        "StatusUpdate",
-                        (
-                            &task_id,
-                            "Session terminated, reconnecting...",
-                            "#FFA500",
-                            "running",
-                        ),
-                    );
+                    let _ =
+                        emit_status("Session terminated, reconnecting...", "#FFA500", "running");
 
                     // Look up task from DB to get reconnection info
                     let task = {
@@ -3047,7 +3163,7 @@ async fn start_task(
                                         Some(claude_usage_watcher::start_watching(
                                             &new_session_id,
                                             &task_id,
-                                            window.app_handle().clone(),
+                                            app.clone(),
                                             state.db.clone(),
                                         ));
                                 }
@@ -3057,10 +3173,7 @@ async fn start_task(
                             session_id = new_session_id.clone();
 
                             // Emit status and retry
-                            let _ = window.emit(
-                                "StatusUpdate",
-                                (&task_id, "Reconnected, retrying...", "#4ade80", "running"),
-                            );
+                            let _ = emit_status("Reconnected, retrying...", "#4ade80", "running");
                             continue; // Retry the prompt
                         }
                         Err(reconnect_err) => {
@@ -3132,7 +3245,7 @@ async fn start_task(
         }
 
         // Emit to chat window
-        if let Some(chat_window) = window.app_handle().get_webview_window(&chat_window_label) {
+        if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
             let _ = chat_window.emit("ChatLogUpdate", (&task_id, &chat_msg));
         }
 
@@ -3148,9 +3261,7 @@ async fn start_task(
         } else {
             "white"
         };
-        window
-            .emit("StatusUpdate", (&task_id, &status, color, "running"))
-            .map_err(|e| e.to_string())?;
+        emit_status(&status, color, "running")?;
     }
 
     // Process token usage and update cost
@@ -3161,14 +3272,22 @@ async fn start_task(
             let current_cost = db::get_task_cost(&conn, &task_id).unwrap_or(0.0);
             let new_total = current_cost + cost;
             let _ = db::update_task_cost(&conn, &task_id, new_total);
-            window
-                .emit("CostUpdate", (&task_id, new_total))
-                .map_err(|e| e.to_string())?;
+            if let Some(window) = window_ref {
+                window
+                    .emit("CostUpdate", (&task_id, new_total))
+                    .map_err(|e| e.to_string())?;
+            } else if let Some(main_window) = app.get_webview_window("main") {
+                let _ = main_window.emit("CostUpdate", (&task_id, new_total));
+            }
         }
         // Emit token usage for context indicator and save to database
-        window
-            .emit("TokenUsageUpdate", (&task_id, usage))
-            .map_err(|e| e.to_string())?;
+        if let Some(window) = window_ref {
+            window
+                .emit("TokenUsageUpdate", (&task_id, usage))
+                .map_err(|e| e.to_string())?;
+        } else if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("TokenUsageUpdate", (&task_id, usage));
+        }
         // Persist token usage to database for restart recovery
         let total_tokens = usage.total_token_usage.total_tokens;
         let context_window = usage.model_context_window;
@@ -3186,7 +3305,7 @@ async fn start_task(
                 handle.claude_watcher = Some(claude_usage_watcher::start_watching(
                     new_session_id,
                     &task_id,
-                    window.app_handle().clone(),
+                    app.clone(),
                     state.db.clone(),
                 ));
             }
@@ -3211,25 +3330,15 @@ async fn start_task(
         .cloned()
         .unwrap_or_else(|| final_status.clone());
 
-    let summary_status = summarize_status_for_notifications(
-        state.inner(),
-        &agent_id,
-        &preview_source,
-        &final_status,
-    )
-    .await;
+    let summary_status =
+        summarize_status_for_notifications(state, &agent_id, &preview_source, &final_status).await;
 
-    post_discord_assistant_message(state.inner(), &task_id, &preview_source).await;
+    post_discord_assistant_message(state, &task_id, &preview_source).await;
 
-    window
-        .emit(
-            "StatusUpdate",
-            (&task_id, &summary_status, "#04d885", "completed"),
-        )
-        .map_err(|e| e.to_string())?;
+    emit_status(&summary_status, "#04d885", "completed")?;
 
     // Emit completion status to chat window
-    if let Some(chat_window) = window.app_handle().get_webview_window(&chat_window_label) {
+    if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
         let _ = chat_window.emit("ChatLogStatus", (&task_id, &summary_status, "completed"));
     }
 
@@ -3239,15 +3348,7 @@ async fn start_task(
         let _ = db::update_task_status(&conn, &task_id, &summary_status, "completed");
     }
 
-    let app_handle = window.app_handle();
-    let _ = maybe_show_agent_notification(
-        &app_handle,
-        state.inner(),
-        &task_id,
-        &agent_id,
-        &summary_status,
-    )
-    .await;
+    let _ = maybe_show_agent_notification(&app, state, &task_id, &agent_id, &summary_status).await;
 
     Ok(())
 }
@@ -3320,7 +3421,13 @@ async fn start_pending_prompt(
     // - Sending pending prompt
     // - Streaming responses
     // - Emitting to the calling window
-    start_task(task_id, state, window).await
+    start_task_internal(
+        task_id,
+        state.inner(),
+        window.app_handle().clone(),
+        Some(window),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -4246,10 +4353,21 @@ async fn check_claude_auth() -> Result<ClaudeAuthStatus, String> {
     })
 }
 
-const CLAUDE_TOKEN_CACHE_TTL_SECS: u64 = 86_400;
+/// How often to re-check credentials from disk/keychain (5 minutes)
+const CLAUDE_TOKEN_CACHE_TTL_SECS: u64 = 300;
+
+/// Buffer before expiration to trigger refresh (5 minutes)
+const TOKEN_EXPIRY_BUFFER_SECS: i64 = 300;
+
+#[derive(Clone)]
+struct ClaudeOAuthTokens {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_at: Option<i64>, // Unix timestamp in seconds
+}
 
 struct ClaudeTokenCache {
-    token: Option<String>,
+    tokens: Option<ClaudeOAuthTokens>,
     last_checked: Option<Instant>,
 }
 
@@ -4258,52 +4376,275 @@ static CLAUDE_TOKEN_CACHE: OnceLock<StdMutex<ClaudeTokenCache>> = OnceLock::new(
 fn claude_token_cache() -> &'static StdMutex<ClaudeTokenCache> {
     CLAUDE_TOKEN_CACHE.get_or_init(|| {
         StdMutex::new(ClaudeTokenCache {
-            token: None,
+            tokens: None,
             last_checked: None,
         })
     })
 }
 
+/// Invalidate the Claude token cache (call after refresh or when token is known to be invalid)
+fn invalidate_claude_token_cache() {
+    if let Ok(mut cache) = claude_token_cache().lock() {
+        cache.tokens = None;
+        cache.last_checked = None;
+    }
+}
+
 /// Get Claude OAuth token from credentials file or keychain (cached).
+/// Will automatically refresh expired tokens if a refresh token is available.
 pub(crate) fn get_claude_oauth_token() -> Option<String> {
     let now = Instant::now();
+    let current_time = chrono::Utc::now().timestamp();
+
+    // Check cache first
     if let Ok(cache) = claude_token_cache().lock() {
         if let Some(last_checked) = cache.last_checked {
             if last_checked.elapsed() < Duration::from_secs(CLAUDE_TOKEN_CACHE_TTL_SECS) {
-                return cache.token.clone();
+                if let Some(ref tokens) = cache.tokens {
+                    // Check if token is still valid (with buffer)
+                    if let Some(expires_at) = tokens.expires_at {
+                        if current_time < expires_at - TOKEN_EXPIRY_BUFFER_SECS {
+                            return Some(tokens.access_token.clone());
+                        }
+                        // Token expired or about to expire - need refresh
+                        println!(
+                            "[Harness] Claude token expired or expiring soon (expires_at: {}, now: {})",
+                            expires_at, current_time
+                        );
+                    } else {
+                        // No expiration info, assume valid
+                        return Some(tokens.access_token.clone());
+                    }
+                }
             }
         }
     }
 
-    let token = fetch_claude_oauth_token();
-    if let Ok(mut cache) = claude_token_cache().lock() {
-        cache.token = token.clone();
-        cache.last_checked = Some(now);
+    // Fetch fresh tokens from disk/keychain
+    let tokens = fetch_claude_oauth_tokens();
+
+    if let Some(ref tokens) = tokens {
+        // Check if we need to refresh
+        if let Some(expires_at) = tokens.expires_at {
+            if current_time >= expires_at - TOKEN_EXPIRY_BUFFER_SECS {
+                println!("[Harness] Token needs refresh, attempting...");
+                if let Some(ref refresh_token) = tokens.refresh_token {
+                    match refresh_claude_oauth_token(refresh_token) {
+                        Ok(new_tokens) => {
+                            // Update cache with new tokens
+                            if let Ok(mut cache) = claude_token_cache().lock() {
+                                let access_token = new_tokens.access_token.clone();
+                                cache.tokens = Some(new_tokens);
+                                cache.last_checked = Some(now);
+                                return Some(access_token);
+                            }
+                        }
+                        Err(e) => {
+                            println!("[Harness] Token refresh failed: {}", e);
+                            // Fall through to return expired token (will get 401)
+                        }
+                    }
+                } else {
+                    println!("[Harness] No refresh token available");
+                }
+            }
+        }
     }
-    token
+
+    // Update cache
+    if let Ok(mut cache) = claude_token_cache().lock() {
+        let access_token = tokens.as_ref().map(|t| t.access_token.clone());
+        cache.tokens = tokens;
+        cache.last_checked = Some(now);
+        return access_token;
+    }
+
+    tokens.map(|t| t.access_token)
 }
 
-fn fetch_claude_oauth_token() -> Option<String> {
-    // First try ~/.claude/.credentials.json (more common location)
+/// Refresh Claude OAuth token using the refresh token
+fn refresh_claude_oauth_token(refresh_token: &str) -> Result<ClaudeOAuthTokens, String> {
+    println!("[Harness] Refreshing Claude OAuth token...");
+
+    // Use blocking reqwest since this is called from sync context
+    let client = reqwest::blocking::Client::new();
+
+    let response = client
+        .post("https://console.anthropic.com/v1/oauth/token")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ])
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .map_err(|e| format!("Refresh request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        return Err(format!(
+            "Token refresh failed with status {}: {}",
+            status, body
+        ));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("Failed to parse refresh response: {}", e))?;
+
+    let access_token = json
+        .get("access_token")
+        .and_then(|v: &serde_json::Value| v.as_str())
+        .ok_or("No access_token in refresh response")?
+        .to_string();
+
+    let new_refresh_token = json
+        .get("refresh_token")
+        .and_then(|v: &serde_json::Value| v.as_str())
+        .map(String::from);
+
+    // Calculate expires_at from expires_in (typically 3600 seconds = 1 hour)
+    let expires_at = json.get("expires_in").and_then(|v: &serde_json::Value| v.as_i64()).map(|secs| {
+        chrono::Utc::now().timestamp() + secs
+    });
+
+    let new_tokens = ClaudeOAuthTokens {
+        access_token: access_token.clone(),
+        refresh_token: new_refresh_token.clone().or_else(|| Some(refresh_token.to_string())),
+        expires_at,
+    };
+
+    // Update keychain with new tokens
+    if let Err(e) = update_claude_keychain_tokens(&new_tokens) {
+        println!("[Harness] Warning: Failed to update keychain: {}", e);
+    }
+
+    println!("[Harness] Token refresh successful, new expiry: {:?}", expires_at);
+    Ok(new_tokens)
+}
+
+/// Update Claude tokens in macOS keychain
+fn update_claude_keychain_tokens(tokens: &ClaudeOAuthTokens) -> Result<(), String> {
+    let username = std::env::var("USER").map_err(|_| "USER env not set")?;
+
+    // First read existing keychain data
+    let output = std::process::Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-a",
+            &username,
+            "-w",
+        ])
+        .output()
+        .map_err(|e| format!("Failed to read keychain: {}", e))?;
+
+    if !output.status.success() {
+        return Err("Keychain entry not found".to_string());
+    }
+
+    let existing_data = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let mut keychain_json: serde_json::Value = serde_json::from_str(&existing_data)
+        .map_err(|e| format!("Failed to parse keychain data: {}", e))?;
+
+    // Update the claudeAiOauth section
+    if let Some(oauth) = keychain_json.get_mut("claudeAiOauth") {
+        oauth["accessToken"] = serde_json::json!(tokens.access_token);
+        if let Some(ref rt) = tokens.refresh_token {
+            oauth["refreshToken"] = serde_json::json!(rt);
+        }
+        if let Some(exp) = tokens.expires_at {
+            oauth["expiresAt"] = serde_json::json!(exp);
+        }
+    } else {
+        // Create claudeAiOauth section if it doesn't exist
+        keychain_json["claudeAiOauth"] = serde_json::json!({
+            "accessToken": tokens.access_token,
+            "refreshToken": tokens.refresh_token,
+            "expiresAt": tokens.expires_at,
+        });
+    }
+
+    let updated_json = serde_json::to_string(&keychain_json)
+        .map_err(|e| format!("Failed to serialize keychain data: {}", e))?;
+
+    // Delete existing entry first (security command doesn't have an update)
+    let _ = std::process::Command::new("security")
+        .args([
+            "delete-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-a",
+            &username,
+        ])
+        .output();
+
+    // Add updated entry
+    let add_output = std::process::Command::new("security")
+        .args([
+            "add-generic-password",
+            "-s",
+            "Claude Code-credentials",
+            "-a",
+            &username,
+            "-w",
+            &updated_json,
+            "-U", // Update if exists
+        ])
+        .output()
+        .map_err(|e| format!("Failed to update keychain: {}", e))?;
+
+    if !add_output.status.success() {
+        return Err(format!(
+            "Keychain update failed: {}",
+            String::from_utf8_lossy(&add_output.stderr)
+        ));
+    }
+
+    // Invalidate cache so next read gets fresh data
+    invalidate_claude_token_cache();
+
+    Ok(())
+}
+
+/// Fetch Claude OAuth tokens from credentials file or keychain
+/// Returns full token structure including refresh token and expiration
+fn fetch_claude_oauth_tokens() -> Option<ClaudeOAuthTokens> {
     let home = dirs::home_dir()?;
 
+    // First try ~/.claude/.credentials.json (more common location)
     let credentials_path = home.join(".claude").join(".credentials.json");
     if credentials_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&credentials_path) {
             if content.len() <= 1_000_000 {
                 if let Ok(creds) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(token) = creds.get("accessToken").and_then(|v| v.as_str()) {
-                        if !token.is_empty() {
-                            return Some(token.to_string());
+                    // Try claudeAiOauth structure first
+                    if let Some(oauth) = creds.get("claudeAiOauth") {
+                        if let Some(token) = oauth.get("accessToken").and_then(|v| v.as_str()) {
+                            if !token.is_empty() {
+                                return Some(ClaudeOAuthTokens {
+                                    access_token: token.to_string(),
+                                    refresh_token: oauth
+                                        .get("refreshToken")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from),
+                                    expires_at: oauth.get("expiresAt").and_then(|v| v.as_i64()),
+                                });
+                            }
                         }
                     }
-                    if let Some(token) = creds
-                        .get("claudeAiOauth")
-                        .and_then(|o| o.get("accessToken"))
-                        .and_then(|v| v.as_str())
-                    {
+                    // Try flat structure
+                    if let Some(token) = creds.get("accessToken").and_then(|v| v.as_str()) {
                         if !token.is_empty() {
-                            return Some(token.to_string());
+                            return Some(ClaudeOAuthTokens {
+                                access_token: token.to_string(),
+                                refresh_token: creds
+                                    .get("refreshToken")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                expires_at: creds.get("expiresAt").and_then(|v| v.as_i64()),
+                            });
                         }
                     }
                 }
@@ -4317,13 +4658,18 @@ fn fetch_claude_oauth_token() -> Option<String> {
         if let Ok(content) = std::fs::read_to_string(&config_path) {
             if content.len() <= 10_000_000 {
                 if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(token) = config
-                        .get("oauthAccount")
-                        .and_then(|o| o.get("accessToken"))
-                        .and_then(|v| v.as_str())
-                    {
-                        if !token.is_empty() {
-                            return Some(token.to_string());
+                    if let Some(oauth) = config.get("oauthAccount") {
+                        if let Some(token) = oauth.get("accessToken").and_then(|v| v.as_str()) {
+                            if !token.is_empty() {
+                                return Some(ClaudeOAuthTokens {
+                                    access_token: token.to_string(),
+                                    refresh_token: oauth
+                                        .get("refreshToken")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from),
+                                    expires_at: oauth.get("expiresAt").and_then(|v| v.as_i64()),
+                                });
+                            }
                         }
                     }
                 }
@@ -4353,20 +4699,39 @@ fn fetch_claude_oauth_token() -> Option<String> {
                 if !password.is_empty() {
                     if let Ok(keychain_data) = serde_json::from_str::<serde_json::Value>(&password)
                     {
-                        if let Some(token) = keychain_data
-                            .get("claudeAiOauth")
-                            .and_then(|o| o.get("accessToken"))
-                            .and_then(|v| v.as_str())
-                        {
-                            return Some(token.to_string());
+                        // Try claudeAiOauth structure first
+                        if let Some(oauth) = keychain_data.get("claudeAiOauth") {
+                            if let Some(token) = oauth.get("accessToken").and_then(|v| v.as_str()) {
+                                return Some(ClaudeOAuthTokens {
+                                    access_token: token.to_string(),
+                                    refresh_token: oauth
+                                        .get("refreshToken")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from),
+                                    expires_at: oauth.get("expiresAt").and_then(|v| v.as_i64()),
+                                });
+                            }
                         }
+                        // Try flat structure
                         if let Some(token) =
                             keychain_data.get("accessToken").and_then(|v| v.as_str())
                         {
-                            return Some(token.to_string());
+                            return Some(ClaudeOAuthTokens {
+                                access_token: token.to_string(),
+                                refresh_token: keychain_data
+                                    .get("refreshToken")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                expires_at: keychain_data.get("expiresAt").and_then(|v| v.as_i64()),
+                            });
                         }
                     } else {
-                        return Some(password);
+                        // Raw token string (no JSON structure)
+                        return Some(ClaudeOAuthTokens {
+                            access_token: password,
+                            refresh_token: None,
+                            expires_at: None,
+                        });
                     }
                 }
             }
@@ -6395,6 +6760,7 @@ fn main() {
                 running_tasks: Arc::new(Mutex::new(HashSet::new())),
                 discord_bot: Arc::new(StdMutex::new(None)),
                 pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
+                pending_discord_tasks: Arc::new(Mutex::new(HashMap::new())),
             }
         })
         .invoke_handler(tauri::generate_handler![

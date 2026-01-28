@@ -1,19 +1,23 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
-use serenity::all::{ButtonStyle, Interaction};
+use chrono::Utc;
+use serenity::all::{ButtonStyle, ComponentInteractionDataKind, Interaction};
 use serenity::async_trait;
 use serenity::builder::{
-    CreateActionRow, CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage,
-    CreateMessage, CreateThread,
+    CreateActionRow, CreateButton, CreateCommand, CreateCommandOption, CreateInteractionResponse,
+    CreateInteractionResponseFollowup, CreateInteractionResponseMessage, CreateMessage,
+    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread,
 };
 use serenity::http::Http;
-use serenity::model::channel::Message;
+use serenity::model::application::{CommandDataOptionValue, CommandOptionType};
+use serenity::model::channel::{Channel, Message};
 use serenity::model::id::{ChannelId, UserId};
 use serenity::prelude::*;
+use uuid::Uuid;
 
 use crate::db;
-use crate::{PendingUserInput, Settings};
+use crate::{AppState, PendingDiscordTask, PendingUserInput, Settings};
 use tauri::{AppHandle, Manager};
 
 use serenity::all::ShardManager;
@@ -89,20 +93,238 @@ impl EventHandler for DiscordEventHandler {
         }
         println!("[Discord] Bot ready: {}", ready.user.name);
         // Warm cache by fetching channel info
-        let _ = self.channel_id.to_channel(&ctx.http).await;
+        if let Ok(channel) = self.channel_id.to_channel(&ctx.http).await {
+            if let Channel::Guild(guild_channel) = channel {
+                let guild_id = guild_channel.guild_id;
+                let existing = guild_id.get_commands(&ctx.http).await;
+                let has_task = existing
+                    .as_ref()
+                    .ok()
+                    .map(|commands| commands.iter().any(|cmd| cmd.name == "task"))
+                    .unwrap_or(false);
+                if !has_task {
+                    let command = CreateCommand::new("task")
+                        .description("Create a Phantom task")
+                        .add_option(
+                            CreateCommandOption::new(
+                                CommandOptionType::String,
+                                "prompt",
+                                "Task prompt",
+                            )
+                            .required(true),
+                        )
+                        .add_option(
+                            CreateCommandOption::new(
+                                CommandOptionType::String,
+                                "agent",
+                                "Agent id",
+                            )
+                            .required(false),
+                        )
+                        .add_option(
+                            CreateCommandOption::new(
+                                CommandOptionType::String,
+                                "model",
+                                "Model id",
+                            )
+                            .required(false),
+                        );
+                    if let Err(err) = guild_id.create_command(&ctx.http, command).await {
+                        println!("[Discord] Failed to register /task: {err}");
+                    }
+                }
+            }
+        }
     }
 
-    async fn message(&self, _ctx: Context, msg: Message) {
+    async fn message(&self, ctx: Context, msg: Message) {
         if msg.author.bot {
-            return;
-        }
-        if msg.channel_id == self.channel_id {
-            // Ignore direct channel chatter; we only bind threads to tasks.
             return;
         }
 
         let state = self.app.state::<crate::AppState>().inner().clone();
         let app = self.app.clone();
+
+        if msg.channel_id == self.channel_id {
+            let bot_user_id = self.bot_user_id.lock().ok().and_then(|g| *g);
+            if let Some(bot_user_id) = bot_user_id {
+                let mentioned = msg.mentions.iter().any(|user| user.id == bot_user_id);
+                if mentioned {
+                    let prompt = strip_bot_mentions(&msg.content, bot_user_id);
+                    if prompt.trim().is_empty() {
+                        let _ = msg
+                            .channel_id
+                            .send_message(
+                                &ctx.http,
+                                CreateMessage::new().content(
+                                    "Mention the bot with your task prompt. Example: @Phantom fix tests",
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+
+                    let pending_id = Uuid::new_v4().to_string();
+                    let pending = PendingDiscordTask {
+                        prompt,
+                        requester_id: msg.author.id.get(),
+                        channel_id: msg.channel_id.get(),
+                        agent_id: None,
+                        model: None,
+                        created_at: Utc::now().timestamp(),
+                        ephemeral: false,
+                    };
+                    let components = build_agent_action_rows(&state, &pending_id);
+                    {
+                        let mut pending_guard = state.pending_discord_tasks.lock().await;
+                        prune_pending_discord_tasks(&mut pending_guard);
+                        pending_guard.insert(pending_id.clone(), pending);
+                    }
+
+                    let _ = msg
+                        .channel_id
+                        .send_message(
+                            &ctx.http,
+                            CreateMessage::new()
+                                .content("Pick an agent for this task:")
+                                .components(components),
+                        )
+                        .await;
+                    return;
+                }
+            }
+
+            if let Some((key, value)) = parse_task_override(&msg.content) {
+                let pending_id_opt = {
+                    let pending_guard = state.pending_discord_tasks.lock().await;
+                    latest_pending_for_user(
+                        &pending_guard,
+                        msg.author.id.get(),
+                        msg.channel_id.get(),
+                    )
+                    .map(|(id, _)| id)
+                };
+
+                if let Some(pending_id) = pending_id_opt {
+                    let mut pending_guard = state.pending_discord_tasks.lock().await;
+                    prune_pending_discord_tasks(&mut pending_guard);
+                    let pending = match pending_guard.get_mut(&pending_id) {
+                        Some(pending) => pending,
+                        None => return,
+                    };
+
+                    if key == "agent" {
+                        if !agent_exists(&state, &value) {
+                            let _ = msg
+                                .channel_id
+                                .send_message(
+                                    &ctx.http,
+                                    CreateMessage::new().content(
+                                        "Unknown agent. Use the buttons to pick an agent.",
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                        pending.agent_id = Some(value);
+                    } else if key == "model" {
+                        pending.model = Some(value);
+                    }
+
+                    let pending_snapshot = pending.clone();
+                    drop(pending_guard);
+
+                    if pending_snapshot.agent_id.is_none() {
+                        let components = build_agent_action_rows(&state, &pending_id);
+                        let _ = msg
+                            .channel_id
+                            .send_message(
+                                &ctx.http,
+                                CreateMessage::new()
+                                    .content("Pick an agent for this task:")
+                                    .components(components),
+                            )
+                            .await;
+                        return;
+                    }
+
+                    if pending_snapshot.model.is_none() {
+                        let agent_id = pending_snapshot
+                            .agent_id
+                            .clone()
+                            .unwrap_or_else(|| "default".to_string());
+                        let (components, truncated) =
+                            build_model_action_rows(&state, &pending_id, &agent_id);
+                        let mut content = format!("Select a model for `{}`:", agent_id);
+                        if truncated {
+                            content.push_str(
+                                " (Too many models; reply with `model: <id>` to use another.)",
+                            );
+                        }
+                        let _ = msg
+                            .channel_id
+                            .send_message(
+                                &ctx.http,
+                                CreateMessage::new().content(content).components(components),
+                            )
+                            .await;
+                        return;
+                    }
+
+                    let agent_id = pending_snapshot
+                        .agent_id
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    let model = pending_snapshot
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    {
+                        let mut pending_guard = state.pending_discord_tasks.lock().await;
+                        pending_guard.remove(&pending_id);
+                    }
+                    let _ = msg
+                        .channel_id
+                        .send_message(&ctx.http, CreateMessage::new().content("Creating task..."))
+                        .await;
+                    match crate::create_task_from_discord(
+                        app.clone(),
+                        &state,
+                        pending_snapshot.prompt,
+                        agent_id,
+                        model,
+                    )
+                    .await
+                    {
+                        Ok(task_id) => {
+                            let _ = msg
+                                .channel_id
+                                .send_message(
+                                    &ctx.http,
+                                    CreateMessage::new().content(format!(
+                                        "Task started: `{}`. A thread will appear shortly.",
+                                        task_id
+                                    )),
+                                )
+                                .await;
+                        }
+                        Err(err) => {
+                            let _ = msg
+                                .channel_id
+                                .send_message(
+                                    &ctx.http,
+                                    CreateMessage::new()
+                                        .content(format!("Failed to create task: {}", err)),
+                                )
+                                .await;
+                        }
+                    }
+                }
+            }
+
+            return;
+        }
+
         let thread_id = msg.channel_id.get();
         let task_id_opt = {
             let conn = match state.db.lock() {
@@ -159,167 +381,504 @@ impl EventHandler for DiscordEventHandler {
     }
 
     async fn interaction_create(&self, ctx: Context, interaction: Interaction) {
-        let Interaction::Component(component) = interaction else {
-            return;
-        };
+        match interaction {
+            Interaction::Command(command) => {
+                if command.data.name != "task" {
+                    return;
+                }
 
-        let custom_id = component.data.custom_id.as_str();
-        if !custom_id.starts_with("user_input:") {
-            return;
-        }
+                if command.channel_id != self.channel_id {
+                    let _ = command
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("Use /task in the configured Discord channel.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                }
 
-        let thread_id = component.channel_id.get();
+                let state = self.app.state::<crate::AppState>().inner().clone();
 
-        let state = self.app.state::<crate::AppState>().inner().clone();
-        let task_id_opt = {
-            let conn = match state.db.lock() {
-                Ok(c) => c,
-                Err(_) => return,
-            };
-            db::get_task_id_for_discord_thread(&conn, thread_id)
-                .ok()
-                .flatten()
-        };
-        let Some(task_id) = task_id_opt else {
-            let _ = component
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("No task bound to this thread.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        };
+                let mut prompt = None;
+                let mut agent_id = None;
+                let mut model = None;
+                for option in &command.data.options {
+                    if let CommandDataOptionValue::String(value) = &option.value {
+                        match option.name.as_str() {
+                            "prompt" => prompt = Some(value.clone()),
+                            "agent" => agent_id = Some(value.clone()),
+                            "model" => model = Some(value.clone()),
+                            _ => {}
+                        }
+                    }
+                }
 
-        let Some((request_id, question_id, option_idx)) = parse_user_input_custom_id(custom_id)
-        else {
-            let _ = component
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Unsupported input action.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        };
+                let prompt = match prompt {
+                    Some(prompt) if !prompt.trim().is_empty() => prompt,
+                    _ => {
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("Provide a task prompt.")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+                };
 
-        let mut pending_guard = state.pending_user_inputs.lock().await;
-        let Some(pending) = pending_guard.get_mut(&task_id) else {
-            let _ = component
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("No pending input for this task.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        };
+                if let Some(ref agent_id) = agent_id {
+                    if !agent_exists(&state, agent_id) {
+                        let _ = command
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("Unknown agent id.")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+                }
 
-        if pending.request_id != request_id {
-            let _ = component
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("This input request has expired.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        }
+                let pending_id = Uuid::new_v4().to_string();
+                let pending = PendingDiscordTask {
+                    prompt,
+                    requester_id: command.user.id.get(),
+                    channel_id: command.channel_id.get(),
+                    agent_id: agent_id.clone(),
+                    model: model.clone(),
+                    created_at: Utc::now().timestamp(),
+                    ephemeral: true,
+                };
 
-        let Some(question) = pending.questions.iter().find(|q| q.id == question_id) else {
-            let _ = component
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Unknown question.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        };
+                if let (Some(agent_id), Some(model)) = (agent_id.clone(), model.clone()) {
+                    let _ = command
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Defer(
+                                CreateInteractionResponseMessage::new().ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    let state = state.clone();
+                    let app = self.app.clone();
+                    let http = ctx.http.clone();
+                    let command = command.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let result = crate::create_task_from_discord(
+                            app,
+                            &state,
+                            pending.prompt,
+                            agent_id,
+                            model,
+                        )
+                        .await;
+                        let content = match result {
+                            Ok(task_id) => format!(
+                                "Task started: `{}`. A thread will appear shortly.",
+                                task_id
+                            ),
+                            Err(err) => format!("Failed to create task: {}", err),
+                        };
+                        let _ = command
+                            .create_followup(
+                                &http,
+                                CreateInteractionResponseFollowup::new()
+                                    .content(content)
+                                    .ephemeral(true),
+                            )
+                            .await;
+                    });
+                    return;
+                }
 
-        let Some(options) = question.options.as_ref() else {
-            let _ = component
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("This question needs a typed response.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        };
+                {
+                    let mut pending_guard = state.pending_discord_tasks.lock().await;
+                    prune_pending_discord_tasks(&mut pending_guard);
+                    pending_guard.insert(pending_id.clone(), pending);
+                }
 
-        let Some(option) = options.get(option_idx) else {
-            let _ = component
-                .create_response(
-                    &ctx.http,
-                    CreateInteractionResponse::Message(
-                        CreateInteractionResponseMessage::new()
-                            .content("Option not found.")
-                            .ephemeral(true),
-                    ),
-                )
-                .await;
-            return;
-        };
+                if agent_id.is_none() {
+                    let components = build_agent_action_rows(&state, &pending_id);
+                    let _ = command
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("Pick an agent for this task:")
+                                    .components(components)
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                }
 
-        pending
-            .answers
-            .insert(question.id.clone(), option.label.clone());
-        let ready = pending_complete(pending);
-        let answers_payload = if ready {
-            build_answers_payload(&pending.answers)
-        } else {
-            serde_json::Value::Null
-        };
-        let request_id = pending.request_id.clone();
-        drop(pending_guard);
-
-        let ack_message = if ready {
-            "Answer recorded. Submitting your responses..."
-        } else {
-            "Answer recorded. Please answer the remaining questions."
-        };
-        let _ = component
-            .create_response(
-                &ctx.http,
-                CreateInteractionResponse::Message(
-                    CreateInteractionResponseMessage::new()
-                        .content(ack_message)
-                        .ephemeral(true),
-                ),
-            )
-            .await;
-
-        if ready {
-            if let Err(err) = crate::respond_to_user_input_internal(
-                task_id,
-                request_id,
-                answers_payload,
-                &state,
-                self.app.clone(),
-            )
-            .await
-            {
-                println!("[Discord] Failed to respond to user input: {err}");
+                let agent_id = agent_id.unwrap_or_else(|| "default".to_string());
+                let (components, truncated) =
+                    build_model_action_rows(&state, &pending_id, &agent_id);
+                let mut content = format!("Select a model for `{}`:", agent_id);
+                if truncated {
+                    content
+                        .push_str(" (Too many models; reply with `model: <id>` to use another.)");
+                }
+                let _ = command
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(content)
+                                .components(components)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
             }
+            Interaction::Component(component) => {
+                let custom_id = component.data.custom_id.as_str();
+                if let Some(action) = parse_task_create_action(custom_id) {
+                    let state = self.app.state::<crate::AppState>().inner().clone();
+                    let selected_value =
+                        action.value.clone().or_else(|| match &component.data.kind {
+                            ComponentInteractionDataKind::StringSelect { values } => {
+                                values.get(0).cloned()
+                            }
+                            _ => None,
+                        });
+
+                    let selected_value = match selected_value {
+                        Some(value) if !value.trim().is_empty() => value,
+                        _ => {
+                            let _ = component
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content("Selection missing.")
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    let mut pending_guard = state.pending_discord_tasks.lock().await;
+                    prune_pending_discord_tasks(&mut pending_guard);
+                    let pending = match pending_guard.get_mut(&action.pending_id) {
+                        Some(pending) => pending,
+                        None => {
+                            let _ = component
+                                .create_response(
+                                    &ctx.http,
+                                    CreateInteractionResponse::Message(
+                                        CreateInteractionResponseMessage::new()
+                                            .content("This task request has expired.")
+                                            .ephemeral(true),
+                                    ),
+                                )
+                                .await;
+                            return;
+                        }
+                    };
+
+                    if pending.requester_id != component.user.id.get() {
+                        let _ = component
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::Message(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("Only the requester can select this.")
+                                        .ephemeral(true),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+
+                    match action.kind {
+                        TaskCreateKind::Agent => {
+                            if !agent_exists(&state, &selected_value) {
+                                let _ = component
+                                    .create_response(
+                                        &ctx.http,
+                                        CreateInteractionResponse::Message(
+                                            CreateInteractionResponseMessage::new()
+                                                .content("Unknown agent id.")
+                                                .ephemeral(true),
+                                        ),
+                                    )
+                                    .await;
+                                return;
+                            }
+                            pending.agent_id = Some(selected_value);
+                        }
+                        TaskCreateKind::Model => {
+                            pending.model = Some(selected_value);
+                        }
+                    }
+
+                    let pending_snapshot = pending.clone();
+                    drop(pending_guard);
+
+                    let Some(agent_id) = pending_snapshot.agent_id.clone() else {
+                        let components = build_agent_action_rows(&state, &action.pending_id);
+                        let _ = component
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::UpdateMessage(
+                                    CreateInteractionResponseMessage::new()
+                                        .content("Pick an agent for this task:")
+                                        .components(components),
+                                ),
+                            )
+                            .await;
+                        return;
+                    };
+
+                    if pending_snapshot.model.is_none() {
+                        let (components, truncated) =
+                            build_model_action_rows(&state, &action.pending_id, &agent_id);
+                        let mut content = format!("Select a model for `{}`:", agent_id);
+                        if truncated {
+                            content.push_str(
+                                " (Too many models; reply with `model: <id>` to use another.)",
+                            );
+                        }
+                        let _ = component
+                            .create_response(
+                                &ctx.http,
+                                CreateInteractionResponse::UpdateMessage(
+                                    CreateInteractionResponseMessage::new()
+                                        .content(content)
+                                        .components(components),
+                                ),
+                            )
+                            .await;
+                        return;
+                    }
+
+                    let model = pending_snapshot
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string());
+                    {
+                        let mut pending_guard = state.pending_discord_tasks.lock().await;
+                        pending_guard.remove(&action.pending_id);
+                    }
+
+                    let _ = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::UpdateMessage(
+                                CreateInteractionResponseMessage::new()
+                                    .content("Creating task...")
+                                    .components(Vec::new()),
+                            ),
+                        )
+                        .await;
+
+                    let component = component.clone();
+                    let http = ctx.http.clone();
+                    let app = self.app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let result = crate::create_task_from_discord(
+                            app,
+                            &state,
+                            pending_snapshot.prompt,
+                            agent_id,
+                            model,
+                        )
+                        .await;
+                        let content = match result {
+                            Ok(task_id) => format!(
+                                "Task started: `{}`. A thread will appear shortly.",
+                                task_id
+                            ),
+                            Err(err) => format!("Failed to create task: {}", err),
+                        };
+                        let _ = component
+                            .create_followup(
+                                &http,
+                                CreateInteractionResponseFollowup::new()
+                                    .content(content)
+                                    .ephemeral(pending_snapshot.ephemeral),
+                            )
+                            .await;
+                    });
+                    return;
+                }
+
+                if !custom_id.starts_with("user_input:") {
+                    return;
+                }
+
+                let thread_id = component.channel_id.get();
+
+                let state = self.app.state::<crate::AppState>().inner().clone();
+                let task_id_opt = {
+                    let conn = match state.db.lock() {
+                        Ok(c) => c,
+                        Err(_) => return,
+                    };
+                    db::get_task_id_for_discord_thread(&conn, thread_id)
+                        .ok()
+                        .flatten()
+                };
+                let Some(task_id) = task_id_opt else {
+                    let _ = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("No task bound to this thread.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                };
+
+                let Some((request_id, question_id, option_idx)) =
+                    parse_user_input_custom_id(custom_id)
+                else {
+                    let _ = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("Unsupported input action.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                };
+
+                let mut pending_guard = state.pending_user_inputs.lock().await;
+                let Some(pending) = pending_guard.get_mut(&task_id) else {
+                    let _ = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("No pending input for this task.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                };
+
+                if pending.request_id != request_id {
+                    let _ = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("This input request has expired.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                }
+
+                let Some(question) = pending.questions.iter().find(|q| q.id == question_id) else {
+                    let _ = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("Unknown question.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                };
+
+                let Some(options) = question.options.as_ref() else {
+                    let _ = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("This question needs a typed response.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                };
+
+                let Some(option) = options.get(option_idx) else {
+                    let _ = component
+                        .create_response(
+                            &ctx.http,
+                            CreateInteractionResponse::Message(
+                                CreateInteractionResponseMessage::new()
+                                    .content("Option not found.")
+                                    .ephemeral(true),
+                            ),
+                        )
+                        .await;
+                    return;
+                };
+
+                pending
+                    .answers
+                    .insert(question.id.clone(), option.label.clone());
+                let ready = pending_complete(pending);
+                let answers_payload = if ready {
+                    build_answers_payload(&pending.answers)
+                } else {
+                    serde_json::Value::Null
+                };
+                let request_id = pending.request_id.clone();
+                drop(pending_guard);
+
+                let ack_message = if ready {
+                    "Answer recorded. Submitting your responses..."
+                } else {
+                    "Answer recorded. Please answer the remaining questions."
+                };
+                let _ = component
+                    .create_response(
+                        &ctx.http,
+                        CreateInteractionResponse::Message(
+                            CreateInteractionResponseMessage::new()
+                                .content(ack_message)
+                                .ephemeral(true),
+                        ),
+                    )
+                    .await;
+
+                if ready {
+                    if let Err(err) = crate::respond_to_user_input_internal(
+                        task_id,
+                        request_id,
+                        answers_payload,
+                        &state,
+                        self.app.clone(),
+                    )
+                    .await
+                    {
+                        println!("[Discord] Failed to respond to user input: {err}");
+                    }
+                }
+            }
+            _ => {}
         }
     }
 }
@@ -416,6 +975,214 @@ fn pending_complete(pending: &PendingUserInput) -> bool {
         }
     }
     true
+}
+
+#[derive(Debug, Clone)]
+enum TaskCreateKind {
+    Agent,
+    Model,
+}
+
+#[derive(Debug, Clone)]
+struct TaskCreateAction {
+    kind: TaskCreateKind,
+    pending_id: String,
+    value: Option<String>,
+}
+
+fn strip_bot_mentions(content: &str, bot_user_id: UserId) -> String {
+    let mention = format!("<@{}>", bot_user_id.get());
+    let mention_nick = format!("<@!{}>", bot_user_id.get());
+    content
+        .replace(&mention, "")
+        .replace(&mention_nick, "")
+        .trim()
+        .to_string()
+}
+
+fn parse_task_override(content: &str) -> Option<(String, String)> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, ':');
+        let key = parts.next().unwrap_or("").trim().to_lowercase();
+        let value = parts.next().unwrap_or("").trim();
+        if value.is_empty() {
+            continue;
+        }
+        if key == "agent" || key == "model" {
+            return Some((key, value.to_string()));
+        }
+    }
+    None
+}
+
+fn parse_task_create_action(custom_id: &str) -> Option<TaskCreateAction> {
+    let mut parts = custom_id.splitn(4, ':');
+    let prefix = parts.next()?;
+    if prefix != "task_create" {
+        return None;
+    }
+    let kind = match parts.next()? {
+        "agent" => TaskCreateKind::Agent,
+        "model" => TaskCreateKind::Model,
+        _ => return None,
+    };
+    let pending_id = parts.next()?.to_string();
+    let value = parts.next().map(|value| value.to_string());
+    Some(TaskCreateAction {
+        kind,
+        pending_id,
+        value,
+    })
+}
+
+fn latest_pending_for_user(
+    pending: &HashMap<String, PendingDiscordTask>,
+    requester_id: u64,
+    channel_id: u64,
+) -> Option<(String, PendingDiscordTask)> {
+    pending
+        .iter()
+        .filter(|(_, task)| task.requester_id == requester_id && task.channel_id == channel_id)
+        .max_by_key(|(_, task)| task.created_at)
+        .map(|(id, task)| (id.clone(), task.clone()))
+}
+
+fn prune_pending_discord_tasks(pending: &mut HashMap<String, PendingDiscordTask>) {
+    const TTL_SECONDS: i64 = 15 * 60;
+    let cutoff = Utc::now().timestamp() - TTL_SECONDS;
+    pending.retain(|_, task| task.created_at >= cutoff);
+}
+
+fn agent_exists(state: &AppState, agent_id: &str) -> bool {
+    state.config.agents.iter().any(|agent| agent.id == agent_id)
+}
+
+fn build_agent_action_rows(state: &AppState, pending_id: &str) -> Vec<CreateActionRow> {
+    let mut rows: Vec<CreateActionRow> = Vec::new();
+    let mut current_row: Vec<CreateButton> = Vec::new();
+
+    for agent in state.config.agents.iter().take(25) {
+        let label = agent
+            .display_name
+            .clone()
+            .unwrap_or_else(|| agent.id.clone());
+        let custom_id = format!("task_create:agent:{}:{}", pending_id, agent.id);
+        let button = CreateButton::new(custom_id)
+            .label(label)
+            .style(ButtonStyle::Primary);
+        current_row.push(button);
+        if current_row.len() == 5 {
+            rows.push(CreateActionRow::Buttons(current_row));
+            current_row = Vec::new();
+        }
+    }
+
+    if !current_row.is_empty() {
+        rows.push(CreateActionRow::Buttons(current_row));
+    }
+
+    rows
+}
+
+fn build_model_action_rows(
+    state: &AppState,
+    pending_id: &str,
+    agent_id: &str,
+) -> (Vec<CreateActionRow>, bool) {
+    let options = model_options_for_agent(state, agent_id);
+    let truncated = options.len() > 25;
+    let mut select_options: Vec<CreateSelectMenuOption> = Vec::new();
+    for option in options.into_iter().take(25) {
+        let mut entry = CreateSelectMenuOption::new(option.label, option.value);
+        if let Some(description) = option.description {
+            entry = entry.description(description);
+        }
+        select_options.push(entry);
+    }
+
+    if select_options.is_empty() {
+        select_options.push(CreateSelectMenuOption::new("default", "default"));
+    }
+
+    let menu = CreateSelectMenu::new(
+        format!("task_create:model:{}", pending_id),
+        CreateSelectMenuKind::String {
+            options: select_options,
+        },
+    )
+    .placeholder("Select a model")
+    .min_values(1)
+    .max_values(1);
+
+    (vec![CreateActionRow::SelectMenu(menu)], truncated)
+}
+
+struct ModelOption {
+    value: String,
+    label: String,
+    description: Option<String>,
+}
+
+fn model_options_for_agent(state: &AppState, agent_id: &str) -> Vec<ModelOption> {
+    let cached_models = {
+        let conn = match state.db.lock() {
+            Ok(conn) => conn,
+            Err(_) => {
+                return vec![ModelOption {
+                    value: "default".to_string(),
+                    label: "default".to_string(),
+                    description: None,
+                }]
+            }
+        };
+        db::get_cached_models(&conn, agent_id).unwrap_or_default()
+    };
+
+    let mut options: Vec<ModelOption> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    let mut push_option = |value: String, label: String, description: Option<String>| {
+        if seen.insert(value.clone()) {
+            options.push(ModelOption {
+                value,
+                label,
+                description,
+            });
+        }
+    };
+
+    push_option("default".to_string(), "default".to_string(), None);
+
+    if !cached_models.is_empty() {
+        for model in cached_models {
+            let label = model.name.clone().unwrap_or_else(|| model.value.clone());
+            push_option(model.value, label, model.description);
+        }
+        return options;
+    }
+
+    if let Some(agent) = state
+        .config
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+    {
+        if let Some(default_exec) = agent.default_exec_model.clone() {
+            push_option(default_exec.clone(), default_exec, None);
+        }
+        if let Some(default_plan) = agent.default_plan_model.clone() {
+            push_option(default_plan.clone(), default_plan, None);
+        }
+        for model in &agent.models {
+            push_option(model.clone(), model.clone(), None);
+        }
+    }
+
+    options
 }
 
 pub async fn start_discord_bot(
