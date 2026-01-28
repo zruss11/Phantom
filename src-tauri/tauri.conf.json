@@ -30,7 +30,7 @@
       "endpoints": [
         "https://github.com/zachrussell/Phantom-Harness/releases/latest/download/latest.json"
       ],
-      "pubkey": ""
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2MzY3MzM2QTdCRUZFOEIKUldTTC9yNm5Obk0ybGdWNHVHSFB1d2hDa2FSRHV4TkFRRXhCbURGTEpTY2tzRzV6ZzQvZjNLaWcK"
     }
   },
   "app": {

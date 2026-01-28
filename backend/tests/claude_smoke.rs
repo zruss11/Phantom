@@ -15,7 +15,7 @@ async fn claude_stream_smoke() {
     }
 
     let cwd = std::env::current_dir().expect("cwd");
-    let mut client = AgentProcessClient::spawn(
+    let client = AgentProcessClient::spawn(
         "claude",
         &vec!["--output-format".to_string(), "stream-json".to_string()],
         &cwd,

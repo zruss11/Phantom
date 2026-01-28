@@ -7,7 +7,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| "reply with exactly OK".to_string());
 
     let cwd = std::env::current_dir()?;
-    let mut client = AgentProcessClient::spawn(
+    let client = AgentProcessClient::spawn(
         "claude",
         &vec!["--output-format".to_string(), "stream-json".to_string()],
         &cwd,
@@ -28,7 +28,7 @@ async fn main() -> anyhow::Result<()> {
             StreamingUpdate::PermissionRequest { tool_name, .. } => {
                 println!("\n[perm] {tool_name}")
             }
-            StreamingUpdate::AvailableCommands { .. } => {},
+            StreamingUpdate::AvailableCommands { .. } => {}
             StreamingUpdate::UserInputRequest { .. } => {}
             StreamingUpdate::PlanUpdate { .. } => {}
         }),

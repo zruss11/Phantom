@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
+use serenity::all::{ButtonStyle, Interaction};
 use serenity::async_trait;
 use serenity::builder::{
     CreateActionRow, CreateButton, CreateInteractionResponse, CreateInteractionResponseMessage,
     CreateMessage, CreateThread,
 };
 use serenity::http::Http;
-use serenity::all::{Interaction, ButtonStyle};
 use serenity::model::channel::Message;
 use serenity::model::id::{ChannelId, UserId};
 use serenity::prelude::*;
@@ -109,7 +109,9 @@ impl EventHandler for DiscordEventHandler {
                 Ok(c) => c,
                 Err(_) => return,
             };
-            db::get_task_id_for_discord_thread(&conn, thread_id).ok().flatten()
+            db::get_task_id_for_discord_thread(&conn, thread_id)
+                .ok()
+                .flatten()
         };
 
         let Some(task_id) = task_id_opt else {
@@ -174,7 +176,9 @@ impl EventHandler for DiscordEventHandler {
                 Ok(c) => c,
                 Err(_) => return,
             };
-            db::get_task_id_for_discord_thread(&conn, thread_id).ok().flatten()
+            db::get_task_id_for_discord_thread(&conn, thread_id)
+                .ok()
+                .flatten()
         };
         let Some(task_id) = task_id_opt else {
             let _ = component
@@ -190,8 +194,7 @@ impl EventHandler for DiscordEventHandler {
             return;
         };
 
-        let Some((request_id, question_id, option_idx)) =
-            parse_user_input_custom_id(custom_id)
+        let Some((request_id, question_id, option_idx)) = parse_user_input_custom_id(custom_id)
         else {
             let _ = component
                 .create_response(
@@ -277,7 +280,9 @@ impl EventHandler for DiscordEventHandler {
             return;
         };
 
-        pending.answers.insert(question.id.clone(), option.label.clone());
+        pending
+            .answers
+            .insert(question.id.clone(), option.label.clone());
         let ready = pending_complete(pending);
         let answers_payload = if ready {
             build_answers_payload(&pending.answers)
@@ -366,7 +371,10 @@ fn parse_user_input_answers(
     serde_json::Value::Object(answers)
 }
 
-fn normalize_answer_value(question: &phantom_harness_backend::cli::UserInputQuestion, raw: &str) -> String {
+fn normalize_answer_value(
+    question: &phantom_harness_backend::cli::UserInputQuestion,
+    raw: &str,
+) -> String {
     if let Some(options) = question.options.as_ref() {
         if let Some(opt) = options
             .iter()
@@ -432,9 +440,8 @@ pub async fn start_discord_bot(
         .parse::<u64>()
         .map_err(|_| "Discord channel ID must be numeric".to_string())?;
 
-    let intents = GatewayIntents::GUILD_MESSAGES
-        | GatewayIntents::GUILDS
-        | GatewayIntents::MESSAGE_CONTENT;
+    let intents =
+        GatewayIntents::GUILD_MESSAGES | GatewayIntents::GUILDS | GatewayIntents::MESSAGE_CONTENT;
 
     let bot_user_id: Arc<StdMutex<Option<UserId>>> = Arc::new(StdMutex::new(None));
 
@@ -475,8 +482,7 @@ pub async fn ensure_thread_for_task(
 ) -> Result<ChannelId, String> {
     if let Some(thread_id) = {
         let conn = db_conn.lock().map_err(|e| e.to_string())?;
-        db::get_discord_thread_id(&conn, task_id)
-            .map_err(|e| e.to_string())?
+        db::get_discord_thread_id(&conn, task_id).map_err(|e| e.to_string())?
     } {
         return Ok(ChannelId::new(thread_id));
     }
@@ -504,8 +510,7 @@ pub async fn post_task_notification(
     thread_name: &str,
     content: &str,
 ) -> Result<ChannelId, String> {
-    let thread_id =
-        ensure_thread_for_task(handle, db_conn, task_id, thread_name, content).await?;
+    let thread_id = ensure_thread_for_task(handle, db_conn, task_id, thread_name, content).await?;
     handle.send_thread_message(thread_id, content).await?;
     Ok(thread_id)
 }
@@ -518,8 +523,7 @@ pub async fn post_to_thread(
 ) -> Result<(), String> {
     let thread_id = {
         let conn = db_conn.lock().map_err(|e| e.to_string())?;
-        db::get_discord_thread_id(&conn, task_id)
-            .map_err(|e| e.to_string())?
+        db::get_discord_thread_id(&conn, task_id).map_err(|e| e.to_string())?
     };
     let thread_id = match thread_id {
         Some(id) => id,
@@ -539,8 +543,7 @@ pub async fn post_user_input_question(
 ) -> Result<(), String> {
     let thread_id = {
         let conn = db_conn.lock().map_err(|e| e.to_string())?;
-        db::get_discord_thread_id(&conn, task_id)
-            .map_err(|e| e.to_string())?
+        db::get_discord_thread_id(&conn, task_id).map_err(|e| e.to_string())?
     };
     let thread_id = match thread_id {
         Some(id) => id,

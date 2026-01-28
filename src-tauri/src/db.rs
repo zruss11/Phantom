@@ -235,8 +235,7 @@ pub fn save_discord_thread(
 }
 
 pub fn get_discord_thread_id(conn: &Connection, task_id: &str) -> Result<Option<u64>> {
-    let mut stmt =
-        conn.prepare("SELECT thread_id FROM discord_threads WHERE task_id = ?1")?;
+    let mut stmt = conn.prepare("SELECT thread_id FROM discord_threads WHERE task_id = ?1")?;
     let mut rows = stmt.query(params![task_id])?;
     if let Some(row) = rows.next()? {
         let thread_id: i64 = row.get(0)?;
@@ -245,12 +244,8 @@ pub fn get_discord_thread_id(conn: &Connection, task_id: &str) -> Result<Option<
     Ok(None)
 }
 
-pub fn get_task_id_for_discord_thread(
-    conn: &Connection,
-    thread_id: u64,
-) -> Result<Option<String>> {
-    let mut stmt =
-        conn.prepare("SELECT task_id FROM discord_threads WHERE thread_id = ?1")?;
+pub fn get_task_id_for_discord_thread(conn: &Connection, thread_id: u64) -> Result<Option<String>> {
+    let mut stmt = conn.prepare("SELECT task_id FROM discord_threads WHERE thread_id = ?1")?;
     let mut rows = stmt.query(params![thread_id as i64])?;
     if let Some(row) = rows.next()? {
         let task_id: String = row.get(0)?;

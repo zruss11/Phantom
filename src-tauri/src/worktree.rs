@@ -22,7 +22,13 @@ const GIT_COMMAND_TIMEOUT_SECS: u64 = 20;
 /// - Strips URL patterns and other invalid sequences
 pub fn sanitize_branch_name(branch: &str) -> String {
     const ALLOWED_PREFIXES: &[&str] = &[
-        "feat/", "fix/", "chore/", "test/", "docs/", "refactor/", "perf/",
+        "feat/",
+        "fix/",
+        "chore/",
+        "test/",
+        "docs/",
+        "refactor/",
+        "perf/",
     ];
 
     // First, strip common URL patterns that would create invalid branch names
@@ -751,10 +757,7 @@ mod tests {
             "feat/add-user-notifications"
         );
         // "fix login bug" without slash becomes "feat/fix-login-bug" (no prefix match)
-        assert_eq!(
-            sanitize_branch_name("fix login bug"),
-            "feat/fix-login-bug"
-        );
+        assert_eq!(sanitize_branch_name("fix login bug"), "feat/fix-login-bug");
         assert_eq!(
             sanitize_branch_name("feat/some-feature"),
             "feat/some-feature"
@@ -805,10 +808,7 @@ mod tests {
             "feat/fix-example-issue"
         );
         // Multiple slashes should be collapsed
-        assert_eq!(
-            sanitize_branch_name("feat/foo/bar/baz"),
-            "feat/foo-bar-baz"
-        );
+        assert_eq!(sanitize_branch_name("feat/foo/bar/baz"), "feat/foo-bar-baz");
     }
 
     #[test]

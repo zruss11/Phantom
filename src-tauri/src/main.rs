@@ -251,7 +251,7 @@ fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvail
 #[derive(Clone)]
 pub(crate) struct AppState {
     config: AgentsConfig,
-    sessions: Arc<Mutex<HashMap<String, SessionHandle>>>,
+    sessions: Arc<Mutex<HashMap<String, SharedSessionHandle>>>,
     settings: Arc<Mutex<Settings>>,
     db: Arc<StdMutex<rusqlite::Connection>>,
     notification_windows: Arc<StdMutex<Vec<String>>>,
@@ -421,7 +421,7 @@ struct SessionHandle {
     agent_id: String,
     session_id: String,
     model: String,
-    client: AgentProcessClient,
+    client: Arc<AgentProcessClient>,
     pending_prompt: Option<String>,
     pending_attachments: Vec<AttachmentRef>,
     messages: Vec<serde_json::Value>,
@@ -429,6 +429,8 @@ struct SessionHandle {
     #[allow(dead_code)] // Kept for future graceful shutdown
     claude_watcher: Option<claude_usage_watcher::WatcherHandle>,
 }
+
+type SharedSessionHandle = Arc<Mutex<SessionHandle>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexAuthStatus {
@@ -1165,12 +1167,12 @@ async fn spawn_agent_client(
     cwd: &Path,
     env: &[(String, String)],
     args: &[String],
-) -> Result<AgentProcessClient, String> {
+) -> Result<Arc<AgentProcessClient>, String> {
     let command = resolve_agent_command(agent);
     match AgentProcessClient::spawn(&command, args, cwd, env).await {
         Ok(client) => {
             tracing::info!(agent_id = %agent.id, command = %command, "Agent CLI spawned");
-            Ok(client)
+            Ok(Arc::new(client))
         }
         Err(err) => {
             tracing::error!(
@@ -1195,12 +1197,12 @@ async fn reconnect_session_with_context(
     cwd: &Path,
     env: &[(String, String)],
     db: &Arc<StdMutex<rusqlite::Connection>>,
-) -> Result<(AgentProcessClient, String, bool), String> {
+) -> Result<(Arc<AgentProcessClient>, String, bool), String> {
     let cwd_str = cwd.to_string_lossy().to_string();
     let args = substitute_args(&agent.args, &cwd_str);
 
     // Spawn and initialize Agent client
-    let mut client = spawn_agent_client(agent, cwd, env, &args).await?;
+    let client = spawn_agent_client(agent, cwd, env, &args).await?;
     let _capabilities = client
         .initialize("Phantom Harness", "0.1.0")
         .await
@@ -1257,7 +1259,7 @@ async fn reconnect_session_with_context(
 
     // Apply model selection if not default
     if task.model != "default" && !task.model.trim().is_empty() {
-        let _ = apply_model_selection(&mut client, &session, &task.model).await;
+        let _ = apply_model_selection(client.as_ref(), &session, &task.model).await;
     }
 
     // Load and format conversation history for context injection
@@ -1976,7 +1978,7 @@ async fn create_agent_session(
             ));
     let env = build_env(&agent.required_env, &overrides, allow_missing)?;
     let args = substitute_args(&agent.args, &cwd_str);
-    let mut client = spawn_agent_client(agent, &cwd, &env, &args)
+    let client = spawn_agent_client(agent, &cwd, &env, &args)
         .await
         .map_err(|err| format!("spawn failed: {}", err))?;
     client
@@ -2066,7 +2068,7 @@ async fn create_agent_session(
     };
 
     if selected != "default" && !selected.trim().is_empty() {
-        let _ = apply_model_selection(&mut client, &session, &selected)
+        let _ = apply_model_selection(client.as_ref(), &session, &selected)
             .await
             .map_err(|err| format!("set model failed: {}", err))?;
     }
@@ -2105,7 +2107,7 @@ async fn create_agent_session(
     };
 
     let mut sessions = state.sessions.lock().await;
-    sessions.insert(task_id.clone(), handle);
+    sessions.insert(task_id.clone(), Arc::new(Mutex::new(handle)));
 
     // Persist task to database (including Agent session ID for context restoration)
     {
@@ -2324,71 +2326,97 @@ async fn start_task(
         let _ = db::update_task_status(&conn, &task_id, "Starting...", "running");
     }
 
-    // Extract session handle - IMPORTANT: We remove it from the HashMap to release the lock
-    // This allows other tasks to run concurrently
-    let mut handle = {
-        let mut sessions = state.sessions.lock().await;
+    // Extract session handle without removing it from the map so concurrent requests can access it.
+    let handle_ref = {
+        let sessions = state.sessions.lock().await;
+        sessions.get(&task_id).cloned()
+    };
 
-        // If session doesn't exist, we need to reconnect
-        if !sessions.contains_key(&task_id) {
-            println!(
-                "[Harness] Session not found for start_task, attempting to reconnect: {}",
-                task_id
-            );
-            drop(sessions); // Release lock before reconnection
+    let handle_ref = if let Some(handle_ref) = handle_ref {
+        handle_ref
+    } else {
+        println!(
+            "[Harness] Session not found for start_task, attempting to reconnect: {}",
+            task_id
+        );
 
-            // Look up task from DB to get reconnection info
-            let task = {
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                db::list_tasks(&conn)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .find(|t| t.id == task_id)
-            };
+        // Look up task from DB to get reconnection info
+        let task = {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            db::list_tasks(&conn)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|t| t.id == task_id)
+        };
 
-            let task = match task {
-                Some(t) => t,
-                None => {
-                    let error_msg = "Task not found in database";
-                    println!("[Harness] start_task reconnect error: {}", error_msg);
-                    window
-                        .emit("StatusUpdate", (&task_id, error_msg, "red", "error"))
-                        .map_err(|e| e.to_string())?;
-                    return Err(error_msg.to_string());
-                }
-            };
+        let task = match task {
+            Some(t) => t,
+            None => {
+                let error_msg = "Task not found in database";
+                println!("[Harness] start_task reconnect error: {}", error_msg);
+                window
+                    .emit("StatusUpdate", (&task_id, error_msg, "red", "error"))
+                    .map_err(|e| e.to_string())?;
+                return Err(error_msg.to_string());
+            }
+        };
 
-            // Find agent config
-            let agent = match find_agent(&state.config, &task.agent_id) {
-                Some(a) => a,
-                None => {
-                    let error_msg = format!("Unknown agent: {}", task.agent_id);
-                    println!("[Harness] start_task reconnect error: {}", error_msg);
-                    window
-                        .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
-                        .map_err(|e| e.to_string())?;
-                    return Err(error_msg);
-                }
-            };
+        // Find agent config
+        let agent = match find_agent(&state.config, &task.agent_id) {
+            Some(a) => a,
+            None => {
+                let error_msg = format!("Unknown agent: {}", task.agent_id);
+                println!("[Harness] start_task reconnect error: {}", error_msg);
+                window
+                    .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
+                    .map_err(|e| e.to_string())?;
+                return Err(error_msg);
+            }
+        };
 
-            // Set up working directory
-            let cwd = resolve_task_cwd(&task)?;
+        // Set up working directory
+        let cwd = resolve_task_cwd(&task)?;
 
-            // Build environment
-            let settings = state.settings.lock().await.clone();
-            let overrides = auth_env_for(&task.agent_id, &settings);
-            let allow_missing = (task.agent_id == "codex"
-                && settings.codex_auth_method.as_deref() == Some("chatgpt"))
-                || (task.agent_id == "claude-code"
-                    && matches!(
-                        settings.claude_auth_method.as_deref(),
-                        Some("cli") | Some("oauth")
-                    ));
+        // Build environment
+        let settings = state.settings.lock().await.clone();
+        let overrides = auth_env_for(&task.agent_id, &settings);
+        let allow_missing = (task.agent_id == "codex"
+            && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+            || (task.agent_id == "claude-code"
+                && matches!(
+                    settings.claude_auth_method.as_deref(),
+                    Some("cli") | Some("oauth")
+                ));
 
-            let env = match build_env(&agent.required_env, &overrides, allow_missing) {
-                Ok(e) => e,
+        let env = match build_env(&agent.required_env, &overrides, allow_missing) {
+            Ok(e) => e,
+            Err(e) => {
+                let error_msg = format!("Auth not configured: {}", e);
+                println!("[Harness] start_task reconnect error: {}", error_msg);
+                window
+                    .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
+                    .map_err(|e| e.to_string())?;
+                return Err(error_msg);
+            }
+        };
+
+        // Reconnect with context restoration (hybrid: session/load or history injection)
+        println!(
+            "[Harness] Reconnecting Agent session for start_task: {}",
+            task_id
+        );
+        window
+            .emit(
+                "StatusUpdate",
+                (&task_id, "Reconnecting...", "yellow", "running"),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let (client, session_id, used_session_load) =
+            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
+                Ok(result) => result,
                 Err(e) => {
-                    let error_msg = format!("Auth not configured: {}", e);
+                    let error_msg = format!("Failed to reconnect: {}", e);
                     println!("[Harness] start_task reconnect error: {}", error_msg);
                     window
                         .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
@@ -2397,106 +2425,99 @@ async fn start_task(
                 }
             };
 
-            // Reconnect with context restoration (hybrid: session/load or history injection)
-            println!(
-                "[Harness] Reconnecting Agent session for start_task: {}",
-                task_id
-            );
-            window
-                .emit(
-                    "StatusUpdate",
-                    (&task_id, "Reconnecting...", "yellow", "running"),
-                )
-                .map_err(|e| e.to_string())?;
+        let model = task.model.clone();
+        let resume_prompt = if task.status == "Stopped" {
+            Some("Continue".to_string())
+        } else {
+            task.prompt.clone()
+        };
 
-            let (client, session_id, used_session_load) =
-                match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        let error_msg = format!("Failed to reconnect: {}", e);
-                        println!("[Harness] start_task reconnect error: {}", error_msg);
-                        window
-                            .emit("StatusUpdate", (&task_id, &error_msg, "red", "error"))
-                            .map_err(|e| e.to_string())?;
-                        return Err(error_msg);
-                    }
-                };
-
-            let model = task.model.clone();
-
-            // Prepare the prompt with history context if needed
-            // For start_task, we're re-running the original prompt, so inject history before it
-            let prompt_with_context = if !used_session_load {
-                // Load history for context injection
-                let history_opt = {
-                    let conn = state.db.lock().map_err(|e| e.to_string())?;
-                    let messages =
-                        db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
-                    if !messages.is_empty() {
-                        let (history, _) = db::compact_history(&messages, None, 100_000);
-                        Some(history)
-                    } else {
-                        None
-                    }
-                };
-
-                if let Some(history) = history_opt {
-                    if let Some(ref original_prompt) = task.prompt {
-                        Some(format_message_with_history(&history, original_prompt))
-                    } else {
-                        task.prompt.clone()
-                    }
+        // Prepare the prompt with history context if needed
+        // For start_task, we're re-running the original prompt, so inject history before it
+        let prompt_with_context = if !used_session_load {
+            // Load history for context injection
+            let history_opt = {
+                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                let messages =
+                    db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
+                if !messages.is_empty() {
+                    let (history, _) = db::compact_history(&messages, None, 100_000);
+                    Some(history)
                 } else {
-                    task.prompt.clone()
+                    None
+                }
+            };
+
+            if let Some(history) = history_opt {
+                if let Some(ref base_prompt) = resume_prompt {
+                    Some(format_message_with_history(&history, base_prompt))
+                } else {
+                    resume_prompt.clone()
                 }
             } else {
-                // session/load restored context, use original prompt
-                task.prompt.clone()
-            };
-
-            println!(
-                "[Harness] Session reconnected for start_task: task_id={} session_id={} (used_session_load={})",
-                task_id, session_id, used_session_load
-            );
-
-            // Spawn Claude usage watcher for reconnected sessions
-            let claude_watcher = if task.agent_id == "claude-code" {
-                Some(claude_usage_watcher::start_watching(
-                    &session_id,
-                    &task_id,
-                    window.app_handle().clone(),
-                    state.db.clone(),
-                ))
-            } else {
-                None
-            };
-
-            SessionHandle {
-                agent_id: task.agent_id.clone(),
-                session_id,
-                model: model.clone(),
-                client,
-                pending_prompt: prompt_with_context,
-                pending_attachments: Vec::new(),
-                messages: Vec::new(),
-                claude_watcher,
+                resume_prompt.clone()
             }
         } else {
-            // Session exists - remove it from the map to release the lock
-            sessions
-                .remove(&task_id)
-                .ok_or_else(|| "Session not found".to_string())?
-        }
-    }; // Lock is released here!
+            // session/load restored context, use original prompt
+            resume_prompt.clone()
+        };
 
-    let agent_id = handle.agent_id.clone();
+        println!(
+            "[Harness] Session reconnected for start_task: task_id={} session_id={} (used_session_load={})",
+            task_id, session_id, used_session_load
+        );
 
-    // Get and consume pending prompt and attachments
-    let prompt = handle
-        .pending_prompt
-        .take()
-        .ok_or("No prompt pending - task may have already started")?;
-    let attachments = std::mem::take(&mut handle.pending_attachments);
+        // Spawn Claude usage watcher for reconnected sessions
+        let claude_watcher = if task.agent_id == "claude-code" {
+            Some(claude_usage_watcher::start_watching(
+                &session_id,
+                &task_id,
+                window.app_handle().clone(),
+                state.db.clone(),
+            ))
+        } else {
+            None
+        };
+
+        let handle = SessionHandle {
+            agent_id: task.agent_id.clone(),
+            session_id,
+            model: model.clone(),
+            client,
+            pending_prompt: prompt_with_context,
+            pending_attachments: Vec::new(),
+            messages: Vec::new(),
+            claude_watcher,
+        };
+
+        let handle_ref = Arc::new(Mutex::new(handle));
+        let mut sessions = state.sessions.lock().await;
+        sessions.insert(task_id.clone(), handle_ref.clone());
+        handle_ref
+    };
+
+    let user_timestamp = chrono::Utc::now().to_rfc3339();
+    let (agent_id, model, prompt, attachments, client, session_id) = {
+        let mut handle = handle_ref.lock().await;
+        let prompt = handle
+            .pending_prompt
+            .take()
+            .ok_or("No prompt pending - task may have already started")?;
+        let attachments = std::mem::take(&mut handle.pending_attachments);
+        handle.messages.push(serde_json::json!({
+            "message_type": "user_message",
+            "content": prompt,
+            "timestamp": user_timestamp
+        }));
+        (
+            handle.agent_id.clone(),
+            handle.model.clone(),
+            prompt,
+            attachments,
+            handle.client.clone(),
+            handle.session_id.clone(),
+        )
+    };
 
     // Load images from attachments
     let images: Vec<ImageContent> = {
@@ -2536,12 +2557,6 @@ async fn start_task(
     let chat_window_label = format!("chat-{}", task_id);
 
     // Persist user message before sending so it renders first in history
-    let user_timestamp = chrono::Utc::now().to_rfc3339();
-    handle.messages.push(serde_json::json!({
-        "message_type": "user_message",
-        "content": prompt,
-        "timestamp": user_timestamp
-    }));
     let message_id = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::save_message(
@@ -2920,29 +2935,24 @@ async fn start_task(
     // Wrapped in retry logic for recoverable errors (exit code 143/SIGTERM)
     const MAX_RECONNECT_ATTEMPTS: u32 = 2;
     let mut attempt = 0;
+    let mut client = client;
+    let mut session_id = session_id;
 
     let response = loop {
         attempt += 1;
 
         let result = if images.is_empty() {
-            handle
-                .client
-                .session_prompt_streaming(&handle.session_id, &prompt, |update| {
+            client
+                .session_prompt_streaming(&session_id, &prompt, |update| {
                     let _ = stream_tx.send(update);
                 })
                 .await
         } else {
             println!("[Harness] Sending prompt with {} image(s)", images.len());
-            handle
-                .client
-                .session_prompt_streaming_with_images(
-                    &handle.session_id,
-                    &prompt,
-                    &images,
-                    |update| {
-                        let _ = stream_tx.send(update);
-                    },
-                )
+            client
+                .session_prompt_streaming_with_images(&session_id, &prompt, &images, |update| {
+                    let _ = stream_tx.send(update);
+                })
                 .await
         };
 
@@ -3026,19 +3036,25 @@ async fn start_task(
                                 new_session_id
                             );
 
-                            // Update the handle with the new client/session
-                            handle.client = new_client;
-                            handle.session_id = new_session_id.clone();
+                            {
+                                let mut handle = handle_ref.lock().await;
+                                handle.client = new_client.clone();
+                                handle.session_id = new_session_id.clone();
 
-                            // Also update Claude watcher if applicable
-                            if task.agent_id == "claude-code" {
-                                handle.claude_watcher = Some(claude_usage_watcher::start_watching(
-                                    &new_session_id,
-                                    &task_id,
-                                    window.app_handle().clone(),
-                                    state.db.clone(),
-                                ));
+                                // Also update Claude watcher if applicable
+                                if task.agent_id == "claude-code" {
+                                    handle.claude_watcher =
+                                        Some(claude_usage_watcher::start_watching(
+                                            &new_session_id,
+                                            &task_id,
+                                            window.app_handle().clone(),
+                                            state.db.clone(),
+                                        ));
+                                }
                             }
+
+                            client = new_client;
+                            session_id = new_session_id.clone();
 
                             // Emit status and retry
                             let _ = window.emit(
@@ -3086,15 +3102,18 @@ async fn start_task(
         });
 
         // Store message in memory
-        handle.messages.push(serde_json::json!({
-            "message_type": msg.message_type,
-            "content": msg.content,
-            "reasoning": msg.reasoning,
-            "name": msg.name,
-            "arguments": msg.arguments,
-            "tool_return": msg.tool_return,
-            "timestamp": msg_timestamp
-        }));
+        {
+            let mut handle = handle_ref.lock().await;
+            handle.messages.push(serde_json::json!({
+                "message_type": msg.message_type,
+                "content": msg.content,
+                "reasoning": msg.reasoning,
+                "name": msg.name,
+                "arguments": msg.arguments,
+                "tool_return": msg.tool_return,
+                "timestamp": msg_timestamp
+            }));
+        }
 
         // Persist to DB
         {
@@ -3136,7 +3155,7 @@ async fn start_task(
 
     // Process token usage and update cost
     if let Some(usage) = &response.token_usage {
-        let cost = calculate_cost_from_usage(&handle.model, usage);
+        let cost = calculate_cost_from_usage(&model, usage);
         if cost > 0.0 {
             let conn = state.db.lock().map_err(|e| e.to_string())?;
             let current_cost = db::get_task_cost(&conn, &task_id).unwrap_or(0.0);
@@ -3158,6 +3177,7 @@ async fn start_task(
     }
 
     if let Some(new_session_id) = response.session_id.as_ref() {
+        let mut handle = handle_ref.lock().await;
         if new_session_id != &handle.session_id {
             handle.session_id = new_session_id.clone();
             let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -3219,12 +3239,6 @@ async fn start_task(
         let _ = db::update_task_status(&conn, &task_id, &summary_status, "completed");
     }
 
-    // Re-insert the session handle back into the map for future follow-up messages
-    {
-        let mut sessions = state.sessions.lock().await;
-        sessions.insert(task_id.clone(), handle);
-    }
-
     let app_handle = window.app_handle();
     let _ = maybe_show_agent_notification(
         &app_handle,
@@ -3234,6 +3248,59 @@ async fn start_task(
         &summary_status,
     )
     .await;
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_task(
+    task_id: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    println!("[Harness] stop_task: task_id={}", task_id);
+
+    let handle_ref = {
+        let mut sessions = state.sessions.lock().await;
+        sessions.remove(&task_id)
+    };
+
+    if let Some(handle_ref) = handle_ref {
+        let (client, claude_watcher) = {
+            let mut handle = handle_ref.lock().await;
+            (handle.client.clone(), handle.claude_watcher.take())
+        };
+        if let Some(watcher) = claude_watcher {
+            watcher.stop().await;
+        }
+        let _ = client.shutdown().await;
+    }
+
+    {
+        let mut pending = state.pending_user_inputs.lock().await;
+        pending.remove(&task_id);
+    }
+
+    {
+        let mut running = state.running_tasks.lock().await;
+        running.remove(&task_id);
+    }
+
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::update_task_status(&conn, &task_id, "Stopped", "idle");
+    }
+
+    let window_label = format!(
+        "chat-{}",
+        task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
+    );
+    if let Some(window) = app.get_webview_window(&window_label) {
+        let _ = window.emit("ChatLogStatus", (&task_id, "Stopped", "idle"));
+    }
+    if let Some(main_window) = app.get_webview_window("main") {
+        let _ = main_window.emit("StatusUpdate", (&task_id, "Stopped", "red", "idle"));
+    }
 
     Ok(())
 }
@@ -3689,42 +3756,51 @@ async fn restart_all_agents(
     let mut restarted_task_ids = Vec::new();
 
     // Get all active sessions and remove them
-    {
+    let shutdown_targets: Vec<(String, SharedSessionHandle)> = {
         let mut sessions = state.sessions.lock().await;
         let task_ids: Vec<String> = sessions.keys().cloned().collect();
+        let mut targets = Vec::new();
 
         for task_id in task_ids {
-            if let Some(handle) = sessions.remove(&task_id) {
-                println!(
-                    "[Harness] Terminating session for task: {} (agent: {})",
-                    task_id, handle.agent_id
-                );
-
-                // Emit status update for this task
-                let _ = window.emit(
-                    "StatusUpdate",
-                    (
-                        &task_id,
-                        "Restarting for skill changes...",
-                        "yellow",
-                        "idle",
-                    ),
-                );
-
-                // Update task status in DB
-                {
-                    let conn = state.db.lock().map_err(|e| e.to_string())?;
-                    let _ =
-                        db::update_task_status(&conn, &task_id, "Ready (skills updated)", "idle");
-                }
-
-                restarted_task_ids.push(task_id);
-
-                // The session handle (and its AgentProcessClient) will be dropped here,
-                // which terminates the subprocess
-                drop(handle);
+            if let Some(handle_ref) = sessions.remove(&task_id) {
+                targets.push((task_id, handle_ref));
             }
         }
+
+        targets
+    };
+
+    for (task_id, handle_ref) in shutdown_targets {
+        let (agent_id, client) = {
+            let handle = handle_ref.lock().await;
+            (handle.agent_id.clone(), handle.client.clone())
+        };
+
+        println!(
+            "[Harness] Terminating session for task: {} (agent: {})",
+            task_id, agent_id
+        );
+
+        // Emit status update for this task
+        let _ = window.emit(
+            "StatusUpdate",
+            (
+                &task_id,
+                "Restarting for skill changes...",
+                "yellow",
+                "idle",
+            ),
+        );
+
+        // Update task status in DB
+        {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let _ = db::update_task_status(&conn, &task_id, "Ready (skills updated)", "idle");
+        }
+
+        restarted_task_ids.push(task_id);
+
+        let _ = client.shutdown().await;
     }
 
     // Emit AgentAvailabilityUpdate to trigger UI refresh
@@ -4475,9 +4551,16 @@ async fn delete_task(
         });
     }
     // Remove from sessions HashMap (cleanup runtime)
-    {
+    let handle_ref = {
         let mut sessions = state.sessions.lock().await;
-        sessions.remove(&task_id);
+        sessions.remove(&task_id)
+    };
+    if let Some(handle_ref) = handle_ref {
+        let client = {
+            let handle = handle_ref.lock().await;
+            handle.client.clone()
+        };
+        let _ = client.shutdown().await;
     }
     // Fetch task info without holding DB lock across await points.
     let task_snapshot = {
@@ -5131,167 +5214,183 @@ pub(crate) async fn send_chat_message_internal(
         let _ = window.emit("ChatLogStatus", (&task_id, "Working...", "running"));
     }
 
-    // Extract session handle - IMPORTANT: We remove it from the HashMap to release the lock
-    // This allows other tasks to run concurrently
-    let mut handle = {
-        let mut sessions = state.sessions.lock().await;
+    // Extract session handle without removing it from the map.
+    let handle_ref = {
+        let sessions = state.sessions.lock().await;
+        sessions.get(&task_id).cloned()
+    };
 
-        // If session doesn't exist, we need to reconnect
-        if !sessions.contains_key(&task_id) {
-            println!(
-                "[Harness] Session not found, attempting to reconnect: {}",
-                task_id
-            );
-            drop(sessions); // Release lock before reconnection
+    let handle_ref = if let Some(handle_ref) = handle_ref {
+        handle_ref
+    } else {
+        println!(
+            "[Harness] Session not found, attempting to reconnect: {}",
+            task_id
+        );
 
-            // Look up task from DB to get reconnection info
-            let task = {
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                db::list_tasks(&conn)
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .find(|t| t.id == task_id)
-            };
+        // Look up task from DB to get reconnection info
+        let task = {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            db::list_tasks(&conn)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|t| t.id == task_id)
+        };
 
-            let task = match task {
-                Some(t) => t,
-                None => {
-                    let error_msg = "Task not found in database";
-                    println!("[Harness] send_chat_message error: {}", error_msg);
-                    if let Some(window) = app.get_webview_window(&window_label) {
-                        let _ = window.emit("ChatLogStatus", (&task_id, error_msg, "error"));
-                    }
-                    return Err(error_msg.to_string());
+        let task = match task {
+            Some(t) => t,
+            None => {
+                let error_msg = "Task not found in database";
+                println!("[Harness] send_chat_message error: {}", error_msg);
+                if let Some(window) = app.get_webview_window(&window_label) {
+                    let _ = window.emit("ChatLogStatus", (&task_id, error_msg, "error"));
                 }
-            };
-
-            // Find agent config
-            let agent = match find_agent(&state.config, &task.agent_id) {
-                Some(a) => a,
-                None => {
-                    let error_msg = format!("Unknown agent: {}", task.agent_id);
-                    println!("[Harness] send_chat_message error: {}", error_msg);
-                    if let Some(window) = app.get_webview_window(&window_label) {
-                        let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
-                    }
-                    return Err(error_msg);
-                }
-            };
-
-            // Set up working directory
-            let cwd = resolve_task_cwd(&task)?;
-
-            // Build environment
-            let settings = state.settings.lock().await.clone();
-            let overrides = auth_env_for(&task.agent_id, &settings);
-            let allow_missing = (task.agent_id == "codex"
-                && settings.codex_auth_method.as_deref() == Some("chatgpt"))
-                || (task.agent_id == "claude-code"
-                    && matches!(
-                        settings.claude_auth_method.as_deref(),
-                        Some("cli") | Some("oauth")
-                    ));
-
-            let env = match build_env(&agent.required_env, &overrides, allow_missing) {
-                Ok(e) => e,
-                Err(e) => {
-                    let error_msg = format!("Auth not configured: {}", e);
-                    println!("[Harness] send_chat_message error: {}", error_msg);
-                    if let Some(window) = app.get_webview_window(&window_label) {
-                        let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
-                    }
-                    return Err(error_msg);
-                }
-            };
-
-            // Reconnect with context restoration (hybrid: session/load or history injection)
-            println!("[Harness] Reconnecting Agent session for task: {}", task_id);
-            if let Some(window) = app.get_webview_window(&window_label) {
-                let _ = window.emit("ChatLogStatus", (&task_id, "Reconnecting...", "running"));
+                return Err(error_msg.to_string());
             }
+        };
 
-            let (client, session_id, used_session_load) =
-                match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
-                    Ok(result) => result,
-                    Err(e) => {
-                        let error_msg = format!("Failed to reconnect: {}", e);
-                        println!("[Harness] send_chat_message error: {}", error_msg);
-                        if let Some(window) = app.get_webview_window(&window_label) {
-                            let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
-                        }
-                        return Err(error_msg);
+        // Find agent config
+        let agent = match find_agent(&state.config, &task.agent_id) {
+            Some(a) => a,
+            None => {
+                let error_msg = format!("Unknown agent: {}", task.agent_id);
+                println!("[Harness] send_chat_message error: {}", error_msg);
+                if let Some(window) = app.get_webview_window(&window_label) {
+                    let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+                }
+                return Err(error_msg);
+            }
+        };
+
+        // Set up working directory
+        let cwd = resolve_task_cwd(&task)?;
+
+        // Build environment
+        let settings = state.settings.lock().await.clone();
+        let overrides = auth_env_for(&task.agent_id, &settings);
+        let allow_missing = (task.agent_id == "codex"
+            && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+            || (task.agent_id == "claude-code"
+                && matches!(
+                    settings.claude_auth_method.as_deref(),
+                    Some("cli") | Some("oauth")
+                ));
+
+        let env = match build_env(&agent.required_env, &overrides, allow_missing) {
+            Ok(e) => e,
+            Err(e) => {
+                let error_msg = format!("Auth not configured: {}", e);
+                println!("[Harness] send_chat_message error: {}", error_msg);
+                if let Some(window) = app.get_webview_window(&window_label) {
+                    let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+                }
+                return Err(error_msg);
+            }
+        };
+
+        // Reconnect with context restoration (hybrid: session/load or history injection)
+        println!("[Harness] Reconnecting Agent session for task: {}", task_id);
+        if let Some(window) = app.get_webview_window(&window_label) {
+            let _ = window.emit("ChatLogStatus", (&task_id, "Reconnecting...", "running"));
+        }
+
+        let (client, session_id, used_session_load) =
+            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
+                Ok(result) => result,
+                Err(e) => {
+                    let error_msg = format!("Failed to reconnect: {}", e);
+                    println!("[Harness] send_chat_message error: {}", error_msg);
+                    if let Some(window) = app.get_webview_window(&window_label) {
+                        let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
                     }
-                };
-
-            let model = task.model.clone();
-
-            println!(
-                "[Harness] Session reconnected: task_id={} session_id={} (used_session_load={})",
-                task_id, session_id, used_session_load
-            );
-
-            // Spawn Claude usage watcher for reconnected chat sessions
-            let claude_watcher = if task.agent_id == "claude-code" {
-                Some(claude_usage_watcher::start_watching(
-                    &session_id,
-                    &task_id,
-                    app.clone(),
-                    state.db.clone(),
-                ))
-            } else {
-                None
+                    return Err(error_msg);
+                }
             };
 
-            // Store whether we need history injection for this session
-            // (will be used when sending the actual message)
-            let needs_history_injection = !used_session_load;
+        let model = task.model.clone();
 
-            // Prepare the message with history context if needed
-            let message_with_context = if needs_history_injection {
-                let history_opt = {
-                    let conn = state.db.lock().map_err(|e| e.to_string())?;
-                    let messages_db =
-                        db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
-                    if !messages_db.is_empty() {
-                        let (history, _) =
-                            db::compact_history(&messages_db, task.prompt.as_deref(), 100_000);
-                        Some(history)
-                    } else {
-                        None
-                    }
-                };
+        println!(
+            "[Harness] Session reconnected: task_id={} session_id={} (used_session_load={})",
+            task_id, session_id, used_session_load
+        );
 
-                if let Some(history) = history_opt {
-                    format_message_with_history(&history, &message)
+        // Spawn Claude usage watcher for reconnected chat sessions
+        let claude_watcher = if task.agent_id == "claude-code" {
+            Some(claude_usage_watcher::start_watching(
+                &session_id,
+                &task_id,
+                app.clone(),
+                state.db.clone(),
+            ))
+        } else {
+            None
+        };
+
+        // Store whether we need history injection for this session
+        // (will be used when sending the actual message)
+        let needs_history_injection = !used_session_load;
+
+        // Prepare the message with history context if needed
+        let message_with_context = if needs_history_injection {
+            let history_opt = {
+                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                let messages_db =
+                    db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
+                if !messages_db.is_empty() {
+                    let (history, _) =
+                        db::compact_history(&messages_db, task.prompt.as_deref(), 100_000);
+                    Some(history)
                 } else {
-                    message.clone()
+                    None
                 }
+            };
+
+            if let Some(history) = history_opt {
+                format_message_with_history(&history, &message)
             } else {
                 message.clone()
-            };
-
-            // Store the context-injected message for later use
-            // We'll use a special field or handle it in the message sending logic
-
-            SessionHandle {
-                agent_id: task.agent_id.clone(),
-                session_id,
-                model: model.clone(),
-                client,
-                pending_prompt: Some(message_with_context), // Store the context-injected message
-                pending_attachments: Vec::new(),
-                messages: Vec::new(),
-                claude_watcher,
             }
         } else {
-            // Session exists - remove it from the map to release the lock
-            sessions
-                .remove(&task_id)
-                .ok_or_else(|| "Session not found".to_string())?
-        }
-    }; // Lock is released here!
+            message.clone()
+        };
 
-    let agent_id = handle.agent_id.clone();
+        let handle = SessionHandle {
+            agent_id: task.agent_id.clone(),
+            session_id,
+            model: model.clone(),
+            client,
+            pending_prompt: Some(message_with_context),
+            pending_attachments: Vec::new(),
+            messages: Vec::new(),
+            claude_watcher,
+        };
+
+        let handle_ref = Arc::new(Mutex::new(handle));
+        let mut sessions = state.sessions.lock().await;
+        sessions.insert(task_id.clone(), handle_ref.clone());
+        handle_ref
+    };
+
+    let user_timestamp = chrono::Utc::now().to_rfc3339();
+    let (agent_id, model, client, session_id, effective_message) = {
+        let mut handle = handle_ref.lock().await;
+        let effective_message = handle
+            .pending_prompt
+            .take()
+            .unwrap_or_else(|| message.clone());
+        handle.messages.push(serde_json::json!({
+            "message_type": "user_message",
+            "content": message,
+            "timestamp": user_timestamp
+        }));
+        (
+            handle.agent_id.clone(),
+            handle.model.clone(),
+            handle.client.clone(),
+            handle.session_id.clone(),
+            effective_message,
+        )
+    };
 
     // Load any pending attachments for this task (e.g., pasted images in chat log)
     let attachments: Vec<db::AttachmentRecord> = {
@@ -5522,20 +5621,7 @@ pub(crate) async fn send_chat_message_internal(
         }
     });
 
-    // Use context-injected message if available (from reconnection with history injection),
-    // otherwise use the original message
-    let effective_message = handle
-        .pending_prompt
-        .take()
-        .unwrap_or_else(|| message.clone());
-
     // Persist user message before sending so reload ordering is correct
-    let user_timestamp = chrono::Utc::now().to_rfc3339();
-    handle.messages.push(serde_json::json!({
-        "message_type": "user_message",
-        "content": message,
-        "timestamp": user_timestamp
-    }));
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let message_id = db::save_message(
@@ -5570,23 +5656,23 @@ pub(crate) async fn send_chat_message_internal(
     // Wrapped in retry logic for recoverable errors (exit code 143/SIGTERM)
     const MAX_RECONNECT_ATTEMPTS: u32 = 2;
     let mut attempt = 0;
+    let mut client = client;
+    let mut session_id = session_id;
 
     let response = loop {
         attempt += 1;
 
         let result = if images.is_empty() {
-            handle
-                .client
-                .session_prompt_streaming(&handle.session_id, &effective_message, |update| {
+            client
+                .session_prompt_streaming(&session_id, &effective_message, |update| {
                     let _ = stream_tx.send(update);
                 })
                 .await
         } else {
             println!("[Harness] send_chat_message with {} image(s)", images.len());
-            handle
-                .client
+            client
                 .session_prompt_streaming_with_images(
-                    &handle.session_id,
+                    &session_id,
                     &effective_message,
                     &images,
                     |update| {
@@ -5688,19 +5774,25 @@ pub(crate) async fn send_chat_message_internal(
                                 new_session_id
                             );
 
-                            // Update the handle with the new client/session
-                            handle.client = new_client;
-                            handle.session_id = new_session_id.clone();
+                            {
+                                let mut handle = handle_ref.lock().await;
+                                handle.client = new_client.clone();
+                                handle.session_id = new_session_id.clone();
 
-                            // Also update Claude watcher if applicable
-                            if task.agent_id == "claude-code" {
-                                handle.claude_watcher = Some(claude_usage_watcher::start_watching(
-                                    &new_session_id,
-                                    &task_id,
-                                    app.clone(),
-                                    state.db.clone(),
-                                ));
+                                // Also update Claude watcher if applicable
+                                if task.agent_id == "claude-code" {
+                                    handle.claude_watcher =
+                                        Some(claude_usage_watcher::start_watching(
+                                            &new_session_id,
+                                            &task_id,
+                                            app.clone(),
+                                            state.db.clone(),
+                                        ));
+                                }
                             }
+
+                            client = new_client;
+                            session_id = new_session_id.clone();
 
                             // Emit status and retry
                             if let Some(window) = app.get_webview_window(&window_label) {
@@ -5773,7 +5865,10 @@ pub(crate) async fn send_chat_message_internal(
             });
 
             // Store message in memory
-            handle.messages.push(chat_msg.clone());
+            {
+                let mut handle = handle_ref.lock().await;
+                handle.messages.push(chat_msg.clone());
+            }
 
             // Persist to DB
             {
@@ -5830,7 +5925,7 @@ pub(crate) async fn send_chat_message_internal(
 
     // Process token usage and update cost
     if let Some(usage) = &response.token_usage {
-        let cost = calculate_cost_from_usage(&handle.model, usage);
+        let cost = calculate_cost_from_usage(&model, usage);
         if cost > 0.0 {
             let conn = state.db.lock().map_err(|e| e.to_string())?;
             let current_cost = db::get_task_cost(&conn, &task_id).unwrap_or(0.0);
@@ -5848,12 +5943,6 @@ pub(crate) async fn send_chat_message_internal(
         let context_window = usage.model_context_window;
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let _ = db::update_task_token_usage(&conn, &task_id, total_tokens, context_window);
-    }
-
-    // Re-insert the session handle back into the map for future follow-up messages
-    {
-        let mut sessions = state.sessions.lock().await;
-        sessions.insert(task_id.clone(), handle);
     }
 
     let _ = maybe_show_agent_notification(&app, state, &task_id, &agent_id, &summary_status).await;
@@ -5885,15 +5974,20 @@ async fn respond_to_permission(
     );
 
     // Get session
-    let mut sessions = state.sessions.lock().await;
-    let handle = sessions
-        .get_mut(&task_id)
-        .ok_or_else(|| format!("Session not found: {}", task_id))?;
+    let handle_ref = {
+        let sessions = state.sessions.lock().await;
+        sessions.get(&task_id).cloned()
+    }
+    .ok_or_else(|| format!("Session not found: {}", task_id))?;
+
+    let (client, session_id) = {
+        let handle = handle_ref.lock().await;
+        (handle.client.clone(), handle.session_id.clone())
+    };
 
     // Send permission response to the agent
-    handle
-        .client
-        .send_permission_response(&handle.session_id, &request_id, &response_id)
+    client
+        .send_permission_response(&session_id, &request_id, &response_id)
         .await
         .map_err(|e| format!("Failed to send permission response: {}", e))?;
 
@@ -5937,13 +6031,18 @@ pub(crate) async fn respond_to_user_input_internal(
     );
     tracing::info!("[Harness] respond_to_user_input payload: {}", answers);
 
-    let mut sessions = state.sessions.lock().await;
-    let handle = sessions
-        .get_mut(&task_id)
-        .ok_or_else(|| format!("Session not found: {}", task_id))?;
+    let handle_ref = {
+        let sessions = state.sessions.lock().await;
+        sessions.get(&task_id).cloned()
+    }
+    .ok_or_else(|| format!("Session not found: {}", task_id))?;
 
-    handle
-        .client
+    let client = {
+        let handle = handle_ref.lock().await;
+        handle.client.clone()
+    };
+
+    client
         .send_user_input_response(&request_id, answers)
         .await
         .map_err(|e| {
@@ -6313,6 +6412,7 @@ fn main() {
             get_repo_branches,
             create_agent_session,
             start_task,
+            stop_task,
             start_pending_prompt,
             get_settings,
             save_settings,

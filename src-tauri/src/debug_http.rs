@@ -130,7 +130,7 @@ fn handle_request(stream: TcpStream, db_conn: Arc<StdMutex<Connection>>) {
 
             let result = rt.block_on(async {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/"));
-                let mut client = AgentProcessClient::spawn(
+                let client = AgentProcessClient::spawn(
                     "claude",
                     &vec!["--output-format".to_string(), "stream-json".to_string()],
                     &cwd,

@@ -227,8 +227,29 @@
           }, 100);
           break;
         case 'StopTask':
+          if (tauriInvoke) {
+            tauriInvoke('stop_task', { taskId: args[0] })
+              .catch(function(err) {
+                console.error('[Tauri Bridge] stop_task error:', err);
+                emitEvent('StatusUpdate', null, args[0], 'Error: ' + err, 'red', 'error');
+              });
+            return;
+          }
           setTimeout(function() {
             emitEvent('StatusUpdate', null, args[0], 'Stopped', 'red', 'idle');
+          }, 100);
+          break;
+        case 'StopGeneration':
+          if (tauriInvoke) {
+            tauriInvoke('stop_task', { taskId: args[0] })
+              .catch(function(err) {
+                console.error('[Tauri Bridge] stop_task error:', err);
+                emitEvent('ChatLogStatus', null, args[0], 'Error: ' + err, 'error');
+              });
+            return;
+          }
+          setTimeout(function() {
+            emitEvent('ChatLogStatus', null, args[0], 'Stopped', 'idle');
           }, 100);
           break;
         case 'DeleteTask':

@@ -72,7 +72,7 @@ pub struct AgentLaunchConfig {
 }
 
 pub async fn get_agent_models(config: AgentLaunchConfig) -> Result<Vec<ModelOption>> {
-    let mut client = AgentProcessClient::spawn(
+    let client = AgentProcessClient::spawn(
         &config.command,
         &config.args,
         Path::new(&config.cwd),
@@ -90,7 +90,7 @@ pub async fn get_agent_models(config: AgentLaunchConfig) -> Result<Vec<ModelOpti
 /// Fetch available models from Codex app-server using the model/list API.
 /// This provides dynamic model information including reasoning effort options.
 pub async fn get_codex_models(config: AgentLaunchConfig) -> Result<Vec<ModelOption>> {
-    let mut client = AgentProcessClient::spawn(
+    let client = AgentProcessClient::spawn(
         &config.command,
         &["app-server".to_string()], // Override args to use app-server
         Path::new(&config.cwd),
@@ -113,8 +113,10 @@ pub async fn get_codex_models(config: AgentLaunchConfig) -> Result<Vec<ModelOpti
 }
 
 /// Fetch enriched models from Codex app-server including reasoning effort info.
-pub async fn get_codex_models_enriched(config: AgentLaunchConfig) -> Result<Vec<EnrichedModelOption>> {
-    let mut client = AgentProcessClient::spawn(
+pub async fn get_codex_models_enriched(
+    config: AgentLaunchConfig,
+) -> Result<Vec<EnrichedModelOption>> {
+    let client = AgentProcessClient::spawn(
         &config.command,
         &["app-server".to_string()],
         Path::new(&config.cwd),
@@ -147,7 +149,7 @@ pub async fn get_codex_models_enriched(config: AgentLaunchConfig) -> Result<Vec<
 }
 
 pub async fn set_session_model(
-    mut client: AgentProcessClient,
+    client: &AgentProcessClient,
     session_id: &str,
     config_id: &str,
     model_value: &str,
@@ -160,7 +162,7 @@ pub async fn set_session_model(
 /// Apply model selection to a session.
 /// Tries the native session/set_model API first, falls back to config options.
 pub async fn apply_model_selection(
-    client: &mut AgentProcessClient,
+    client: &AgentProcessClient,
     session: &NewSessionResult,
     model_value: &str,
 ) -> Result<Vec<ConfigOption>> {
@@ -237,7 +239,7 @@ pub fn extract_mode_options(session: &NewSessionResult) -> Vec<ModeOption> {
 
 /// Fetch available modes by spawning a CLI client and reading session/new response
 pub async fn get_agent_modes(config: AgentLaunchConfig) -> Result<Vec<ModeOption>> {
-    let mut client = AgentProcessClient::spawn(
+    let client = AgentProcessClient::spawn(
         &config.command,
         &config.args,
         Path::new(&config.cwd),
@@ -255,7 +257,7 @@ pub async fn get_agent_modes(config: AgentLaunchConfig) -> Result<Vec<ModeOption
 /// Fetch available modes from Codex app-server using the mode/list API.
 /// Returns hardcoded fallback modes if the endpoint is not supported.
 pub async fn get_codex_modes(config: AgentLaunchConfig) -> Result<Vec<ModeOption>> {
-    let mut client = AgentProcessClient::spawn(
+    let client = AgentProcessClient::spawn(
         &config.command,
         &["app-server".to_string()], // Override args to use app-server
         Path::new(&config.cwd),

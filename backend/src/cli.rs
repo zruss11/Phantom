@@ -34,10 +34,10 @@ pub struct TokenUsageInfo {
 /// Codex app-server speaks JSON-RPC 2.0 over stdio (one JSON object per line).
 struct CodexAppServerClient {
     // Keep the child handle so the process stays owned and can be terminated.
-    _child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    notif_rx: mpsc::UnboundedReceiver<Value>,
-    server_req_rx: mpsc::UnboundedReceiver<Value>,
+    _child: TokioMutex<tokio::process::Child>,
+    stdin: TokioMutex<tokio::process::ChildStdin>,
+    notif_rx: TokioMutex<mpsc::UnboundedReceiver<Value>>,
+    server_req_rx: TokioMutex<mpsc::UnboundedReceiver<Value>>,
     pending: std::sync::Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
     next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
@@ -53,7 +53,12 @@ struct AcpClient {
 }
 
 impl AcpClient {
-    async fn start(command: &str, args: &[String], cwd: &Path, env: &[(String, String)]) -> Result<Self> {
+    async fn start(
+        command: &str,
+        args: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+    ) -> Result<Self> {
         let mut cmd = Command::new(command);
         cmd.args(args)
             .current_dir(cwd)
@@ -84,7 +89,10 @@ impl AcpClient {
             while let Ok(Some(line)) = lines.next_line().await {
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
                     if let Some(id) = v.get("id").and_then(|x| x.as_u64()) {
-                        let tx_opt = pending_clone.lock().ok().and_then(|mut map| map.remove(&id));
+                        let tx_opt = pending_clone
+                            .lock()
+                            .ok()
+                            .and_then(|mut map| map.remove(&id));
                         if let Some(tx) = tx_opt {
                             let _ = tx.send(v);
                         }
@@ -111,7 +119,10 @@ impl AcpClient {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel::<Value>();
         {
-            let mut map = self.pending.lock().map_err(|_| anyhow::anyhow!("pending lock"))?;
+            let mut map = self
+                .pending
+                .lock()
+                .map_err(|_| anyhow::anyhow!("pending lock"))?;
             map.insert(id, tx);
         }
 
@@ -134,6 +145,12 @@ impl AcpClient {
             return Err(anyhow::anyhow!("acp rpc error: {}", resp));
         }
         Ok(resp)
+    }
+
+    async fn shutdown(&mut self) -> Result<()> {
+        let _ = self._child.kill().await;
+        let _ = self._child.wait().await;
+        Ok(())
     }
 
     async fn initialize(&mut self) -> Result<()> {
@@ -163,8 +180,8 @@ impl AcpClient {
             )
             .await?;
         let data = resp.get("result").cloned().context("missing ACP result")?;
-        let session: NewSessionResult = serde_json::from_value(data)
-            .context("failed to parse ACP session/new response")?;
+        let session: NewSessionResult =
+            serde_json::from_value(data).context("failed to parse ACP session/new response")?;
         Ok(session)
     }
 }
@@ -236,22 +253,25 @@ impl CodexAppServerClient {
         let next_id = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
 
         Ok(Self {
-            _child: child,
-            stdin,
-            notif_rx,
-            server_req_rx,
+            _child: TokioMutex::new(child),
+            stdin: TokioMutex::new(stdin),
+            notif_rx: TokioMutex::new(notif_rx),
+            server_req_rx: TokioMutex::new(server_req_rx),
             pending,
             next_id,
         })
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value> {
+    async fn request(&self, method: &str, params: Value) -> Result<Value> {
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let (tx, rx) = oneshot::channel::<Value>();
         {
-            let mut map = self.pending.lock().map_err(|_| anyhow::anyhow!("pending lock"))?;
+            let mut map = self
+                .pending
+                .lock()
+                .map_err(|_| anyhow::anyhow!("pending lock"))?;
             map.insert(id, tx);
         }
 
@@ -261,12 +281,13 @@ impl CodexAppServerClient {
             "params": params,
         });
 
-        self.stdin
+        let mut stdin = self.stdin.lock().await;
+        stdin
             .write_all(req.to_string().as_bytes())
             .await
             .context("write codex request")?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
 
         let resp = rx.await.context("codex response dropped")?;
         if resp.get("error").is_some() {
@@ -275,7 +296,7 @@ impl CodexAppServerClient {
         Ok(resp)
     }
 
-    async fn respond_server_request(&mut self, request_id: &str, result: Value) -> Result<()> {
+    async fn respond_server_request(&self, request_id: &str, result: Value) -> Result<()> {
         let id_value = match request_id.parse::<u64>() {
             Ok(id) => json!(id),
             Err(_) => json!(request_id),
@@ -285,13 +306,21 @@ impl CodexAppServerClient {
             "result": result,
         });
         tracing::info!("[CodexAppServer][response] {}", resp);
-        self.stdin.write_all(resp.to_string().as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(resp.to_string().as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
         Ok(())
     }
 
-    async fn initialize(&mut self) -> Result<()> {
+    async fn shutdown(&self) -> Result<()> {
+        let mut child = self._child.lock().await;
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        Ok(())
+    }
+
+    async fn initialize(&self) -> Result<()> {
         let _ = self
             .request(
                 "initialize",
@@ -300,14 +329,15 @@ impl CodexAppServerClient {
             .await?;
         // Per protocol, send an `initialized` notification.
         let msg = json!({"jsonrpc": "2.0", "method": "initialized"});
-        self.stdin.write_all(msg.to_string().as_bytes()).await?;
-        self.stdin.write_all(b"\n").await?;
-        self.stdin.flush().await?;
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(msg.to_string().as_bytes()).await?;
+        stdin.write_all(b"\n").await?;
+        stdin.flush().await?;
         Ok(())
     }
 
     async fn thread_start(
-        &mut self,
+        &self,
         cwd: &Path,
         model: Option<&str>,
         reasoning_effort: Option<&str>,
@@ -334,7 +364,7 @@ impl CodexAppServerClient {
     }
 
     async fn thread_resume(
-        &mut self,
+        &self,
         thread_id: &str,
         cwd: &Path,
         model: Option<&str>,
@@ -363,7 +393,7 @@ impl CodexAppServerClient {
     }
 
     async fn turn_start_streaming<F>(
-        &mut self,
+        &self,
         thread_id: &str,
         prompt: &str,
         model: Option<&str>,
@@ -418,7 +448,10 @@ impl CodexAppServerClient {
             // No mode specified, add reasoningEffort at top level
             params["reasoningEffort"] = json!(e);
         }
-        eprintln!("[Codex] turn/start params: {}", serde_json::to_string_pretty(&params).unwrap_or_default());
+        eprintln!(
+            "[Codex] turn/start params: {}",
+            serde_json::to_string_pretty(&params).unwrap_or_default()
+        );
         let _ = self.request("turn/start", params).await?;
 
         let mut full = String::new();
@@ -426,13 +459,16 @@ impl CodexAppServerClient {
         let mut last_turn_diff: Option<String> = None;
         let mut context_compacted_emitted = false;
 
+        let mut server_req_rx = self.server_req_rx.lock().await;
+        let mut notif_rx = self.notif_rx.lock().await;
+
         loop {
             // Prefer handling server requests (which can block turns) promptly.
             let next = tokio::select! {
-                req = self.server_req_rx.recv() => {
+                req = server_req_rx.recv() => {
                     req.context("codex app-server closed")?
                 }
-                notif = self.notif_rx.recv() => {
+                notif = notif_rx.recv() => {
                     notif.context("codex app-server closed")?
                 }
             };
@@ -475,7 +511,8 @@ impl CodexAppServerClient {
                             "commandExecution" => {
                                 // Extract command array and format it
                                 if let Some(cmd) = item.get("command").and_then(|c| c.as_array()) {
-                                    let cmd_str = cmd.iter()
+                                    let cmd_str = cmd
+                                        .iter()
                                         .filter_map(|v| v.as_str())
                                         .collect::<Vec<_>>()
                                         .join(" ");
@@ -487,9 +524,13 @@ impl CodexAppServerClient {
                             }
                             "fileChange" => {
                                 // Extract file paths being changed
-                                if let Some(changes) = item.get("changes").and_then(|c| c.as_array()) {
+                                if let Some(changes) =
+                                    item.get("changes").and_then(|c| c.as_array())
+                                {
                                     for change in changes {
-                                        if let Some(path) = change.get("path").and_then(|p| p.as_str()) {
+                                        if let Some(path) =
+                                            change.get("path").and_then(|p| p.as_str())
+                                        {
                                             on_update(StreamingUpdate::ToolCall {
                                                 name: "edit_file".to_string(),
                                                 arguments: json!({"path": path}).to_string(),
@@ -500,8 +541,12 @@ impl CodexAppServerClient {
                             }
                             "mcpToolCall" => {
                                 // MCP tool calls have tool name directly
-                                let tool = item.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
-                                let args = item.get("arguments").map(|a| a.to_string()).unwrap_or_default();
+                                let tool =
+                                    item.get("tool").and_then(|t| t.as_str()).unwrap_or("tool");
+                                let args = item
+                                    .get("arguments")
+                                    .map(|a| a.to_string())
+                                    .unwrap_or_default();
                                 on_update(StreamingUpdate::ToolCall {
                                     name: tool.to_string(),
                                     arguments: args,
@@ -517,9 +562,8 @@ impl CodexAppServerClient {
                         .and_then(|p| p.get("itemId"))
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    if let Some(delta) = params
-                        .and_then(|p| p.get("delta"))
-                        .and_then(|d| d.as_str())
+                    if let Some(delta) =
+                        params.and_then(|p| p.get("delta")).and_then(|d| d.as_str())
                     {
                         full.push_str(delta);
                         on_update(StreamingUpdate::TextChunk {
@@ -533,16 +577,17 @@ impl CodexAppServerClient {
                 | "codex/event/agent_reasoning_delta" => {
                     let delta = next
                         .get("params")
-                        .and_then(|p| p.get("delta").or_else(|| p.get("msg").and_then(|m| m.get("delta"))))
+                        .and_then(|p| {
+                            p.get("delta")
+                                .or_else(|| p.get("msg").and_then(|m| m.get("delta")))
+                        })
                         .and_then(|d| d.as_str())
                         .map(|s| s.to_string());
                     if let Some(text) = delta {
                         on_update(StreamingUpdate::ReasoningChunk { text });
                     }
                 }
-                "codex/event/agent_reasoning"
-                | "item/completed"
-                | "codex/event/item_completed" => {
+                "codex/event/agent_reasoning" | "item/completed" | "codex/event/item_completed" => {
                     let text = params
                         .get("msg")
                         .and_then(|m| m.get("text"))
@@ -552,7 +597,9 @@ impl CodexAppServerClient {
                                 .or_else(|| params.get("msg").and_then(|m| m.get("item")))?;
                             item.get("summary")
                                 .or_else(|| item.get("summary_text"))
-                                .and_then(|v| v.as_array().and_then(|a| a.get(0)).or_else(|| v.get(0)))
+                                .and_then(|v| {
+                                    v.as_array().and_then(|a| a.get(0)).or_else(|| v.get(0))
+                                })
                         })
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
@@ -644,13 +691,15 @@ impl CodexAppServerClient {
                         .get("params")
                         .and_then(|p| p.get("msg"))
                         .and_then(|m| m.get("info"))
-                        .and_then(|i| i.get("total_token_usage").or_else(|| i.get("last_token_usage")))
+                        .and_then(|i| {
+                            i.get("total_token_usage")
+                                .or_else(|| i.get("last_token_usage"))
+                        })
                     {
                         captured_usage = parse_codex_token_usage(token_usage);
                     }
                 }
-                "codex/event/mcp_startup_update"
-                | "codex/event/mcp_startup_complete" => {
+                "codex/event/mcp_startup_update" | "codex/event/mcp_startup_complete" => {
                     // MCP lifecycle events are noisy; we don't surface them in chat.
                 }
                 "codex/event/web_search_end" => {
@@ -683,8 +732,7 @@ impl CodexAppServerClient {
                         .or_else(|| payload.get("steps"))
                         .cloned()
                         .unwrap_or(Value::Array(vec![]));
-                    let steps: Vec<PlanStep> =
-                        serde_json::from_value(plan_val).unwrap_or_default();
+                    let steps: Vec<PlanStep> = serde_json::from_value(plan_val).unwrap_or_default();
                     on_update(StreamingUpdate::PlanUpdate {
                         turn_id,
                         explanation,
@@ -694,7 +742,10 @@ impl CodexAppServerClient {
                 "thread/tokenUsage/updated" => {
                     // Capture token usage from Codex notification
                     if let Some(params) = next.get("params") {
-                        if let Some(token_usage) = params.get("token_usage").or_else(|| params.get("tokenUsage")) {
+                        if let Some(token_usage) = params
+                            .get("token_usage")
+                            .or_else(|| params.get("tokenUsage"))
+                        {
                             captured_usage = parse_codex_token_usage(token_usage);
                         }
                     }
@@ -706,8 +757,7 @@ impl CodexAppServerClient {
                     if !method.is_empty() {
                         eprintln!(
                             "[CodexAppServer] Unhandled notification: {} params={}",
-                            method,
-                            params
+                            method, params
                         );
                     }
                 }
@@ -717,7 +767,7 @@ impl CodexAppServerClient {
     }
 
     /// Fetch available models from the Codex app-server via model/list
-    async fn model_list(&mut self) -> Result<Vec<CodexModelInfo>> {
+    async fn model_list(&self) -> Result<Vec<CodexModelInfo>> {
         let resp = self.request("model/list", json!({})).await?;
         let data = resp
             .get("result")
@@ -726,16 +776,15 @@ impl CodexAppServerClient {
             .cloned()
             .unwrap_or(Value::Array(vec![]));
 
-        let models: Vec<CodexModelInfo> = serde_json::from_value(data)
-            .unwrap_or_default();
+        let models: Vec<CodexModelInfo> = serde_json::from_value(data).unwrap_or_default();
         Ok(models)
     }
 
     /// Fetch available modes from the Codex app-server via collaborationMode/list (new) or mode/list (legacy)
     /// Falls back to hardcoded modes if endpoints are not supported
-    async fn mode_list(&mut self) -> Result<Vec<CodexModeInfo>> {
+    async fn mode_list(&self) -> Result<Vec<CodexModeInfo>> {
         async fn fetch_modes(
-            client: &mut CodexAppServerClient,
+            client: &CodexAppServerClient,
             method: &str,
         ) -> Result<Option<Vec<CodexModeInfo>>> {
             match client.request(method, json!({})).await {
@@ -790,12 +839,7 @@ impl CodexAppServerClient {
                     }
                     let keys = result
                         .and_then(|r| r.as_object())
-                        .map(|obj| {
-                            obj.keys()
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        })
+                        .map(|obj| obj.keys().cloned().collect::<Vec<_>>().join(","))
                         .unwrap_or_else(|| "n/a".to_string());
                     let data_kind = result_data
                         .map(|v| {
@@ -815,10 +859,7 @@ impl CodexAppServerClient {
                     Ok(None)
                 }
                 Err(e) => {
-                    eprintln!(
-                        "[CodexAppServer] {} not supported: {}",
-                        method, e
-                    );
+                    eprintln!("[CodexAppServer] {} not supported: {}", method, e);
                     Ok(None)
                 }
             }
@@ -855,7 +896,7 @@ impl CodexAppServerClient {
         ])
     }
 
-    async fn mode_developer_instructions(&mut self, mode: &str) -> Option<String> {
+    async fn mode_developer_instructions(&self, mode: &str) -> Option<String> {
         let modes = self.mode_list().await.ok()?;
         modes
             .into_iter()
@@ -894,7 +935,11 @@ pub struct CodexModeInfo {
     pub name: Option<String>,
     #[serde(default)]
     pub description: Option<String>,
-    #[serde(default, alias = "developer_instructions", alias = "developerInstructions")]
+    #[serde(
+        default,
+        alias = "developer_instructions",
+        alias = "developerInstructions"
+    )]
     pub developer_instructions: Option<String>,
     #[serde(default, alias = "reasoning_effort", alias = "reasoningEffort")]
     pub reasoning_effort: Option<String>,
@@ -921,12 +966,12 @@ pub struct AgentProcessClient {
     args: Vec<String>,
     env: Vec<(String, String)>,
     cwd: PathBuf,
-    model: Option<String>,
-    reasoning_effort: Option<String>,
-    permission_mode: Option<String>,
-    agent_mode: Option<String>,
-    codex_mode: Option<String>,
-    codex_app_server: Option<TokioMutex<CodexAppServerClient>>,
+    model: std::sync::Mutex<Option<String>>,
+    reasoning_effort: std::sync::Mutex<Option<String>>,
+    permission_mode: std::sync::Mutex<Option<String>>,
+    agent_mode: std::sync::Mutex<Option<String>>,
+    codex_mode: std::sync::Mutex<Option<String>>,
+    codex_app_server: Option<std::sync::Arc<CodexAppServerClient>>,
     acp_client: Option<TokioMutex<AcpClient>>,
 }
 
@@ -1131,9 +1176,9 @@ impl AgentProcessClient {
             .and_then(|s| s.to_str())
             == Some("codex")
         {
-            let mut client = CodexAppServerClient::start(cwd, env).await?;
+            let client = CodexAppServerClient::start(cwd, env).await?;
             client.initialize().await?;
-            Some(TokioMutex::new(client))
+            Some(std::sync::Arc::new(client))
         } else {
             None
         };
@@ -1158,17 +1203,17 @@ impl AgentProcessClient {
             args: args.to_vec(),
             env: env.to_vec(),
             cwd: cwd.to_path_buf(),
-            model: None,
-            reasoning_effort: None,
-            permission_mode: None,
-            agent_mode: None,
-            codex_mode: None,
+            model: std::sync::Mutex::new(None),
+            reasoning_effort: std::sync::Mutex::new(None),
+            permission_mode: std::sync::Mutex::new(None),
+            agent_mode: std::sync::Mutex::new(None),
+            codex_mode: std::sync::Mutex::new(None),
             codex_app_server,
             acp_client,
         })
     }
 
-    pub async fn initialize(&mut self, _name: &str, _version: &str) -> Result<()> {
+    pub async fn initialize(&self, _name: &str, _version: &str) -> Result<()> {
         if let Some(acp) = &self.acp_client {
             let mut acp = acp.lock().await;
             acp.initialize().await?;
@@ -1176,7 +1221,14 @@ impl AgentProcessClient {
         Ok(())
     }
 
-    pub async fn shutdown(&mut self) -> Result<()> {
+    pub async fn shutdown(&self) -> Result<()> {
+        if let Some(codex) = &self.codex_app_server {
+            let _ = codex.shutdown().await;
+        }
+        if let Some(acp) = &self.acp_client {
+            let mut acp = acp.lock().await;
+            let _ = acp.shutdown().await;
+        }
         Ok(())
     }
 
@@ -1186,41 +1238,50 @@ impl AgentProcessClient {
     }
 
     /// Fetch available models from Codex app-server (only works for Codex agents)
-    pub async fn fetch_codex_models(&mut self) -> Result<Vec<CodexModelInfo>> {
+    pub async fn fetch_codex_models(&self) -> Result<Vec<CodexModelInfo>> {
         if let Some(codex) = &self.codex_app_server {
-            let mut codex = codex.lock().await;
             return codex.model_list().await;
         }
         Err(anyhow::anyhow!("Not a Codex agent"))
     }
 
     /// Fetch available modes from Codex app-server (only works for Codex agents)
-    pub async fn fetch_codex_modes(&mut self) -> Result<Vec<CodexModeInfo>> {
+    pub async fn fetch_codex_modes(&self) -> Result<Vec<CodexModeInfo>> {
         if let Some(codex) = &self.codex_app_server {
-            let mut codex = codex.lock().await;
             return codex.mode_list().await;
         }
         Err(anyhow::anyhow!("Not a Codex agent"))
     }
 
     /// Set the Codex mode (e.g., "default", "plan", "pair-programming", "execute")
-    pub fn set_codex_mode(&mut self, mode: Option<&str>) {
-        self.codex_mode = mode.map(|s| s.to_string());
+    pub fn set_codex_mode(&self, mode: Option<&str>) {
+        let mut guard = self.codex_mode.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = mode.map(|s| s.to_string());
     }
 
-    pub async fn session_new(&mut self, _cwd: &str) -> Result<NewSessionResult> {
+    pub async fn session_new(&self, _cwd: &str) -> Result<NewSessionResult> {
         if let Some(acp) = &self.acp_client {
             let mut acp = acp.lock().await;
             return acp.session_new(&self.cwd).await;
         }
         if let Some(codex) = &self.codex_app_server {
-            let mut codex = codex.lock().await;
+            let model = self.model.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let reasoning_effort = self
+                .reasoning_effort
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let codex_mode = self
+                .codex_mode
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let thread_id = codex
                 .thread_start(
                     &self.cwd,
-                    self.model.as_deref(),
-                    self.reasoning_effort.as_deref(),
-                    self.codex_mode.as_deref(),
+                    model.as_deref(),
+                    reasoning_effort.as_deref(),
+                    codex_mode.as_deref(),
                 )
                 .await?;
             return Ok(NewSessionResult {
@@ -1241,20 +1302,30 @@ impl AgentProcessClient {
     }
 
     pub async fn session_load(
-        &mut self,
+        &self,
         session_id: &str,
         _cwd: &str,
         _servers: Vec<String>,
     ) -> Result<LoadSessionResult> {
         if let Some(codex) = &self.codex_app_server {
-            let mut codex = codex.lock().await;
+            let model = self.model.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let reasoning_effort = self
+                .reasoning_effort
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let codex_mode = self
+                .codex_mode
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let thread_id = codex
                 .thread_resume(
                     session_id,
                     &self.cwd,
-                    self.model.as_deref(),
-                    self.reasoning_effort.as_deref(),
-                    self.codex_mode.as_deref(),
+                    model.as_deref(),
+                    reasoning_effort.as_deref(),
+                    codex_mode.as_deref(),
                 )
                 .await?;
             return Ok(LoadSessionResult {
@@ -1273,27 +1344,37 @@ impl AgentProcessClient {
         true
     }
 
-    pub async fn session_set_mode(&mut self, _session_id: &str, mode: &str) -> Result<()> {
+    pub async fn session_set_mode(&self, _session_id: &str, mode: &str) -> Result<()> {
         let agent_modes = ["coder", "summarizer", "task", "title"];
         if agent_modes.contains(&mode) {
-            self.agent_mode = Some(mode.to_string());
+            let mut guard = self.agent_mode.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some(mode.to_string());
         } else {
-            self.permission_mode = Some(mode.to_string());
+            let mut guard = self
+                .permission_mode
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = Some(mode.to_string());
         }
         Ok(())
     }
 
-    pub async fn set_session_model(&mut self, _session_id: &str, model_value: &str) -> Result<()> {
-        self.model = Some(model_value.to_string());
+    pub async fn set_session_model(&self, _session_id: &str, model_value: &str) -> Result<()> {
+        let mut guard = self.model.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(model_value.to_string());
         Ok(())
     }
 
-    pub fn set_reasoning_effort(&mut self, effort: Option<&str>) {
-        self.reasoning_effort = effort.map(|s| s.to_string());
+    pub fn set_reasoning_effort(&self, effort: Option<&str>) {
+        let mut guard = self
+            .reasoning_effort
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = effort.map(|s| s.to_string());
     }
 
     pub async fn set_config_option(
-        &mut self,
+        &self,
         _session_id: &str,
         _config_id: &str,
         _value: &str,
@@ -1302,7 +1383,7 @@ impl AgentProcessClient {
     }
 
     pub async fn send_permission_response(
-        &mut self,
+        &self,
         _session_id: &str,
         _request_id: &str,
         _response_id: &str,
@@ -1310,13 +1391,8 @@ impl AgentProcessClient {
         Ok(())
     }
 
-    pub async fn send_user_input_response(
-        &mut self,
-        request_id: &str,
-        answers: Value,
-    ) -> Result<()> {
+    pub async fn send_user_input_response(&self, request_id: &str, answers: Value) -> Result<()> {
         if let Some(codex) = &self.codex_app_server {
-            let mut codex = codex.lock().await;
             tracing::info!(
                 "[CodexAppServer] sending requestUserInput response id={} payload={}",
                 request_id,
@@ -1326,11 +1402,13 @@ impl AgentProcessClient {
                 .respond_server_request(request_id, json!({ "answers": answers }))
                 .await;
         }
-        Err(anyhow::anyhow!("User input response only supported for Codex"))
+        Err(anyhow::anyhow!(
+            "User input response only supported for Codex"
+        ))
     }
 
     pub async fn session_prompt_streaming<F>(
-        &mut self,
+        &self,
         session_id: &str,
         content: &str,
         mut on_update: F,
@@ -1343,7 +1421,7 @@ impl AgentProcessClient {
     }
 
     pub async fn session_prompt_streaming_with_images<F>(
-        &mut self,
+        &self,
         session_id: &str,
         content: &str,
         images: &[ImageContent],
@@ -1357,7 +1435,7 @@ impl AgentProcessClient {
     }
 
     async fn run_prompt<F>(
-        &mut self,
+        &self,
         session_id: &str,
         content: &str,
         images: &[ImageContent],
@@ -1368,15 +1446,25 @@ impl AgentProcessClient {
     {
         // Codex uses the app-server JSON-RPC protocol and keeps a long-lived process.
         if let Some(codex) = &self.codex_app_server {
-            let mut codex = codex.lock().await;
+            let model = self.model.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            let reasoning_effort = self
+                .reasoning_effort
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let codex_mode = self
+                .codex_mode
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let (text, usage) = codex
                 .turn_start_streaming(
                     session_id,
                     content,
-                    self.model.as_deref(),
+                    model.as_deref(),
                     &self.cwd,
-                    self.reasoning_effort.as_deref(),
-                    self.codex_mode.as_deref(),
+                    reasoning_effort.as_deref(),
+                    codex_mode.as_deref(),
                     on_update,
                 )
                 .await?;
@@ -1416,18 +1504,30 @@ impl AgentProcessClient {
             ensure_output_format(&mut args);
         }
 
-        if let Some(model) = &self.model {
+        let model = self.model.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let permission_mode = self
+            .permission_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let agent_mode = self
+            .agent_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+
+        if let Some(model) = model.as_ref() {
             // Only pass model flags when we know the CLI supports them.
             if cmd_name == "opencode" {
                 // OpenCode expects provider/model (e.g. anthropic/claude-3-5-sonnet).
                 // Skip if phantom is using a placeholder/default.
                 if model != "default" {
                     args.push("--model".to_string());
-                    args.push(model.clone());
+                    args.push(model.to_string());
                 }
             } else if cmd_name != "amp" {
                 args.push("--model".to_string());
-                args.push(model.clone());
+                args.push(model.to_string());
             }
         }
 
@@ -1452,7 +1552,7 @@ impl AgentProcessClient {
             }
         }
 
-        if let Some(mode) = &self.permission_mode {
+        if let Some(mode) = permission_mode.as_ref() {
             // Claude Code CLI can block waiting for interactive permission prompts.
             // Until we fully support permission request/response in the UI for the native CLI path,
             // default to a non-interactive permission mode.
@@ -1480,7 +1580,7 @@ impl AgentProcessClient {
                 let effective_mode = if cmd_name == "claude" {
                     "bypassPermissions".to_string()
                 } else {
-                    mode.clone()
+                    mode.to_string()
                 };
                 args.push("--permission-mode".to_string());
                 args.push(effective_mode);
@@ -1491,16 +1591,16 @@ impl AgentProcessClient {
             args.push("high".to_string());
         }
 
-        if let Some(agent_mode) = &self.agent_mode {
+        if let Some(agent_mode) = agent_mode.as_ref() {
             if cmd_name == "opencode" {
                 // OpenCode uses --agent <agent-name> for agent selection
                 // Agents: build, plan, general, explore
                 args.push("--agent".to_string());
-                args.push(agent_mode.clone());
+                args.push(agent_mode.to_string());
             } else if cmd_name != "amp" {
                 // Other CLIs (Claude) use --agent-mode
                 args.push("--agent-mode".to_string());
-                args.push(agent_mode.clone());
+                args.push(agent_mode.to_string());
             }
         }
 
@@ -2028,7 +2128,12 @@ fn parse_opencode_event(value: &Value) -> Vec<StreamingUpdate> {
                 .and_then(|e| e.get("data"))
                 .and_then(|d| d.get("message"))
                 .and_then(|m| m.as_str())
-                .or_else(|| value.get("error").and_then(|e| e.get("name")).and_then(|m| m.as_str()))
+                .or_else(|| {
+                    value
+                        .get("error")
+                        .and_then(|e| e.get("name"))
+                        .and_then(|m| m.as_str())
+                })
                 .unwrap_or("opencode error")
                 .to_string();
             out.push(StreamingUpdate::Status { message: msg });
@@ -2582,8 +2687,10 @@ fn parse_prompt_messages(
         }
         "result" => {
             if let Some(result) = value.get("result") {
-                let text =
-                    result.as_str().map(|s| s.to_string()).unwrap_or_else(|| result.to_string());
+                let text = result
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| result.to_string());
                 current_assistant_text.clear();
                 current_assistant_text.push_str(&text);
             }
@@ -2694,38 +2801,71 @@ fn parse_codex_token_usage(value: &Value) -> Option<TokenUsageInfo> {
     // Parse last (current turn) usage
     let last = value.get("last")?;
     let last_usage = TokenUsage {
-        input_tokens: last.get("input_tokens").or_else(|| last.get("inputTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
-        output_tokens: last.get("output_tokens").or_else(|| last.get("outputTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
-        cached_input_tokens: last.get("cached_input_tokens").or_else(|| last.get("cachedInputTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
-        reasoning_output_tokens: last.get("reasoning_output_tokens").or_else(|| last.get("reasoningOutputTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
-        total_tokens: last.get("total_tokens").or_else(|| last.get("totalTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
+        input_tokens: last
+            .get("input_tokens")
+            .or_else(|| last.get("inputTokens"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        output_tokens: last
+            .get("output_tokens")
+            .or_else(|| last.get("outputTokens"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        cached_input_tokens: last
+            .get("cached_input_tokens")
+            .or_else(|| last.get("cachedInputTokens"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        reasoning_output_tokens: last
+            .get("reasoning_output_tokens")
+            .or_else(|| last.get("reasoningOutputTokens"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
+        total_tokens: last
+            .get("total_tokens")
+            .or_else(|| last.get("totalTokens"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0),
     };
 
     // Parse total (cumulative) usage
     let total = value.get("total");
-    let total_usage = total.map(|t| TokenUsage {
-        input_tokens: t.get("input_tokens").or_else(|| t.get("inputTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
-        output_tokens: t.get("output_tokens").or_else(|| t.get("outputTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
-        cached_input_tokens: t.get("cached_input_tokens").or_else(|| t.get("cachedInputTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
-        reasoning_output_tokens: t.get("reasoning_output_tokens").or_else(|| t.get("reasoningOutputTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
-        total_tokens: t.get("total_tokens").or_else(|| t.get("totalTokens"))
-            .and_then(|v| v.as_i64()).unwrap_or(0),
-    }).unwrap_or_else(|| last_usage.clone());
+    let total_usage = total
+        .map(|t| TokenUsage {
+            input_tokens: t
+                .get("input_tokens")
+                .or_else(|| t.get("inputTokens"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
+            output_tokens: t
+                .get("output_tokens")
+                .or_else(|| t.get("outputTokens"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
+            cached_input_tokens: t
+                .get("cached_input_tokens")
+                .or_else(|| t.get("cachedInputTokens"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
+            reasoning_output_tokens: t
+                .get("reasoning_output_tokens")
+                .or_else(|| t.get("reasoningOutputTokens"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
+            total_tokens: t
+                .get("total_tokens")
+                .or_else(|| t.get("totalTokens"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
+        })
+        .unwrap_or_else(|| last_usage.clone());
 
     Some(TokenUsageInfo {
         session_id: None,
         last_token_usage: last_usage,
         total_token_usage: total_usage,
-        model_context_window: value.get("model_context_window")
+        model_context_window: value
+            .get("model_context_window")
             .or_else(|| value.get("modelContextWindow"))
             .and_then(|v| v.as_i64()),
     })
