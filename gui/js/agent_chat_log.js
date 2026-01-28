@@ -254,6 +254,48 @@
       clearMessages();
     });
 
+    // PR Creation Button Handler
+    $("#createPrButton").on("click", async function () {
+      if (!currentTaskId || !currentTaskPath) {
+        console.warn("[ChatLog] Cannot create PR: no task or path");
+        addSystemMessage("Cannot create PR: No active task or project path.");
+        return;
+      }
+
+      const btn = $(this);
+      btn.prop("disabled", true);
+
+      try {
+        // Fetch git state
+        const prState = await ipcRenderer.invoke("getPrReadyState", currentTaskPath);
+
+        if (prState.error) {
+          addSystemMessage("Cannot create PR: " + prState.error);
+          return;
+        }
+
+        // Generate dynamic prompt
+        const prompt = generatePrPrompt(prState);
+
+        // Display as user message
+        addMessage({
+          type: "user",
+          content: prompt,
+          timestamp: new Date().toISOString(),
+        });
+
+        // Send to agent
+        ipcRenderer.send("SendChatMessage", currentTaskId, prompt);
+        updateStatus("Creating PR...", "running");
+
+      } catch (err) {
+        console.error("[ChatLog] PR creation error:", err);
+        addSystemMessage("Error: " + (err.message || err));
+      } finally {
+        btn.prop("disabled", false);
+      }
+    });
+
     $("#taskIdCopy").on("click", function (e) {
       e.preventDefault();
       e.stopPropagation();
@@ -931,7 +973,17 @@
         taskStatusState = taskInfo.status_state || "idle";
         // Store resolved path for "Open in..." functionality (worktree_path preferred, project_path fallback)
         currentTaskPath = taskInfo.worktree_path || taskInfo.project_path || null;
+        // Update branch indicator
+        updateBranchIndicator(taskInfo.branch);
         updatePendingUI();
+      }
+    });
+
+    // Handle branch name updates (deferred branch naming after worktree creation)
+    ipcRenderer.on("BranchUpdate", function (e, taskId, branchName) {
+      if (taskId === currentTaskId) {
+        console.log("[ChatLog] BranchUpdate:", branchName);
+        updateBranchIndicator(branchName);
       }
     });
 
@@ -1555,6 +1607,20 @@
       $("#agentName").text(taskInfo.title_summary);
     } else {
       $("#agentName").text(name + " Chat Log");
+    }
+  }
+
+  // Update branch indicator in the status bar
+  function updateBranchIndicator(branchName) {
+    const indicator = document.getElementById("branchIndicator");
+    const nameSpan = document.getElementById("branchName");
+    if (!indicator || !nameSpan) return;
+
+    if (branchName && branchName.trim()) {
+      nameSpan.textContent = branchName.trim();
+      indicator.style.display = "inline-flex";
+    } else {
+      indicator.style.display = "none";
     }
   }
 
@@ -2518,6 +2584,74 @@
       type: "system",
       content: text,
     });
+  }
+
+  // Generate PR creation prompt based on git state
+  function generatePrPrompt(state) {
+    const {
+      currentBranch,
+      baseBranch,
+      uncommittedChanges,
+      hasUpstream,
+      aheadCount,
+      prTemplate
+    } = state;
+
+    const targetBranch = baseBranch || "main";
+    const branchName = currentBranch || "current branch";
+
+    let context = [];
+
+    // State description
+    if (uncommittedChanges > 0) {
+      context.push("There are " + uncommittedChanges + " uncommitted change" + (uncommittedChanges > 1 ? "s" : "") + ".");
+    } else {
+      context.push("There are no uncommitted changes.");
+    }
+
+    context.push("The current branch is `" + branchName + "`.");
+    context.push("The target branch is `" + targetBranch + "`.");
+
+    if (hasUpstream) {
+      context.push("An upstream branch exists.");
+      if (aheadCount > 0) {
+        context.push("The branch is " + aheadCount + " commit" + (aheadCount > 1 ? "s" : "") + " ahead of the remote.");
+      }
+    } else {
+      context.push("No upstream branch exists yet (will be created on push).");
+    }
+
+    let prompt = "The user wants to create a pull request.\n\n";
+    prompt += "## Current State\n\n";
+    prompt += context.join("\n") + "\n\n";
+    prompt += "## Instructions\n\n";
+    prompt += "Follow these **exact steps** to create a PR:\n\n";
+
+    if (uncommittedChanges > 0) {
+      prompt += "1. There are uncommitted changes. Ask the user whether to commit them first or proceed without them.\n\n";
+      prompt += "2. Use `git diff origin/" + targetBranch + "...` to review the changes that will be in the PR.\n\n";
+      prompt += "3. Use `gh pr create --base " + targetBranch + "` to create a PR onto the target branch:\n";
+    } else {
+      prompt += "1. Use `git diff origin/" + targetBranch + "...` to review the changes that will be in the PR.\n\n";
+      prompt += "2. Use `gh pr create --base " + targetBranch + "` to create a PR onto the target branch:\n";
+    }
+
+    prompt += "   - Keep the title under 80 characters\n";
+    prompt += "   - Write a clear, concise description (under 5 sentences unless more context is needed)\n";
+    prompt += "   - If there's a PR template in the repo, use it\n\n";
+
+    if (!hasUpstream) {
+      prompt += (uncommittedChanges > 0 ? "4" : "3") + ". The branch hasn't been pushed yet. Push it first with `git push -u origin " + branchName + "`\n\n";
+    }
+
+    prompt += "If any step fails, explain the error and ask the user for guidance.";
+
+    // Include PR template if found
+    if (prTemplate) {
+      prompt += "\n\n## PR Template\n\nThis workspace has a PR template. Use it for the PR description:\n\n```markdown\n" + prTemplate + "\n```";
+    }
+
+    return prompt;
   }
 
   // Clear all messages

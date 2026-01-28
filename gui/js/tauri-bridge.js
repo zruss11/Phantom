@@ -351,7 +351,7 @@
             tauriInvoke('get_task_history', { taskId: args[0] })
               .then(function(result) {
                 console.log('[Tauri Bridge] get_task_history result:', result);
-                // Emit TaskInfo to the caller (now includes pending_prompt, status_state, title_summary, and paths)
+                // Emit TaskInfo to the caller (now includes pending_prompt, status_state, title_summary, paths, and branch)
                 if (result && eventListeners['TaskInfo']) {
                   eventListeners['TaskInfo'].forEach(function(cb) {
                     cb(null, {
@@ -361,7 +361,8 @@
                       status_state: result.status_state,
                       title_summary: result.title_summary,
                       worktree_path: result.worktree_path,
-                      project_path: result.project_path
+                      project_path: result.project_path,
+                      branch: result.branch
                     });
                   });
                 }
@@ -423,6 +424,9 @@
         }
         if (channel === 'getRepoBranches') {
           return tauriInvoke('get_repo_branches', { projectPath: args[0] || null });
+        }
+        if (channel === 'getPrReadyState') {
+          return tauriInvoke('get_pr_ready_state', { projectPath: args[0] || null });
         }
         if (channel === 'getSettings') {
           return tauriInvoke('get_settings');

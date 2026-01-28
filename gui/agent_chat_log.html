@@ -358,6 +358,38 @@
         color: #fff;
       }
 
+      /* PR Creation Button */
+      .pr-action-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: linear-gradient(135deg, rgba(88, 166, 255, 0.12), rgba(88, 166, 255, 0.06));
+        border: 1px solid rgba(88, 166, 255, 0.25);
+        color: rgba(88, 166, 255, 0.85);
+        border-radius: 6px;
+        padding: 5px 10px;
+        margin-right: 4px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .pr-action-btn:hover {
+        background: linear-gradient(135deg, rgba(88, 166, 255, 0.2), rgba(88, 166, 255, 0.12));
+        color: #58a6ff;
+        border-color: rgba(88, 166, 255, 0.4);
+      }
+
+      .pr-action-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .pr-action-btn i {
+        font-size: 13px;
+      }
+
       .chat-container {
         flex: 1;
         overflow-y: auto;
@@ -729,6 +761,32 @@
         display: flex;
         align-items: center;
         gap: 12px;
+      }
+
+      .branch-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 10px;
+        background: rgba(247, 138, 151, 0.1);
+        border: 1px solid rgba(247, 138, 151, 0.2);
+        border-radius: 12px;
+        color: #f78a97;
+        font-family: "Roboto Mono", monospace;
+        font-size: 11px;
+        font-weight: 500;
+        max-width: 180px;
+      }
+
+      .branch-indicator i {
+        font-size: 10px;
+        flex-shrink: 0;
+      }
+
+      .branch-indicator #branchName {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .session-cost {
@@ -2645,6 +2703,18 @@
         <span id="statusText">Ready</span>
       </div>
       <div class="status-bar-right">
+        <span class="branch-indicator" id="branchIndicator" title="Current branch">
+          <i class="fal fa-code-branch"></i>
+          <span id="branchName">-</span>
+        </span>
+        <button
+          id="createPrButton"
+          class="pr-action-btn"
+          title="Create Pull Request"
+        >
+          <i class="fab fa-github"></i>
+          <span>Create PR</span>
+        </button>
         <span class="session-cost" id="sessionCost"></span>
         <span class="elapsed-time" id="elapsedTime"></span>
       </div>

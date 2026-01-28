@@ -502,6 +502,20 @@ struct RepoBranches {
     error: Option<String>,
 }
 
+/// Git state for PR creation readiness
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrReadyState {
+    current_branch: Option<String>,
+    base_branch: Option<String>,
+    uncommitted_changes: i32,
+    has_upstream: bool,
+    ahead_count: i32,
+    behind_count: i32,
+    pr_template: Option<String>,
+    error: Option<String>,
+}
+
 /// Extract email from a JWT access token (base64 decode the payload)
 fn extract_email_from_jwt(token: &str) -> Option<String> {
     // JWT format: header.payload.signature
@@ -994,6 +1008,118 @@ async fn get_repo_branches(project_path: Option<String>) -> Result<RepoBranches,
         source: "git".to_string(),
         error: None,
     })
+}
+
+/// Get git state for PR creation readiness
+#[tauri::command]
+async fn get_pr_ready_state(project_path: Option<String>) -> Result<PrReadyState, String> {
+    let cwd = resolve_project_path(&project_path)?;
+    let repo_root = match resolve_repo_root(&cwd).await {
+        Some(root) => root,
+        None => {
+            return Ok(PrReadyState {
+                current_branch: None,
+                base_branch: None,
+                uncommitted_changes: 0,
+                has_upstream: false,
+                ahead_count: 0,
+                behind_count: 0,
+                pr_template: None,
+                error: Some("Not a git repository".to_string()),
+            });
+        }
+    };
+
+    // Get current branch
+    let current_branch = worktree::current_branch(&repo_root)
+        .await
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+
+    // Get default branch via GitHub API if possible
+    let base_branch = if let Ok(origin_url) =
+        worktree::run_git_command(&repo_root, &["remote", "get-url", "origin"]).await
+    {
+        if let Some((owner, repo)) = parse_github_repo(&origin_url) {
+            get_repo_branches_via_gh(&repo_root, &owner, &repo)
+                .await
+                .ok()
+                .and_then(|r| r.default_branch)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Count uncommitted changes (staged + unstaged + untracked)
+    let uncommitted_changes =
+        match worktree::run_git_command(&repo_root, &["status", "--porcelain"]).await {
+            Ok(output) => output.lines().filter(|l| !l.is_empty()).count() as i32,
+            Err(_) => 0,
+        };
+
+    // Check for upstream tracking branch
+    let has_upstream = worktree::run_git_command(&repo_root, &["rev-parse", "--abbrev-ref", "@{u}"])
+        .await
+        .is_ok();
+
+    // Get ahead/behind counts if upstream exists
+    let (ahead_count, behind_count) = if has_upstream {
+        match worktree::run_git_command(
+            &repo_root,
+            &["rev-list", "--left-right", "--count", "@{u}...HEAD"],
+        )
+        .await
+        {
+            Ok(output) => {
+                let parts: Vec<&str> = output.trim().split_whitespace().collect();
+                if parts.len() == 2 {
+                    let behind = parts[0].parse::<i32>().unwrap_or(0);
+                    let ahead = parts[1].parse::<i32>().unwrap_or(0);
+                    (ahead, behind)
+                } else {
+                    (0, 0)
+                }
+            }
+            Err(_) => (0, 0),
+        }
+    } else {
+        (0, 0)
+    };
+
+    // Look for PR template
+    let pr_template = find_pr_template(&repo_root).await;
+
+    Ok(PrReadyState {
+        current_branch,
+        base_branch,
+        uncommitted_changes,
+        has_upstream,
+        ahead_count,
+        behind_count,
+        pr_template,
+        error: None,
+    })
+}
+
+/// Find PR template in common locations
+async fn find_pr_template(repo_root: &std::path::Path) -> Option<String> {
+    let template_paths = [
+        ".github/PULL_REQUEST_TEMPLATE.md",
+        ".github/pull_request_template.md",
+        "PULL_REQUEST_TEMPLATE.md",
+        "pull_request_template.md",
+        "docs/PULL_REQUEST_TEMPLATE.md",
+    ];
+
+    for template_path in &template_paths {
+        let full_path = repo_root.join(template_path);
+        if let Ok(content) = tokio::fs::read_to_string(&full_path).await {
+            return Some(content);
+        }
+    }
+    None
 }
 
 /// Format tool call into a human-readable status message for the task list
@@ -5265,6 +5391,7 @@ async fn get_task_history(
         created_at,
         worktree_path,
         project_path,
+        branch,
     ) = match &task {
         Some(t) => (
             t.agent_id.clone(),
@@ -5274,11 +5401,13 @@ async fn get_task_history(
             Some(t.created_at),
             t.worktree_path.clone(),
             t.project_path.clone(),
+            t.branch.clone(),
         ),
         None => (
             "Agent".to_string(),
             None,
             "idle".to_string(),
+            None,
             None,
             None,
             None,
@@ -5334,7 +5463,8 @@ async fn get_task_history(
         "status_state": status_state,
         "title_summary": title_summary,
         "worktree_path": worktree_path,
-        "project_path": project_path
+        "project_path": project_path,
+        "branch": branch
     }))
 }
 
@@ -7052,6 +7182,7 @@ fn main() {
             refresh_agent_modes,
             pick_project_path,
             get_repo_branches,
+            get_pr_ready_state,
             create_agent_session,
             start_task,
             stop_task,
