@@ -71,6 +71,10 @@
         margin: 0;
         font-size: 14px;
         font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 300px;
       }
 
       .chat-header-text span {
@@ -235,7 +239,7 @@
         box-shadow: 0 20px 40px rgba(0, 0, 0, 0.45);
         backdrop-filter: blur(16px);
         display: none;
-        z-index: 30;
+        z-index: 150;
         -webkit-app-region: no-drag;
       }
 
@@ -290,6 +294,32 @@
         justify-content: center;
         font-size: 12px;
         color: #f78a97;
+      }
+
+      /* Code review agent icons - ensure visibility */
+      .log-switcher-item-icon {
+        width: 18px;
+        height: 18px;
+        border-radius: 5px;
+        background: rgba(0, 0, 0, 0.3);
+        padding: 2px;
+        box-sizing: border-box;
+        box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.15);
+        flex-shrink: 0;
+        object-fit: contain;
+        display: block;
+      }
+
+      /* Ensure images are visible in dark theme */
+      .log-switcher-item-icon[src$=".png"],
+      .log-switcher-item-icon[src$=".svg"] {
+        background: rgba(255, 255, 255, 0.1);
+      }
+
+      /* Make Codex and Factory icons white */
+      .log-switcher-item-icon[src*="codex"],
+      .log-switcher-item-icon[src*="factorydroid"] {
+        filter: brightness(0) invert(1);
       }
 
       .code-review-trigger.loading .log-switcher-label {
@@ -2574,7 +2604,7 @@
           data-tauri-drag-region="false"
         >
           <span class="log-switcher-icon code-review-icon">
-            <i class="fal fa-magnifying-glass-chart"></i>
+            <i class="fal fa-pencil"></i>
           </span>
           <span class="log-switcher-label" id="codeReviewLabel">Review</span>
           <span class="log-switcher-caret"><i class="fal fa-chevron-down"></i></span>

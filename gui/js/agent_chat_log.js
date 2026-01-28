@@ -80,7 +80,6 @@
     amp: "Amp",
     droid: "Droid",
     opencode: "OpenCode",
-    "factory-droid": "Factory",
   };
 
   const AGENT_REVIEW_ICONS = {
@@ -1334,7 +1333,8 @@
 
       if (type === "assistant") {
         div.className += " assistant";
-        div.innerHTML = '<span class="streaming-cursor">|</span>';
+        // Start empty - cursor will be added when content arrives
+        div.innerHTML = '';
       } else if (type === "reasoning") {
         div.className += " reasoning";
         div.innerHTML = `
@@ -1372,11 +1372,13 @@
         textEl.textContent = strippedContent;
       }
     } else {
-      // Use markdown for assistant messages
-      const renderedContent = renderMarkdown(streamingContent);
-      streamingElement.innerHTML =
-        '<div class="markdown-content">' + renderedContent + '</div>' +
-        '<span class="streaming-cursor">|</span>';
+      // Use markdown for assistant messages - only show cursor when there's content
+      if (streamingContent && streamingContent.trim()) {
+        const renderedContent = renderMarkdown(streamingContent);
+        streamingElement.innerHTML =
+          '<div class="markdown-content">' + renderedContent + '</div>' +
+          '<span class="streaming-cursor">|</span>';
+      }
     }
   }
 
@@ -1502,10 +1504,17 @@
     lines.push('7. **Don\'t be overly pedantic** - Nitpicks are fine, but only if they are relevant issues within reason.');
     lines.push('');
     lines.push('In your output:');
-    lines.push('- Provide a summary overview of the general code quality.');
-    lines.push('- Present the identified issues in a table with the columns: index (1, 2, etc.), file & line number(s), code snippet, issue, and potential solution(s).');
-    lines.push('- If no issues are found, briefly state that the code meets best practices.');
-    lines.push('- End with an overall verdict: **APPROVE**, **REQUEST CHANGES**, or **NEEDS DISCUSSION**.');
+    lines.push('- Provide a short summary overview of the general code quality.');
+    lines.push('- Present findings as a numbered list (no tables, no HTML).');
+    lines.push('- For each finding, use this exact structure with labels on separate lines:');
+    lines.push('  - Location: file path + line number(s) if available');
+    lines.push('  - Snippet: fenced code block (keep it short)');
+    lines.push('  - Issue: what is wrong and why it matters');
+    lines.push('  - Recommendation: concrete fix or next step');
+    lines.push('  - Severity: low | medium | high');
+    lines.push('- If no issues are found, write: "Findings: None" and briefly state why.');
+    lines.push('- End with an overall verdict line: "Verdict: APPROVE" or "Verdict: REQUEST CHANGES" or "Verdict: NEEDS DISCUSSION".');
+    lines.push('- Avoid markdown tables entirely. Use headings and lists only.');
     lines.push('');
 
     if (context.commit_log && context.commit_log.trim()) {
