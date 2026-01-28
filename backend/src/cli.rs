@@ -1857,23 +1857,57 @@ impl AgentProcessClient {
                         on_update(update);
                     }
 
-                    // Track Claude Code sub-agent Task tool_use events for
-                    // the progress pill. A "Task" tool_use starts a sub-agent;
-                    // its corresponding tool_result (matched by tool_use_id)
-                    // means the sub-agent finished.
+                    // Track Claude Code progress for the pill via two mechanisms:
+                    // 1. TodoWrite tool: explicit todo list with content/status/activeForm
+                    // 2. Task tool: sub-agent spawns (track start/completion)
+                    //
+                    // TodoWrite is preferred when present (explicit user-facing progress).
+                    // Task tracking is for sub-agent work when no TodoWrite is used.
                     let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                    
                     if event_type == "assistant" {
                         if let Some(items) = value
                             .get("message")
                             .and_then(|m| m.get("content"))
                             .and_then(|c| c.as_array())
                         {
-                            let mut changed = false;
                             for item in items {
                                 let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
                                 if item_type == "tool_use" {
                                     let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                    if name == "Task" || name == "TodoWrite" {
+                                    
+                                    // Handle TodoWrite - extract todos directly as PlanSteps
+                                    if name == "TodoWrite" {
+                                        if let Some(todos) = item
+                                            .get("input")
+                                            .and_then(|i| i.get("todos"))
+                                            .and_then(|t| t.as_array())
+                                        {
+                                            let steps: Vec<PlanStep> = todos
+                                                .iter()
+                                                .filter_map(|t| {
+                                                    let content = t.get("content").and_then(|c| c.as_str())?;
+                                                    let status = t.get("status")
+                                                        .and_then(|s| s.as_str())
+                                                        .unwrap_or("pending")
+                                                        .to_string();
+                                                    Some(PlanStep {
+                                                        step: content.to_string(),
+                                                        status,
+                                                    })
+                                                })
+                                                .collect();
+                                            if !steps.is_empty() {
+                                                on_update(StreamingUpdate::PlanUpdate {
+                                                    turn_id: None,
+                                                    explanation: None,
+                                                    steps,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    // Handle Task - track sub-agent spawn
+                                    else if name == "Task" {
                                         let tool_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
                                         let desc = item
                                             .get("input")
@@ -1883,60 +1917,57 @@ impl AgentProcessClient {
                                             .to_string();
                                         if !tool_id.is_empty() {
                                             claude_tasks.push((tool_id, desc, "in_progress".to_string()));
-                                            changed = true;
+                                            let steps: Vec<PlanStep> = claude_tasks.iter().map(|(_, d, s)| {
+                                                PlanStep { step: d.clone(), status: s.clone() }
+                                            }).collect();
+                                            on_update(StreamingUpdate::PlanUpdate {
+                                                turn_id: None,
+                                                explanation: None,
+                                                steps,
+                                            });
                                         }
                                     }
                                 }
-                            }
-                            if changed {
-                                let steps: Vec<PlanStep> = claude_tasks.iter().map(|(_, desc, status)| {
-                                    PlanStep { step: desc.clone(), status: status.clone() }
-                                }).collect();
-                                on_update(StreamingUpdate::PlanUpdate {
-                                    turn_id: None,
-                                    explanation: None,
-                                    steps,
-                                });
                             }
                         }
-                    } else if event_type == "user" && !claude_tasks.is_empty() {
-                        if let Some(items) = value
-                            .get("message")
-                            .and_then(|m| m.get("content"))
-                            .and_then(|c| c.as_array())
-                        {
-                            let mut changed = false;
-                            for item in items {
-                                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                                if item_type == "tool_result" {
-                                    let tool_use_id = item.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
-                                    for task in claude_tasks.iter_mut() {
-                                        if task.0 == tool_use_id && task.2 != "completed" {
-                                            task.2 = "completed".to_string();
-                                            changed = true;
+                    }
+                    // Task completion: user event with parent_tool_use_id=null,
+                    // tool_use_result.status="completed", and content[].tool_use_id matching a task
+                    else if event_type == "user" && !claude_tasks.is_empty() {
+                        let parent_id = value.get("parent_tool_use_id").and_then(|v| v.as_str());
+                        let result_status = value
+                            .get("tool_use_result")
+                            .and_then(|r| r.get("status"))
+                            .and_then(|s| s.as_str());
+                        
+                        // Only mark complete when parent_tool_use_id is null AND status is "completed"
+                        if parent_id.is_none() && result_status == Some("completed") {
+                            if let Some(items) = value
+                                .get("message")
+                                .and_then(|m| m.get("content"))
+                                .and_then(|c| c.as_array())
+                            {
+                                let mut changed = false;
+                                for item in items {
+                                    if let Some(tool_use_id) = item.get("tool_use_id").and_then(|v| v.as_str()) {
+                                        for task in claude_tasks.iter_mut() {
+                                            if task.0 == tool_use_id && task.2 != "completed" {
+                                                task.2 = "completed".to_string();
+                                                changed = true;
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            // Also check top-level tool_use_result for result events
-                            // that reference a parent_tool_use_id
-                            if let Some(parent_id) = value.get("parent_tool_use_id").and_then(|v| v.as_str()) {
-                                for task in claude_tasks.iter_mut() {
-                                    if task.0 == parent_id && task.2 != "completed" {
-                                        task.2 = "completed".to_string();
-                                        changed = true;
-                                    }
+                                if changed {
+                                    let steps: Vec<PlanStep> = claude_tasks.iter().map(|(_, d, s)| {
+                                        PlanStep { step: d.clone(), status: s.clone() }
+                                    }).collect();
+                                    on_update(StreamingUpdate::PlanUpdate {
+                                        turn_id: None,
+                                        explanation: None,
+                                        steps,
+                                    });
                                 }
-                            }
-                            if changed {
-                                let steps: Vec<PlanStep> = claude_tasks.iter().map(|(_, desc, status)| {
-                                    PlanStep { step: desc.clone(), status: status.clone() }
-                                }).collect();
-                                on_update(StreamingUpdate::PlanUpdate {
-                                    turn_id: None,
-                                    explanation: None,
-                                    steps,
-                                });
                             }
                         }
                     }
