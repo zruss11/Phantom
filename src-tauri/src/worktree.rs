@@ -140,60 +140,6 @@ async fn run_git_diff_bytes(repo_path: &PathBuf, args: &[&str]) -> Result<Vec<u8
     }
 }
 
-pub async fn diff_stats(repo_path: &PathBuf) -> Result<(u64, u64, u64), String> {
-    // Use numstat for staged + unstaged changes. This is reliable and handles renames,
-    // and it avoids trying to “calculate diffs” manually.
-    // Note: git diff may return exit code 1 when there are differences.
-    async fn numstat(repo_path: &PathBuf, cached: bool) -> Result<String, String> {
-        let mut args = vec!["diff", "--numstat", "--no-color"];
-        if cached {
-            args.push("--cached");
-        }
-        let out = run_git_diff_bytes(repo_path, &args).await?;
-        Ok(String::from_utf8_lossy(&out).to_string())
-    }
-
-    fn parse_numstat(text: &str) -> (u64, u64, u64) {
-        let mut additions: u64 = 0;
-        let mut deletions: u64 = 0;
-        let mut files: u64 = 0;
-
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() < 3 {
-                continue;
-            }
-            files += 1;
-            let add = parts[0];
-            let del = parts[1];
-            // Binary changes show '-' in numstat.
-            if add != "-" {
-                if let Ok(n) = add.parse::<u64>() {
-                    additions += n;
-                }
-            }
-            if del != "-" {
-                if let Ok(n) = del.parse::<u64>() {
-                    deletions += n;
-                }
-            }
-        }
-
-        (additions, deletions, files)
-    }
-
-    let unstaged = numstat(repo_path, false).await.unwrap_or_default();
-    let staged = numstat(repo_path, true).await.unwrap_or_default();
-    let (a1, d1, f1) = parse_numstat(&unstaged);
-    let (a2, d2, f2) = parse_numstat(&staged);
-
-    Ok((a1 + a2, d1 + d2, f1 + f2))
-}
-
 async fn run_git_command_raw(
     repo_path: &PathBuf,
     args: &[&str],

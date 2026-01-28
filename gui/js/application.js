@@ -1060,106 +1060,6 @@ function formatCost(cost) {
   return "$" + cost.toFixed(4);
 }
 
-function formatDiffStats(stats) {
-  if (!stats) return "-";
-  const add = Number(stats.additions || 0);
-  const del = Number(stats.deletions || 0);
-  if (!Number.isFinite(add) || !Number.isFinite(del)) return "-";
-  if (add === 0 && del === 0) return "-";
-  return `<span class="diff-add">+${add}</span> <span class="diff-del">-${del}</span>`;
-}
-
-async function updateTaskDiffCell(id) {
-  const el = document.getElementById(`task-${id}-Diffs`);
-  if (!el) return;
-
-  try {
-    const stats = await ipcRenderer.invoke('getWorktreeDiffStats', id);
-    el.innerHTML = formatDiffStats(stats);
-    if (taskDataMap[id] && stats) {
-      taskDataMap[id].diffAdditions = Number(stats.additions || 0);
-      taskDataMap[id].diffDeletions = Number(stats.deletions || 0);
-    }
-  } catch (e) {
-    // If a task has no worktree or git isn't available, just show '-'
-    el.innerHTML = "-";
-  }
-}
-
-// DIFFS column refresh: only when View Tasks page is visible + staggered queue
-let diffsRefreshTimer = null;
-let diffsRefreshInFlight = 0;
-const DIFFS_REFRESH_INTERVAL_MS = 4000;
-const DIFFS_REFRESH_MAX_CONCURRENCY = 2;
-
-function isViewTasksPageVisible() {
-  const page = document.getElementById("viewTasksPage");
-  return !!page && page.hidden === false;
-}
-
-async function runDiffsRefreshTick() {
-  if (!isViewTasksPageVisible()) return;
-  if (diffsRefreshInFlight >= DIFFS_REFRESH_MAX_CONCURRENCY) return;
-
-  // Round-robin through tasksOnPage
-  if (!runDiffsRefreshTick._cursor) runDiffsRefreshTick._cursor = 0;
-  const ids = tasksOnPage.slice();
-  if (!ids.length) return;
-
-  const start = runDiffsRefreshTick._cursor % ids.length;
-  const picked = [];
-
-  for (let i = 0; i < ids.length && picked.length < (DIFFS_REFRESH_MAX_CONCURRENCY - diffsRefreshInFlight); i++) {
-    const idx = (start + i) % ids.length;
-    const id = ids[idx];
-    if (id) picked.push(id);
-  }
-
-  runDiffsRefreshTick._cursor = (start + picked.length) % ids.length;
-
-  // Stagger: launch up to available slots
-  await Promise.all(
-    picked.map(async (id) => {
-      diffsRefreshInFlight += 1;
-      try {
-        await updateTaskDiffCell(id);
-      } finally {
-        diffsRefreshInFlight = Math.max(0, diffsRefreshInFlight - 1);
-      }
-    }),
-  );
-}
-
-function startDiffsRefresh() {
-  if (diffsRefreshTimer) return;
-  diffsRefreshTimer = setInterval(runDiffsRefreshTick, DIFFS_REFRESH_INTERVAL_MS);
-  // kick one immediately
-  runDiffsRefreshTick();
-}
-
-function stopDiffsRefresh() {
-  if (!diffsRefreshTimer) return;
-  clearInterval(diffsRefreshTimer);
-  diffsRefreshTimer = null;
-}
-
-// Ensure polling state matches initial visibility
-if (isViewTasksPageVisible()) {
-  startDiffsRefresh();
-} else {
-  stopDiffsRefresh();
-}
-
-// React to navigation (event-driven, no polling)
-window.addEventListener("phantom:navigate", (e) => {
-  const pageId = e && e.detail ? e.detail.pageId : null;
-  if (pageId === "viewTasksPage") {
-    startDiffsRefresh();
-  } else {
-    stopDiffsRefresh();
-  }
-});
-
 ipcRenderer.on("AddTask", (e, ID, Task) => {
   const displayId = displayIdCounter++;
   const agent = Task.agent || "codex";
@@ -1193,8 +1093,6 @@ ipcRenderer.on("AddTask", (e, ID, Task) => {
     branch: branch,
     totalTokens: totalTokens,
     contextWindow: contextWindow,
-    diffAdditions: 0,
-    diffDeletions: 0,
   };
 
   // Calculate context ring state from persisted data
@@ -1230,7 +1128,6 @@ ipcRenderer.on("AddTask", (e, ID, Task) => {
           <div class="context-ring ${contextRingClass}" style="--context-free: ${contextFreePercent}" data-tooltip="${contextTooltip}"></div>
         </td>
         <td class="cost-cell" id="task-${ID}-Cost">${formatCost(cost)}</td>
-        <td class="diffs-cell" id="task-${ID}-Diffs">-</td>
         <td class="actions-cell">
             <a class="play green-text" data-action="start" data-task-id="${ID}"><i class="far fa-play"></i></a>
             <a class="stop yellow-text" data-action="stop" data-task-id="${ID}"><i class="far fa-stop"></i></a>
@@ -1256,9 +1153,6 @@ ipcRenderer.on("AddTask", (e, ID, Task) => {
       delete pendingStatusUpdates[ID];
     }, 0);
   }
-
-  // Initialize diff cell (git numstat)
-  updateTaskDiffCell(ID);
 });
 
 ipcRenderer.on("UpdateEmail", (e, ID, email) => {
@@ -1537,21 +1431,12 @@ function sortTasks(column) {
         valA = taskA.cost || 0;
         valB = taskB.cost || 0;
         break;
-      case "diffs": {
-        const aAdd = taskA.diffAdditions || 0;
-        const aDel = taskA.diffDeletions || 0;
-        const bAdd = taskB.diffAdditions || 0;
-        const bDel = taskB.diffDeletions || 0;
-        valA = aAdd + aDel;
-        valB = bAdd + bDel;
-        break;
-      }
       default:
         return 0;
     }
 
-    // Numeric comparison for id, cost, diffs
-    if (column === "id" || column === "cost" || column === "diffs") {
+    // Numeric comparison for id and cost
+    if (column === "id" || column === "cost") {
       return currentSortState.direction === "asc" ? valA - valB : valB - valA;
     }
 
