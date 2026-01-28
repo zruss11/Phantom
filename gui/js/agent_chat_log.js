@@ -213,6 +213,7 @@
 
     setupEventListeners();
     setupIPCListeners();
+    initTodoSidebar();
 
     // Initialize slash command autocomplete for the chat input
     var chatInput = document.getElementById("chatInput");
@@ -1014,12 +1015,14 @@
     return { explanation, steps };
   }
 
-  function renderPlanPanel(payload) {
+  // Render todo steps HTML for sidebar
+  function renderTodoStepsHtml(payload) {
     const normalized = normalizePlanPayload(payload);
     const steps = normalized.steps;
-    const total = steps.length;
-    const completed = steps.filter((s) => s.status === "completed").length;
-    const progressText = total > 0 ? `${completed}/${total} complete` : "No steps yet";
+
+    if (steps.length === 0) {
+      return '<div class="todo-empty">No plan yet</div>';
+    }
 
     const stepsHtml = steps
       .map((s) => {
@@ -1036,49 +1039,126 @@
               ? "fa-spinner fa-spin"
               : "fa-circle";
         return `
-          <li class="plan-step ${statusClass}">
+          <li class="todo-step ${statusClass}">
             <i class="fal ${icon}"></i>
-            <span>${escapeHtml(s.step)}</span>
+            <span class="todo-step-text">${escapeHtml(s.step)}</span>
           </li>
         `;
       })
       .join("");
 
-    return `
-      <div class="plan-card">
-        <div class="plan-header">
-          <i class="fal fa-clipboard-list"></i>
-          <span>Plan</span>
-          <span class="plan-progress">${escapeHtml(progressText)}</span>
-        </div>
-        ${
-          normalized.explanation
-            ? `<div class="plan-explanation">${escapeHtml(normalized.explanation)}</div>`
-            : ""
-        }
-        <ul class="plan-steps">${stepsHtml || "<li class=\"plan-step pending\"><i class=\"fal fa-circle\"></i><span>Waiting for plan details</span></li>"}</ul>
-      </div>
-    `;
+    let html = "";
+    if (normalized.explanation) {
+      html += `<div class="todo-explanation">${escapeHtml(normalized.explanation)}</div>`;
+    }
+    html += `<ul class="todo-steps">${stepsHtml}</ul>`;
+
+    return html;
   }
 
-  function upsertPlanPanel(payload) {
-    const container = $("#chatContainer");
-    const existing = container.find(".plan-panel").first();
-    const html = renderPlanPanel(payload);
+  // Update the floating progress pill with plan data
+  function updateProgressPill(payload) {
+    const pill = document.getElementById("progressPill");
+    const badge = document.getElementById("progressPillBadge");
+    const stepText = document.getElementById("progressPillStep");
+    const content = document.getElementById("progressPillContent");
 
-    if (existing.length) {
-      existing.html(html);
+    if (!pill) return;
+
+    const normalized = normalizePlanPayload(payload);
+    const steps = normalized.steps;
+    const total = steps.length;
+    const completed = steps.filter((s) => s.status === "completed").length;
+
+    // Hide pill if no steps
+    if (total === 0) {
+      pill.classList.remove("visible");
       return;
     }
 
-    // Remove empty state if present
-    container.find(".chat-empty").remove();
+    // Show pill
+    pill.classList.add("visible");
 
-    const wrapper = document.createElement("div");
-    wrapper.className = "chat-message plan-panel";
-    wrapper.innerHTML = html;
-    // Insert at top of chat for visibility
-    container.prepend(wrapper);
+    // Update badge
+    if (badge) {
+      badge.textContent = `${completed}/${total}`;
+      badge.classList.toggle("complete", completed === total);
+    }
+
+    // Find current step (first in-progress, or last completed, or first pending)
+    const inProgress = steps.find((s) => s.status === "inProgress");
+    const currentStep = inProgress || steps.find((s) => s.status === "pending") || steps[steps.length - 1];
+
+    // Update step text
+    if (stepText && currentStep) {
+      stepText.textContent = currentStep.step;
+      stepText.classList.toggle("in-progress", currentStep.status === "inProgress");
+    }
+
+    // Update dropdown content
+    if (content) {
+      content.innerHTML = renderTodoStepsHtml(payload);
+    }
+  }
+
+  // Initialize progress pill toggle
+  function initProgressPill() {
+    const pill = document.getElementById("progressPill");
+    const summary = document.getElementById("progressPillSummary");
+
+    if (!pill || !summary) return;
+
+    summary.addEventListener("click", function () {
+      pill.classList.toggle("expanded");
+    });
+
+    // Close dropdown when clicking outside
+    document.addEventListener("click", function (e) {
+      if (!pill.contains(e.target)) {
+        pill.classList.remove("expanded");
+      }
+    });
+  }
+
+  // Reset progress pill for new task
+  function resetProgressPill() {
+    const pill = document.getElementById("progressPill");
+    const badge = document.getElementById("progressPillBadge");
+    const stepText = document.getElementById("progressPillStep");
+    const content = document.getElementById("progressPillContent");
+
+    if (pill) {
+      pill.classList.remove("visible", "expanded");
+    }
+    if (badge) {
+      badge.textContent = "0/0";
+      badge.classList.remove("complete");
+    }
+    if (stepText) {
+      stepText.textContent = "No plan yet";
+      stepText.classList.remove("in-progress");
+    }
+    if (content) {
+      content.innerHTML = '<div class="todo-empty">No plan yet</div>';
+    }
+  }
+
+  // Backward compatible aliases
+  function updateTodoSidebar(payload) {
+    updateProgressPill(payload);
+  }
+
+  function initTodoSidebar() {
+    initProgressPill();
+  }
+
+  function resetTodoSidebar() {
+    resetProgressPill();
+  }
+
+  // Legacy function for backward compatibility
+  function upsertPlanPanel(payload) {
+    updateProgressPill(payload);
   }
 
   // Append content to the current streaming message, creating one if needed
@@ -3120,15 +3200,73 @@
     { type: 'assistant', content: 'I see `findByEmail` is used in **2 places**. Let me also check if `bcrypt` is already installed as a dependency.' },
   ];
 
+  // Mock todo list states that progress during the conversation
+  const MOCK_TODO_STATES = [
+    {
+      explanation: 'Fixing authentication bug in login flow',
+      plan: [
+        { step: 'Read auth controller code', status: 'in-progress' },
+        { step: 'Identify security vulnerabilities', status: 'pending' },
+        { step: 'Fix password verification', status: 'pending' },
+        { step: 'Check bcrypt dependency', status: 'pending' },
+        { step: 'Run tests', status: 'pending' },
+      ]
+    },
+    {
+      explanation: 'Fixing authentication bug in login flow',
+      plan: [
+        { step: 'Read auth controller code', status: 'completed' },
+        { step: 'Identify security vulnerabilities', status: 'in-progress' },
+        { step: 'Fix password verification', status: 'pending' },
+        { step: 'Check bcrypt dependency', status: 'pending' },
+        { step: 'Run tests', status: 'pending' },
+      ]
+    },
+    {
+      explanation: 'Fixing authentication bug in login flow',
+      plan: [
+        { step: 'Read auth controller code', status: 'completed' },
+        { step: 'Identify security vulnerabilities', status: 'completed' },
+        { step: 'Fix password verification', status: 'in-progress' },
+        { step: 'Check bcrypt dependency', status: 'pending' },
+        { step: 'Run tests', status: 'pending' },
+      ]
+    },
+    {
+      explanation: 'Fixing authentication bug in login flow',
+      plan: [
+        { step: 'Read auth controller code', status: 'completed' },
+        { step: 'Identify security vulnerabilities', status: 'completed' },
+        { step: 'Fix password verification', status: 'completed' },
+        { step: 'Check bcrypt dependency', status: 'in-progress' },
+        { step: 'Run tests', status: 'pending' },
+      ]
+    },
+  ];
+
   function loadMockConversation() {
     clearMessages();
+    resetTodoSidebar();
     console.log('[ChatLog] Loading mock conversation...');
 
     // Simulate streaming with delays
     let index = 0;
+    let todoIndex = 0;
     function addNext() {
       if (index < MOCK_CONVERSATION.length) {
         addMessage(MOCK_CONVERSATION[index]);
+
+        // Update todo sidebar at certain points in the conversation
+        if (index === 0 && todoIndex < MOCK_TODO_STATES.length) {
+          updateTodoSidebar(MOCK_TODO_STATES[todoIndex++]);
+        } else if (index === 3 && todoIndex < MOCK_TODO_STATES.length) {
+          updateTodoSidebar(MOCK_TODO_STATES[todoIndex++]);
+        } else if (index === 4 && todoIndex < MOCK_TODO_STATES.length) {
+          updateTodoSidebar(MOCK_TODO_STATES[todoIndex++]);
+        } else if (index === 6 && todoIndex < MOCK_TODO_STATES.length) {
+          updateTodoSidebar(MOCK_TODO_STATES[todoIndex++]);
+        }
+
         index++;
         setTimeout(addNext, 300);
       }

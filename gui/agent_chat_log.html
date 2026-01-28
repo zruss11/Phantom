@@ -815,7 +815,8 @@
         background: rgba(247, 138, 151, 0.1);
         border: 1px solid rgba(247, 138, 151, 0.2);
         color: rgba(255, 255, 255, 0.85);
-        max-width: 95%;
+        min-width: 200px;
+        max-width: 70%;
       }
 
       .reasoning-header {
@@ -2012,6 +2013,369 @@
         overflow: hidden;
         border: 1px solid rgba(255, 255, 255, 0.1);
       }
+
+      /* ============================================
+       Chat Layout with Todo Sidebar
+       ============================================ */
+      .chat-layout {
+        flex: 1;
+        display: flex;
+        overflow: hidden;
+        min-height: 0;
+      }
+
+      .chat-layout .chat-container {
+        flex: 1;
+        min-width: 0;
+      }
+
+      /* Todo Sidebar */
+      .todo-sidebar {
+        width: 220px;
+        background: linear-gradient(180deg, rgba(44, 30, 38, 0.98), rgba(28, 18, 24, 0.98));
+        border-left: 1px solid rgba(255, 255, 255, 0.08);
+        display: flex;
+        flex-direction: column;
+        transition: width 0.25s ease, opacity 0.25s ease;
+        overflow: hidden;
+      }
+
+      .todo-sidebar.collapsed {
+        width: 44px;
+      }
+
+      .todo-sidebar-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px;
+        background: rgba(247, 138, 151, 0.08);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        flex-shrink: 0;
+      }
+
+      .todo-sidebar-header > i {
+        color: #f78a97;
+        font-size: 14px;
+        flex-shrink: 0;
+      }
+
+      .todo-sidebar-title {
+        font-weight: 700;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #f8d9df;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .todo-sidebar.collapsed .todo-sidebar-title {
+        display: none;
+      }
+
+      .todo-sidebar-badge {
+        margin-left: auto;
+        font-size: 10px;
+        font-weight: 600;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: rgba(247, 138, 151, 0.2);
+        color: #f78a97;
+        white-space: nowrap;
+      }
+
+      .todo-sidebar-badge:empty {
+        display: none;
+      }
+
+      .todo-sidebar.collapsed .todo-sidebar-badge {
+        display: none;
+      }
+
+      .todo-sidebar-toggle {
+        background: transparent;
+        border: none;
+        color: rgba(255, 255, 255, 0.5);
+        cursor: pointer;
+        padding: 4px;
+        font-size: 12px;
+        transition: color 0.15s ease, transform 0.25s ease;
+        flex-shrink: 0;
+        margin-left: auto;
+      }
+
+      .todo-sidebar-toggle:hover {
+        color: #fff;
+      }
+
+      .todo-sidebar.collapsed .todo-sidebar-toggle {
+        transform: rotate(180deg);
+      }
+
+      .todo-sidebar-content {
+        flex: 1;
+        overflow-y: auto;
+        padding: 12px;
+      }
+
+      .todo-sidebar.collapsed .todo-sidebar-content {
+        display: none;
+      }
+
+      .todo-sidebar-content::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      .todo-sidebar-content::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .todo-sidebar-content::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 3px;
+      }
+
+      .todo-empty {
+        color: rgba(255, 255, 255, 0.4);
+        font-size: 12px;
+        text-align: center;
+        padding: 20px 10px;
+      }
+
+      /* Todo Steps List */
+      .todo-steps {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .todo-step {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.8);
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+
+      .todo-step:hover {
+        background: rgba(255, 255, 255, 0.05);
+      }
+
+      .todo-step i {
+        width: 14px;
+        flex-shrink: 0;
+        margin-top: 2px;
+        color: rgba(255, 255, 255, 0.4);
+      }
+
+      .todo-step-text {
+        flex: 1;
+        line-height: 1.4;
+        word-break: break-word;
+      }
+
+      .todo-step.completed {
+        background: rgba(65, 181, 136, 0.08);
+        border-color: rgba(65, 181, 136, 0.2);
+        color: #b9f1d0;
+      }
+
+      .todo-step.completed i {
+        color: #41b588;
+      }
+
+      .todo-step.in-progress {
+        background: rgba(247, 138, 151, 0.1);
+        border-color: rgba(247, 138, 151, 0.25);
+        color: #f8d9df;
+      }
+
+      .todo-step.in-progress i {
+        color: #f78a97;
+      }
+
+      /* Explanation text */
+      .todo-explanation {
+        font-size: 11px;
+        color: rgba(255, 255, 255, 0.6);
+        line-height: 1.4;
+        margin-bottom: 10px;
+        padding: 8px 10px;
+        background: rgba(255, 255, 255, 0.03);
+        border-radius: 6px;
+        border-left: 2px solid rgba(247, 138, 151, 0.4);
+      }
+
+      /* ============================================
+       Floating Progress Pill
+       ============================================ */
+      .progress-pill {
+        position: fixed;
+        bottom: 90px;
+        right: 20px;
+        z-index: 100;
+        display: none;
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .progress-pill.visible {
+        display: flex;
+      }
+
+      .progress-pill-summary {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 14px;
+        background: linear-gradient(135deg, rgba(44, 30, 38, 0.98), rgba(28, 18, 24, 0.98));
+        border: 1px solid rgba(247, 138, 151, 0.35);
+        border-radius: 24px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        box-shadow: 
+          0 8px 32px rgba(0, 0, 0, 0.4),
+          0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+        backdrop-filter: blur(12px);
+      }
+
+      .progress-pill-summary:hover {
+        border-color: rgba(247, 138, 151, 0.5);
+        transform: translateY(-2px);
+        box-shadow: 
+          0 12px 40px rgba(0, 0, 0, 0.5),
+          0 0 20px rgba(247, 138, 151, 0.15),
+          0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+      }
+
+      .progress-pill.expanded .progress-pill-summary {
+        border-radius: 16px 16px 0 0;
+        border-bottom-color: transparent;
+      }
+
+      .progress-pill-badge {
+        font-size: 11px;
+        font-weight: 700;
+        padding: 4px 8px;
+        border-radius: 12px;
+        background: linear-gradient(135deg, rgba(247, 138, 151, 0.25), rgba(247, 138, 151, 0.15));
+        color: #f78a97;
+        font-family: "Roboto Mono", monospace;
+        border: 1px solid rgba(247, 138, 151, 0.3);
+        min-width: 36px;
+        text-align: center;
+      }
+
+      .progress-pill-badge.complete {
+        background: linear-gradient(135deg, rgba(65, 181, 136, 0.25), rgba(65, 181, 136, 0.15));
+        color: #41b588;
+        border-color: rgba(65, 181, 136, 0.3);
+      }
+
+      .progress-pill-step {
+        font-size: 12px;
+        font-weight: 600;
+        color: rgba(255, 255, 255, 0.9);
+        max-width: 220px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .progress-pill-chevron {
+        color: rgba(255, 255, 255, 0.5);
+        font-size: 11px;
+        transition: transform 0.25s ease;
+        margin-left: 2px;
+      }
+
+      .progress-pill.expanded .progress-pill-chevron {
+        transform: rotate(180deg);
+      }
+
+      .progress-pill-dropdown {
+        display: none;
+        width: 100%;
+        max-height: 320px;
+        overflow-y: auto;
+        background: linear-gradient(180deg, rgba(36, 26, 32, 0.98), rgba(24, 16, 22, 0.98));
+        border: 1px solid rgba(247, 138, 151, 0.35);
+        border-top: none;
+        border-radius: 0 0 16px 16px;
+        padding: 12px;
+        box-shadow: 
+          0 16px 48px rgba(0, 0, 0, 0.5),
+          0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+        backdrop-filter: blur(12px);
+        box-sizing: border-box;
+      }
+
+      .progress-pill.expanded .progress-pill-dropdown {
+        display: block;
+        animation: pillDropdownSlide 0.2s ease-out;
+      }
+
+      @keyframes pillDropdownSlide {
+        from {
+          opacity: 0;
+          transform: translateY(-8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .progress-pill-dropdown::-webkit-scrollbar {
+        width: 6px;
+      }
+
+      .progress-pill-dropdown::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .progress-pill-dropdown::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.15);
+        border-radius: 3px;
+      }
+
+      .progress-pill-content .todo-empty {
+        padding: 16px 10px;
+      }
+
+      /* In-progress step animation for pill */
+      .progress-pill-step.in-progress::after {
+        content: "";
+        display: inline-block;
+        width: 6px;
+        height: 6px;
+        margin-left: 8px;
+        border-radius: 50%;
+        background: #f78a97;
+        animation: progressPulse 1.2s ease-in-out infinite;
+        vertical-align: middle;
+      }
+
+      @keyframes progressPulse {
+        0%, 100% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 0.4;
+          transform: scale(0.8);
+        }
+      }
     </style>
   </head>
   <body>
@@ -2180,6 +2544,20 @@
 
     <div class="chat-container" id="chatContainer">
       <div class="chat-empty">No messages yet</div>
+    </div>
+
+    <!-- Floating Progress Pill -->
+    <div class="progress-pill" id="progressPill">
+      <div class="progress-pill-summary" id="progressPillSummary">
+        <span class="progress-pill-badge" id="progressPillBadge">0/0</span>
+        <span class="progress-pill-step" id="progressPillStep">No plan yet</span>
+        <i class="fal fa-chevron-down progress-pill-chevron"></i>
+      </div>
+      <div class="progress-pill-dropdown" id="progressPillDropdown">
+        <div class="progress-pill-content" id="progressPillContent">
+          <div class="todo-empty">No plan yet</div>
+        </div>
+      </div>
     </div>
 
     <div class="pending-actions" id="pendingActions" style="display: none">
