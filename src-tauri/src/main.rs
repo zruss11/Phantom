@@ -1914,16 +1914,19 @@ struct CreateAgentResult {
 #[tauri::command]
 async fn create_agent_session(
     app: AppHandle,
+    window: WebviewWindow,
     payload: CreateAgentPayload,
     state: State<'_, AppState>,
 ) -> Result<CreateAgentResult, String> {
-    create_agent_session_internal(app, payload, state.inner()).await
+    let emit_to_main = window.label() != "main";
+    create_agent_session_internal(app, payload, state.inner(), emit_to_main).await
 }
 
 async fn create_agent_session_internal(
     app: AppHandle,
     payload: CreateAgentPayload,
     state: &AppState,
+    emit_to_main: bool,
 ) -> Result<CreateAgentResult, String> {
     let agent = find_agent(&state.config, &payload.agent_id)
         .ok_or_else(|| format!("Unknown agent id: {}", payload.agent_id))?;
@@ -2298,28 +2301,30 @@ async fn create_agent_session_internal(
         task_id, session.session_id, selected
     );
 
-    // Emit AddTask to main window so task list updates regardless of which window initiated creation
+    // Emit AddTask to main window so task list updates for non-main origins
     // (e.g., code review from chat log window)
-    if let Some(main_window) = app.get_webview_window("main") {
-        let initial_branch = worktree_path
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
-        let add_task_payload = serde_json::json!({
-            "ID": task_id,
-            "agent": payload.agent_id,
-            "model": selected,
-            "Status": "Ready",
-            "statusState": "idle",
-            "cost": 0,
-            "worktreePath": worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
-            "projectPath": payload.project_path,
-            "branch": initial_branch,
-            "totalTokens": serde_json::Value::Null,
-            "contextWindow": serde_json::Value::Null,
-        });
-        let _ = main_window.emit("AddTask", (&task_id, add_task_payload));
+    if emit_to_main {
+        if let Some(main_window) = app.get_webview_window("main") {
+            let initial_branch = worktree_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string());
+            let add_task_payload = serde_json::json!({
+                "ID": task_id,
+                "agent": payload.agent_id,
+                "model": selected,
+                "Status": "Ready",
+                "statusState": "idle",
+                "cost": 0,
+                "worktreePath": worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                "projectPath": payload.project_path,
+                "branch": initial_branch,
+                "totalTokens": serde_json::Value::Null,
+                "contextWindow": serde_json::Value::Null,
+            });
+            let _ = main_window.emit("AddTask", (&task_id, add_task_payload));
+        }
     }
 
     Ok(CreateAgentResult {
@@ -2470,7 +2475,7 @@ pub(crate) async fn create_task_from_discord(
         multi_create: false,
     };
 
-    let result = create_agent_session_internal(app.clone(), payload, state).await?;
+    let result = create_agent_session_internal(app.clone(), payload, state, false).await?;
     if let Some(window) = app.get_webview_window("main") {
         let task_snapshot = if let Ok(conn) = state.db.lock() {
             db::list_tasks(&conn)
@@ -5206,7 +5211,11 @@ async fn gather_code_review_context(
     let max_bytes: usize = 100_000;
     let diff_truncated = full_diff.len() > max_bytes;
     if diff_truncated {
-        full_diff.truncate(max_bytes);
+        let mut truncate_at = max_bytes;
+        while truncate_at > 0 && !full_diff.is_char_boundary(truncate_at) {
+            truncate_at -= 1;
+        }
+        full_diff.truncate(truncate_at);
         full_diff.push_str("\n\n[Diff truncated at ~100KB]");
     }
 

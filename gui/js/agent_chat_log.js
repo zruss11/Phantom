@@ -1439,15 +1439,13 @@
     if (btn) btn.classList.add('loading');
     if (labelEl) labelEl.innerHTML = 'Gathering\u2026 <span class="code-review-spinner"></span>';
 
-    var tauriCore = window.__TAURI__ && window.__TAURI__.core;
-    var tauriInvokeFn = tauriCore && tauriCore.invoke;
-    if (!tauriInvokeFn) {
-      console.error('[ChatLog] Tauri invoke not available for code review');
+    if (!ipcRenderer || typeof ipcRenderer.invoke !== 'function') {
+      console.error('[ChatLog] IPC invoke not available for code review');
       resetCodeReviewButton(btn, labelEl, originalLabel);
       return;
     }
 
-    tauriInvokeFn('gather_code_review_context', { projectPath: currentTaskPath })
+    ipcRenderer.invoke('gatherCodeReviewContext', { projectPath: currentTaskPath })
       .then(function(context) {
         var prompt = buildCodeReviewPrompt(context);
         ipcRenderer.send('CreateAgentSession', {
@@ -1468,7 +1466,7 @@
         });
       })
       .catch(function(err) {
-        console.error('[ChatLog] gather_code_review_context error:', err);
+        console.error('[ChatLog] gatherCodeReviewContext error:', err);
         window.alert('Failed to gather code review context: ' + (err.message || err));
       })
       .finally(function() {

@@ -530,6 +530,10 @@
         if (channel === 'saveAnalyticsCache') {
           return tauriInvoke('save_analytics_cache', { agentType: args[0], snapshot: args[1] });
         }
+        if (channel === 'gatherCodeReviewContext') {
+          var reviewPayload = args[0] || {};
+          return tauriInvoke('gather_code_review_context', { projectPath: reviewPayload.projectPath || null });
+        }
         if (channel === 'save_attachment') {
           return tauriInvoke('save_attachment', { payload: args[0] });
         }
