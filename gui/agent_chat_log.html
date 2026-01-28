@@ -2354,13 +2354,10 @@
       }
 
       /* ============================================
-       Floating Progress Pill
+       Status Bar Progress Dropdown
        ============================================ */
       .progress-pill {
-        position: fixed;
-        top: 120px;
-        right: 20px;
-        z-index: 100;
+        position: relative;
         display: none;
         flex-direction: column;
         align-items: stretch;
@@ -2371,45 +2368,68 @@
       }
 
       .progress-pill-summary {
-        display: flex;
+        display: inline-flex;
         align-items: center;
-        gap: 0;
-        padding: 10px 14px;
-        background: linear-gradient(135deg, rgba(44, 30, 38, 0.98), rgba(28, 18, 24, 0.98));
-        border: 1px solid rgba(247, 138, 151, 0.35);
-        border-radius: 24px;
+        gap: 6px;
+        padding: 4px 8px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 10px;
         cursor: pointer;
-        transition: all 0.2s ease;
-        box-shadow: 
-          0 8px 32px rgba(0, 0, 0, 0.4),
-          0 0 0 1px rgba(255, 255, 255, 0.05) inset;
-        backdrop-filter: blur(12px);
+        transition:
+          border-color 0.2s ease,
+          box-shadow 0.2s ease,
+          background 0.2s ease,
+          color 0.2s ease;
+        box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+        backdrop-filter: blur(10px);
+        white-space: nowrap;
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 11px;
+        appearance: none;
+        -webkit-appearance: none;
+        font-family: "Proxima Nova", sans-serif;
+      }
+
+      .progress-pill-summary i {
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.55);
+      }
+
+      .progress-pill-summary:focus-visible {
+        outline: none;
+        box-shadow:
+          0 0 0 2px rgba(247, 138, 151, 0.45),
+          0 0 0 1px rgba(255, 255, 255, 0.06) inset;
       }
 
       .progress-pill-summary:hover {
-        border-color: rgba(247, 138, 151, 0.5);
-        transform: translateY(-2px);
-        box-shadow: 
-          0 12px 40px rgba(0, 0, 0, 0.5),
-          0 0 20px rgba(247, 138, 151, 0.15),
-          0 0 0 1px rgba(255, 255, 255, 0.08) inset;
+        border-color: rgba(247, 138, 151, 0.55);
+        background: rgba(255, 255, 255, 0.08);
+        box-shadow:
+          0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+          0 0 12px rgba(247, 138, 151, 0.2);
+        color: rgba(255, 255, 255, 0.95);
+      }
+
+      .progress-pill-summary:hover i {
+        color: #f78a97;
       }
 
       .progress-pill.expanded .progress-pill-summary {
-        border-radius: 16px 16px 0 0;
-        border-bottom-color: transparent;
+        border-color: rgba(247, 138, 151, 0.55);
       }
 
       .progress-pill-badge {
-        font-size: 11px;
+        font-size: 10px;
         font-weight: 700;
-        padding: 4px 8px;
-        border-radius: 12px;
+        padding: 3px 7px;
+        border-radius: 10px;
         background: linear-gradient(135deg, rgba(247, 138, 151, 0.25), rgba(247, 138, 151, 0.15));
         color: #f78a97;
         font-family: "Roboto Mono", monospace;
         border: 1px solid rgba(247, 138, 151, 0.3);
-        min-width: 36px;
+        min-width: 34px;
         text-align: center;
       }
 
@@ -2419,42 +2439,53 @@
         border-color: rgba(65, 181, 136, 0.3);
       }
 
+      .progress-pill-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 10px;
+      }
+
+      .progress-pill-title {
+        font-size: 10px;
+        letter-spacing: 0.6px;
+        text-transform: uppercase;
+        color: rgba(255, 255, 255, 0.45);
+        font-weight: 600;
+      }
+
       .progress-pill-step {
         font-size: 12px;
         font-weight: 600;
-        color: rgba(255, 255, 255, 0.9);
-        max-width: 220px;
+        color: rgba(255, 255, 255, 0.92);
+        max-width: 260px;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
-      }
-
-      .progress-pill-chevron {
-        color: rgba(255, 255, 255, 0.5);
-        font-size: 11px;
-        transition: transform 0.25s ease;
-        margin-left: 2px;
-      }
-
-      .progress-pill.expanded .progress-pill-chevron {
-        transform: rotate(180deg);
+        text-align: right;
+        flex: 1;
       }
 
       .progress-pill-dropdown {
         display: none;
-        width: 100%;
+        position: absolute;
+        top: calc(100% + 8px);
+        right: 0;
+        width: 480px;
+        max-width: calc(100vw - 32px);
         max-height: 320px;
         overflow-y: auto;
         background: linear-gradient(180deg, rgba(36, 26, 32, 0.98), rgba(24, 16, 22, 0.98));
         border: 1px solid rgba(247, 138, 151, 0.35);
-        border-top: none;
-        border-radius: 0 0 16px 16px;
+        border-radius: 12px;
         padding: 12px;
-        box-shadow: 
+        box-shadow:
           0 16px 48px rgba(0, 0, 0, 0.5),
           0 0 0 1px rgba(255, 255, 255, 0.05) inset;
         backdrop-filter: blur(12px);
         box-sizing: border-box;
+        z-index: 120;
       }
 
       .progress-pill.expanded .progress-pill-dropdown {
@@ -2465,7 +2496,7 @@
       @keyframes pillDropdownSlide {
         from {
           opacity: 0;
-          transform: translateY(-8px);
+          transform: translateY(-6px);
         }
         to {
           opacity: 1;
@@ -2707,6 +2738,28 @@
           <i class="fal fa-code-branch"></i>
           <span id="branchName">-</span>
         </span>
+        <div class="progress-pill" id="progressPill">
+          <button
+            class="progress-pill-summary"
+            id="progressPillSummary"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded="false"
+            title="Task plan"
+          >
+            <i class="fal fa-tasks" aria-hidden="true"></i>
+            <span class="progress-pill-badge" id="progressPillBadge">0/0</span>
+          </button>
+          <div class="progress-pill-dropdown" id="progressPillDropdown">
+            <div class="progress-pill-header">
+              <span class="progress-pill-title">Tasks</span>
+              <span class="progress-pill-step" id="progressPillStep">No plan yet</span>
+            </div>
+            <div class="progress-pill-content" id="progressPillContent">
+              <div class="todo-empty">No plan yet</div>
+            </div>
+          </div>
+        </div>
         <button
           id="createPrButton"
           class="pr-action-btn"
@@ -2722,20 +2775,6 @@
 
     <div class="chat-container" id="chatContainer">
       <div class="chat-empty">No messages yet</div>
-    </div>
-
-    <!-- Floating Progress Pill -->
-    <div class="progress-pill" id="progressPill">
-      <div class="progress-pill-summary" id="progressPillSummary">
-        <span class="progress-pill-badge" id="progressPillBadge">0/0</span>
-        <span class="progress-pill-step" id="progressPillStep">No plan yet</span>
-        <i class="fal fa-chevron-down progress-pill-chevron"></i>
-      </div>
-      <div class="progress-pill-dropdown" id="progressPillDropdown">
-        <div class="progress-pill-content" id="progressPillContent">
-          <div class="todo-empty">No plan yet</div>
-        </div>
-      </div>
     </div>
 
     <div class="pending-actions" id="pendingActions" style="display: none">

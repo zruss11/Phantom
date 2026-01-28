@@ -1260,6 +1260,10 @@
     // Hide pill if no steps
     if (total === 0) {
       pill.classList.remove("visible");
+      const summary = document.getElementById("progressPillSummary");
+      if (summary) {
+        summary.setAttribute("aria-expanded", "false");
+      }
       return;
     }
 
@@ -1297,12 +1301,17 @@
 
     summary.addEventListener("click", function () {
       pill.classList.toggle("expanded");
+      summary.setAttribute(
+        "aria-expanded",
+        pill.classList.contains("expanded") ? "true" : "false"
+      );
     });
 
     // Close dropdown when clicking outside
     document.addEventListener("click", function (e) {
       if (!pill.contains(e.target)) {
         pill.classList.remove("expanded");
+        summary.setAttribute("aria-expanded", "false");
       }
     });
   }
@@ -1313,9 +1322,13 @@
     const badge = document.getElementById("progressPillBadge");
     const stepText = document.getElementById("progressPillStep");
     const content = document.getElementById("progressPillContent");
+    const summary = document.getElementById("progressPillSummary");
 
     if (pill) {
       pill.classList.remove("visible", "expanded");
+    }
+    if (summary) {
+      summary.setAttribute("aria-expanded", "false");
     }
     if (badge) {
       badge.textContent = "0/0";
