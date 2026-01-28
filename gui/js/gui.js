@@ -21,6 +21,15 @@ navLinks.click(function () {
 
   $("#" + page).attr("hidden", false);
 
+  // Fire a navigation event so other modules can react without polling.
+  try {
+    window.dispatchEvent(
+      new CustomEvent("phantom:navigate", { detail: { pageId: page } }),
+    );
+  } catch (e) {
+    // ignore
+  }
+
   // Auto-focus prompt input when navigating to Create Tasks (Notion-style UX)
   if (page === "createTasksPage") {
     requestAnimationFrame(() => {
@@ -53,6 +62,15 @@ function switchToPage(pageId) {
     });
     // Show target page
     $("#" + pageId).attr("hidden", false);
+
+    // Fire a navigation event so other modules can react without polling.
+    try {
+      window.dispatchEvent(
+        new CustomEvent("phantom:navigate", { detail: { pageId: pageId } }),
+      );
+    } catch (e) {
+      // ignore
+    }
 
     // Auto-focus prompt input when navigating to Create Tasks (Notion-style UX)
     if (pageId === "createTasksPage") {

@@ -5277,6 +5277,38 @@ async fn check_task_uncommitted_changes(
     Ok(UncommittedChangesResult { has_changes, worktree_path: Some(path) })
 }
 
+#[derive(Debug, serde::Serialize)]
+struct DiffStats {
+    additions: u64,
+    deletions: u64,
+    files: u64,
+}
+
+#[tauri::command]
+async fn get_task_diff_stats(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<DiffStats, String> {
+    let task = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
+        tasks.into_iter().find(|t| t.id == task_id)
+    };
+
+    let task = task.ok_or_else(|| "Task not found".to_string())?;
+    let worktree_path = task
+        .worktree_path
+        .ok_or_else(|| "Task has no worktree path".to_string())?;
+
+    let repo = std::path::PathBuf::from(worktree_path);
+    let (additions, deletions, files) = worktree::diff_stats(&repo).await?;
+    Ok(DiffStats {
+        additions,
+        deletions,
+        files,
+    })
+}
+
 #[tauri::command]
 async fn delete_task(
     task_id: String,
@@ -7326,6 +7358,7 @@ fn main() {
             claude_rate_limits,
             load_tasks,
             check_task_uncommitted_changes,
+            get_task_diff_stats,
             delete_task,
             get_task_history,
             open_task_directory,

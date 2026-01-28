@@ -233,16 +233,34 @@
     }
   }
 
+  function persistDiffStats() {
+    if (!currentTaskId) return;
+    try {
+      localStorage.setItem(
+        `phantom-task-diff-stats-${currentTaskId}`,
+        JSON.stringify({
+          additions: diffAdditions,
+          deletions: diffDeletions,
+          updatedAt: Date.now(),
+        }),
+      );
+    } catch (e) {
+      // ignore
+    }
+  }
+
   function addDiffLines(additions, deletions) {
     diffAdditions += additions;
     diffDeletions += deletions || 0;
     updateDiffCounter();
+    persistDiffStats();
   }
 
   function resetDiffCount() {
     diffAdditions = 0;
     diffDeletions = 0;
     updateDiffCounter();
+    persistDiffStats();
   }
 
   // Parse task ID from URL query params
@@ -4129,82 +4147,96 @@
     container.appendChild(output);
   }
 
+  async function computeDiffStats(diffText) {
+    try {
+      const diffs = await loadDiffsModule();
+      const { parsePatchFiles } = diffs;
+      const patches = parsePatchFiles(diffText);
+      const files = patches.flatMap((patch) => patch.files || []);
+      if (!files.length) throw new Error('No diff files parsed');
+      let additions = 0;
+      let deletions = 0;
+      files.forEach((fileDiff) => {
+        const stats = getDiffFileStats(fileDiff);
+        additions += stats.additions;
+        deletions += stats.deletions;
+      });
+      return { additions, deletions, files: files.length };
+    } catch (err) {
+      // Fallback: legacy line-based counting
+      const parsed = parseUnifiedDiff(diffText || '');
+      let additions = 0;
+      let deletions = 0;
+      parsed.forEach((line) => {
+        if (line.type === 'add') additions += 1;
+        if (line.type === 'del') deletions += 1;
+      });
+      return { additions, deletions, files: countDiffFiles(diffText || '') || 0 };
+    }
+  }
+
   function renderDiffBlock(diffText, title) {
-    const parsed = parseUnifiedDiff(diffText);
-    let additions = 0;
-    let deletions = 0;
-    parsed.forEach((line) => {
-      if (line.type === "add") additions += 1;
-      if (line.type === "del") deletions += 1;
-    });
-
-    // Update header diff counter
-    addDiffLines(additions, deletions);
-
-    const card = document.createElement("div");
-    card.className = "diff-card";
+    const card = document.createElement('div');
+    card.className = 'diff-card';
+    card.dataset.diffStyle = localStorage.getItem('phantom-diff-style') || 'unified';
 
     // Header
-    const header = document.createElement("div");
-    header.className = "diff-card-header";
+    const header = document.createElement('div');
+    header.className = 'diff-card-header';
 
-    const titleWrap = document.createElement("div");
-    titleWrap.className = "diff-title";
+    const titleWrap = document.createElement('div');
+    titleWrap.className = 'diff-title';
 
-    const chip = document.createElement("span");
-    chip.className = "diff-chip";
-    chip.textContent = "DIFF";
+    const chip = document.createElement('span');
+    chip.className = 'diff-chip';
+    chip.textContent = 'DIFF';
 
-    const titleText = document.createElement("span");
-    titleText.className = "diff-title-text";
+    const titleText = document.createElement('span');
+    titleText.className = 'diff-title-text';
     titleText.textContent = extractDiffTitle(diffText, title);
 
     titleWrap.appendChild(chip);
     titleWrap.appendChild(titleText);
 
-    const summary = document.createElement("div");
-    summary.className = "diff-summary";
-    summary.innerHTML = `
-      <span class="diff-add">+${additions}</span>
-      <span class="diff-del">-${deletions}</span>
-    `;
+    const summary = document.createElement('div');
+    summary.className = 'diff-summary';
+    const addSpan = document.createElement('span');
+    addSpan.className = 'diff-add';
+    addSpan.textContent = '+0';
+    const delSpan = document.createElement('span');
+    delSpan.className = 'diff-del';
+    delSpan.textContent = '-0';
+    summary.appendChild(addSpan);
+    summary.appendChild(delSpan);
 
     header.appendChild(titleWrap);
     header.appendChild(summary);
 
-    // Diff output (unified view only)
-    const output = document.createElement("div");
-    output.className = "diff-output";
-
-    parsed.forEach((line) => {
-      const row = document.createElement("div");
-      row.className = `diff-line diff-line-${line.type}`;
-
-      const gutter = document.createElement("div");
-      gutter.className = "diff-gutter";
-
-      const oldLineNum = document.createElement("span");
-      oldLineNum.className = "diff-line-number";
-      oldLineNum.textContent = line.oldLine !== null ? line.oldLine : "";
-
-      const newLineNum = document.createElement("span");
-      newLineNum.className = "diff-line-number";
-      newLineNum.textContent = line.newLine !== null ? line.newLine : "";
-
-      gutter.appendChild(oldLineNum);
-      gutter.appendChild(newLineNum);
-
-      const content = document.createElement("div");
-      content.className = "diff-line-content";
-      content.textContent = line.text;
-
-      row.appendChild(gutter);
-      row.appendChild(content);
-      output.appendChild(row);
+    // Controls
+    const toggle = buildDiffToggle(card.dataset.diffStyle);
+    toggle.addEventListener('click', (e) => {
+      const btn = e.target && e.target.closest ? e.target.closest('.diff-toggle-btn') : null;
+      if (!btn) return;
+      const style = btn.dataset.style || 'unified';
+      localStorage.setItem('phantom-diff-style', style);
+      setDiffStyle(card, style);
     });
 
+    // Body
+    const body = document.createElement('div');
+    body.className = 'diff-body';
+
     card.appendChild(header);
-    card.appendChild(output);
+    card.appendChild(toggle);
+    card.appendChild(body);
+
+    // Render + compute stats async
+    renderDiffsWithLibrary(card, diffText);
+    computeDiffStats(diffText).then((stats) => {
+      addSpan.textContent = `+${stats.additions}`;
+      delSpan.textContent = `-${stats.deletions}`;
+      addDiffLines(stats.additions, stats.deletions);
+    });
 
     return card;
   }
