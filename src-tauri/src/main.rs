@@ -305,6 +305,15 @@ struct AttachmentRef {
     mime_type: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct CodeReviewContext {
+    current_branch: String,
+    base_branch: String,
+    diff: String,
+    commit_log: String,
+    diff_truncated: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct CreateAgentPayload {
     #[serde(rename = "agentId")]
@@ -1905,16 +1914,19 @@ struct CreateAgentResult {
 #[tauri::command]
 async fn create_agent_session(
     app: AppHandle,
+    window: WebviewWindow,
     payload: CreateAgentPayload,
     state: State<'_, AppState>,
 ) -> Result<CreateAgentResult, String> {
-    create_agent_session_internal(app, payload, state.inner()).await
+    let emit_to_main = window.label() != "main";
+    create_agent_session_internal(app, payload, state.inner(), emit_to_main).await
 }
 
 async fn create_agent_session_internal(
     app: AppHandle,
     payload: CreateAgentPayload,
     state: &AppState,
+    emit_to_main: bool,
 ) -> Result<CreateAgentResult, String> {
     let agent = find_agent(&state.config, &payload.agent_id)
         .ok_or_else(|| format!("Unknown agent id: {}", payload.agent_id))?;
@@ -2289,6 +2301,32 @@ async fn create_agent_session_internal(
         task_id, session.session_id, selected
     );
 
+    // Emit AddTask to main window so task list updates for non-main origins
+    // (e.g., code review from chat log window)
+    if emit_to_main {
+        if let Some(main_window) = app.get_webview_window("main") {
+            let initial_branch = worktree_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string());
+            let add_task_payload = serde_json::json!({
+                "ID": task_id,
+                "agent": payload.agent_id,
+                "model": selected,
+                "Status": "Ready",
+                "statusState": "idle",
+                "cost": 0,
+                "worktreePath": worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                "projectPath": payload.project_path,
+                "branch": initial_branch,
+                "totalTokens": serde_json::Value::Null,
+                "contextWindow": serde_json::Value::Null,
+            });
+            let _ = main_window.emit("AddTask", (&task_id, add_task_payload));
+        }
+    }
+
     Ok(CreateAgentResult {
         task_id,
         session_id: session.session_id,
@@ -2437,7 +2475,7 @@ pub(crate) async fn create_task_from_discord(
         multi_create: false,
     };
 
-    let result = create_agent_session_internal(app.clone(), payload, state).await?;
+    let result = create_agent_session_internal(app.clone(), payload, state, false).await?;
     if let Some(window) = app.get_webview_window("main") {
         let task_snapshot = if let Ok(conn) = state.db.lock() {
             db::list_tasks(&conn)
@@ -5091,6 +5129,117 @@ async fn delete_task(
     db::delete_task(&conn, &task_id).map_err(|e| e.to_string())
 }
 
+async fn detect_base_branch(path: &PathBuf) -> String {
+    // Try symbolic-ref first (most reliable for detecting remote default)
+    if let Ok(output) = worktree::run_git_command(
+        path,
+        &["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+    )
+    .await
+    {
+        let trimmed = output.trim();
+        if let Some(branch) = trimmed.strip_prefix("origin/") {
+            return branch.to_string();
+        }
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if worktree::branch_exists(path, "main").await.unwrap_or(false) {
+        return "main".to_string();
+    }
+    if worktree::branch_exists(path, "master")
+        .await
+        .unwrap_or(false)
+    {
+        return "master".to_string();
+    }
+    "main".to_string()
+}
+
+#[tauri::command]
+async fn gather_code_review_context(
+    project_path: String,
+) -> Result<CodeReviewContext, String> {
+    let path = std::path::PathBuf::from(&project_path);
+    if !path.exists() {
+        return Err(format!("Project path does not exist: {}", project_path));
+    }
+
+    let current_branch = worktree::current_branch(&path)
+        .await
+        .unwrap_or_else(|_| "HEAD".to_string());
+
+    let base_branch = detect_base_branch(&path).await;
+
+    // Get merge-base for accurate diff
+    let merge_base_result = worktree::run_git_command(
+        &path,
+        &["merge-base", &format!("origin/{}", base_branch), "HEAD"],
+    )
+    .await;
+
+    let merge_base = match merge_base_result {
+        Ok(s) => s.trim().to_string(),
+        Err(_) => {
+            // Fallback: try without origin/ prefix
+            worktree::run_git_command(&path, &["merge-base", &base_branch, "HEAD"])
+                .await
+                .map(|s| s.trim().to_string())
+                .unwrap_or_else(|_| "HEAD~10".to_string())
+        }
+    };
+
+    // Get committed diff (merge-base..HEAD)
+    let committed_diff = worktree::run_git_command(&path, &["diff", &merge_base, "HEAD"])
+        .await
+        .unwrap_or_default();
+
+    // Get uncommitted changes (staged + unstaged)
+    let uncommitted = worktree::run_git_command(&path, &["diff", "HEAD"])
+        .await
+        .unwrap_or_default();
+
+    // Combine diffs
+    let mut full_diff = committed_diff;
+    if !uncommitted.trim().is_empty() {
+        full_diff.push_str("\n\n--- Uncommitted Changes ---\n");
+        full_diff.push_str(&uncommitted);
+    }
+
+    // Truncate large diffs (~100KB)
+    let max_bytes: usize = 100_000;
+    let diff_truncated = full_diff.len() > max_bytes;
+    if diff_truncated {
+        let mut truncate_at = max_bytes;
+        while truncate_at > 0 && !full_diff.is_char_boundary(truncate_at) {
+            truncate_at -= 1;
+        }
+        full_diff.truncate(truncate_at);
+        full_diff.push_str("\n\n[Diff truncated at ~100KB]");
+    }
+
+    // Recent commit log
+    let commit_log = worktree::run_git_command(
+        &path,
+        &[
+            "log",
+            "--format=%h %s (%an, %ar)",
+            &format!("{}..HEAD", merge_base),
+        ],
+    )
+    .await
+    .unwrap_or_default();
+
+    Ok(CodeReviewContext {
+        current_branch,
+        base_branch,
+        diff: full_diff,
+        commit_log,
+        diff_truncated,
+    })
+}
+
 #[tauri::command]
 async fn get_task_history(
     task_id: String,
@@ -6944,6 +7093,8 @@ fn main() {
             get_pending_attachments,
             delete_attachment,
             get_attachment_base64,
+            // Code review commands
+            gather_code_review_context,
             // Auto-update commands
             check_for_updates,
             install_update

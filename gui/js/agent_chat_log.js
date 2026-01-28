@@ -80,7 +80,15 @@
     amp: "Amp",
     droid: "Droid",
     opencode: "OpenCode",
-    "factory-droid": "Factory",
+  };
+
+  const AGENT_REVIEW_ICONS = {
+    codex: 'images/codex.png',
+    'claude-code': 'images/claude-color.png',
+    amp: 'images/ampcode.png',
+    droid: 'images/factorydroid.png',
+    opencode: 'images/opencode.png',
+    'factory-droid': 'images/factorydroid.png',
   };
 
   // Image lightbox functionality
@@ -155,6 +163,7 @@
 
   let currentTaskId = null;
   let currentTaskPath = null; // Resolved path for "Open in..." functionality
+  let codeReviewLoading = false;
   let autoScroll = true;
   let elapsedTimer = null;
   let startTime = null;
@@ -212,6 +221,7 @@
     }
 
     setupEventListeners();
+    populateCodeReviewMenu();
     setupIPCListeners();
     initTodoSidebar();
 
@@ -255,6 +265,8 @@
     const logSwitcher = $("#logSwitcher");
     const logSwitcherLabel = $("#logSwitcherLabel");
     const logSwitcherIcon = $("#logSwitcherIcon");
+    var codeReviewWrap = $('#codeReviewWrap');
+    var codeReviewBtn = $('#codeReviewBtn');
 
     logSwitcher.on("click", function (e) {
       e.stopPropagation();
@@ -297,17 +309,54 @@
       logSwitcher.attr("aria-expanded", false);
     });
 
+    // --- Code Review Dropdown ---
+    codeReviewBtn.on('click', function(e) {
+      e.stopPropagation();
+      // Close the other dropdown if open
+      logSwitcherWrap.removeClass('open');
+      logSwitcher.attr('aria-expanded', false);
+      codeReviewWrap.toggleClass('open');
+      codeReviewBtn.attr('aria-expanded', codeReviewWrap.hasClass('open'));
+    });
+
+    codeReviewBtn.on('keydown', function(e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        codeReviewBtn.trigger('click');
+      }
+    });
+
+    $('#codeReviewMenu').on('click', '.log-switcher-item', function(e) {
+      e.stopPropagation();
+      if (codeReviewLoading) return;
+      var reviewAgentId = $(this).data('agent');
+      if (!reviewAgentId) return;
+      codeReviewWrap.removeClass('open');
+      codeReviewBtn.attr('aria-expanded', false);
+      initiateCodeReview(reviewAgentId);
+    });
+
     $(document).on("click", function () {
       if (logSwitcherWrap.hasClass("open")) {
         logSwitcherWrap.removeClass("open");
         logSwitcher.attr("aria-expanded", false);
       }
+      if (codeReviewWrap.hasClass("open")) {
+        codeReviewWrap.removeClass("open");
+        codeReviewBtn.attr("aria-expanded", false);
+      }
     });
 
     $(document).on("keydown", function (e) {
-      if (e.key === "Escape" && logSwitcherWrap.hasClass("open")) {
-        logSwitcherWrap.removeClass("open");
-        logSwitcher.attr("aria-expanded", false);
+      if (e.key === "Escape") {
+        if (logSwitcherWrap.hasClass("open")) {
+          logSwitcherWrap.removeClass("open");
+          logSwitcher.attr("aria-expanded", false);
+        }
+        if (codeReviewWrap.hasClass("open")) {
+          codeReviewWrap.removeClass("open");
+          codeReviewBtn.attr("aria-expanded", false);
+        }
       }
     });
 
@@ -1284,7 +1333,8 @@
 
       if (type === "assistant") {
         div.className += " assistant";
-        div.innerHTML = '<span class="streaming-cursor">|</span>';
+        // Start empty - cursor will be added when content arrives
+        div.innerHTML = '';
       } else if (type === "reasoning") {
         div.className += " reasoning";
         div.innerHTML = `
@@ -1322,11 +1372,13 @@
         textEl.textContent = strippedContent;
       }
     } else {
-      // Use markdown for assistant messages
-      const renderedContent = renderMarkdown(streamingContent);
-      streamingElement.innerHTML =
-        '<div class="markdown-content">' + renderedContent + '</div>' +
-        '<span class="streaming-cursor">|</span>';
+      // Use markdown for assistant messages - only show cursor when there's content
+      if (streamingContent && streamingContent.trim()) {
+        const renderedContent = renderMarkdown(streamingContent);
+        streamingElement.innerHTML =
+          '<div class="markdown-content">' + renderedContent + '</div>' +
+          '<span class="streaming-cursor">|</span>';
+      }
     }
   }
 
@@ -1357,6 +1409,138 @@
     streamingContent = "";
     streamingType = null;
     streamingItemId = null; // Reset itemId for next message
+  }
+
+  function populateCodeReviewMenu() {
+    var menu = document.getElementById('codeReviewMenu');
+    if (!menu) return;
+    var agents = Object.keys(AGENT_NAMES);
+    menu.innerHTML = agents.map(function(agentId) {
+      var name = AGENT_NAMES[agentId];
+      var icon = AGENT_REVIEW_ICONS[agentId] || 'images/codex.png';
+      return '<button class="log-switcher-item" type="button" data-agent="' + agentId + '" data-tauri-drag-region="false">' +
+        '<img class="log-switcher-item-icon" src="' + icon + '" alt="" aria-hidden="true" />' +
+        name +
+        '</button>';
+    }).join('');
+  }
+
+  function initiateCodeReview(reviewAgentId) {
+    if (codeReviewLoading) return;
+    if (!currentTaskPath) {
+      window.alert('No project path available for this task.');
+      return;
+    }
+
+    codeReviewLoading = true;
+    var btn = document.getElementById('codeReviewBtn');
+    var labelEl = document.getElementById('codeReviewLabel');
+    var originalLabel = labelEl ? labelEl.textContent : 'Review';
+    if (btn) btn.classList.add('loading');
+    if (labelEl) labelEl.innerHTML = 'Gathering\u2026 <span class="code-review-spinner"></span>';
+
+    if (!ipcRenderer || typeof ipcRenderer.invoke !== 'function') {
+      console.error('[ChatLog] IPC invoke not available for code review');
+      resetCodeReviewButton(btn, labelEl, originalLabel);
+      return;
+    }
+
+    ipcRenderer.invoke('gatherCodeReviewContext', { projectPath: currentTaskPath })
+      .then(function(context) {
+        var prompt = buildCodeReviewPrompt(context);
+        ipcRenderer.send('CreateAgentSession', {
+          agentId: reviewAgentId,
+          prompt: prompt,
+          projectPath: currentTaskPath,
+          baseBranch: null,
+          planMode: false,
+          thinking: true,
+          useWorktree: false,
+          permissionMode: 'bypassPermissions',
+          execModel: 'default',
+          reasoningEffort: null,
+          agentMode: null,
+          codexMode: null,
+          multiCreate: false,
+          attachments: []
+        });
+      })
+      .catch(function(err) {
+        console.error('[ChatLog] gatherCodeReviewContext error:', err);
+        window.alert('Failed to gather code review context: ' + (err.message || err));
+      })
+      .finally(function() {
+        resetCodeReviewButton(btn, labelEl, originalLabel);
+      });
+  }
+
+  function resetCodeReviewButton(btn, labelEl, originalLabel) {
+    codeReviewLoading = false;
+    if (btn) btn.classList.remove('loading');
+    if (labelEl) labelEl.textContent = originalLabel;
+  }
+
+  function buildCodeReviewPrompt(context) {
+    var lines = [];
+    lines.push('You are performing a code review on the changes in the current branch.');
+    lines.push('');
+    lines.push('The current branch is **' + context.current_branch + '**, and the target branch is **origin/' + context.base_branch + '**.');
+    lines.push('');
+    lines.push('## Code Review Instructions');
+    lines.push('');
+    lines.push('**CRITICAL: EVERYTHING YOU NEED IS ALREADY PROVIDED BELOW.** The complete git diff and full commit history are included in this message.');
+    lines.push('');
+    lines.push('**DO NOT run git diff, git log, git status, or ANY other git commands.** All the information you need to perform this review is already here.');
+    lines.push('');
+    lines.push('When reviewing the diff:');
+    lines.push('1. **Focus on logic and correctness** - Check for bugs, edge cases, and potential issues.');
+    lines.push('2. **Consider readability** - Is the code clear and maintainable? Does it follow best practices in this repository?');
+    lines.push('3. **Evaluate performance** - Are there obvious performance concerns or optimizations that could be made?');
+    lines.push('4. **Assess test coverage** - Does the repository have testing patterns? If so, are there adequate tests for these changes?');
+    lines.push('5. **Security review** - Check for injection risks, auth issues, hardcoded secrets, or other vulnerabilities.');
+    lines.push('6. **Ask clarifying questions** - Ask the user for clarification if you are unsure about the changes or need more context.');
+    lines.push('7. **Don\'t be overly pedantic** - Nitpicks are fine, but only if they are relevant issues within reason.');
+    lines.push('');
+    lines.push('In your output:');
+    lines.push('- Provide a short summary overview of the general code quality.');
+    lines.push('- Present findings as a numbered list (no tables, no HTML).');
+    lines.push('- For each finding, use this exact structure with labels on separate lines:');
+    lines.push('  - Location: file path + line number(s) if available');
+    lines.push('  - Snippet: fenced code block (keep it short)');
+    lines.push('  - Issue: what is wrong and why it matters');
+    lines.push('  - Recommendation: concrete fix or next step');
+    lines.push('  - Severity: low | medium | high');
+    lines.push('- If no issues are found, write: "Findings: None" and briefly state why.');
+    lines.push('- End with an overall verdict line: "Verdict: APPROVE" or "Verdict: REQUEST CHANGES" or "Verdict: NEEDS DISCUSSION".');
+    lines.push('- Avoid markdown tables entirely. Use headings and lists only.');
+    lines.push('');
+
+    if (context.commit_log && context.commit_log.trim()) {
+      lines.push('## Commit History');
+      lines.push('');
+      lines.push('```');
+      lines.push(context.commit_log.trim());
+      lines.push('```');
+      lines.push('');
+    }
+
+    lines.push('## Full Diff');
+    lines.push('');
+    lines.push('**REMINDER: DO NOT use any tools to fetch git information.** Simply read the diff and commit history provided above.');
+    lines.push('');
+    if (context.diff_truncated) {
+      lines.push('> **Note:** The diff was truncated due to size (~100KB limit). Focus on the included changes and note that some files may be missing.');
+      lines.push('');
+    }
+    if (context.diff && context.diff.trim()) {
+      lines.push('```diff');
+      lines.push(context.diff.trim());
+      lines.push('```');
+    } else {
+      lines.push('No changes detected between `' + context.current_branch + '` and `origin/' + context.base_branch + '`.');
+    }
+
+    return lines.join('\n');
   }
 
   // Update header with task info

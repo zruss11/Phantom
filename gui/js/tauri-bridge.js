@@ -530,6 +530,10 @@
         if (channel === 'saveAnalyticsCache') {
           return tauriInvoke('save_analytics_cache', { agentType: args[0], snapshot: args[1] });
         }
+        if (channel === 'gatherCodeReviewContext') {
+          var reviewPayload = args[0] || {};
+          return tauriInvoke('gather_code_review_context', { projectPath: reviewPayload.projectPath || null });
+        }
         if (channel === 'save_attachment') {
           return tauriInvoke('save_attachment', { payload: args[0] });
         }
@@ -576,6 +580,17 @@
             // Mock restart - just resolve successfully with empty array
             console.log('[Tauri Bridge Mock] Restart all agents');
             resolve([]);
+            break;
+          case 'gatherCodeReviewContext':
+            // Mock code review context for browser dev mode
+            console.log('[Tauri Bridge Mock] Gather code review context:', args[0]);
+            resolve({
+              current_branch: 'feat/mock-branch',
+              base_branch: 'main',
+              diff: '--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,6 +10,8 @@ fn main() {\n     println!("Hello, world!");\n+    // New feature added\n+    do_something_cool();\n }',
+              commit_log: 'abc1234 feat: add cool feature (Dev, 2 hours ago)\ndef5678 fix: minor bug fix (Dev, 1 day ago)',
+              diff_truncated: false
+            });
             break;
           case 'loadTasks':
             resolve(mockData.tasks);
