@@ -2872,6 +2872,8 @@ async fn start_task_internal(
                 StreamingUpdate::UserInputRequest { .. } => true,
                 // Plan updates should surface immediately
                 StreamingUpdate::PlanUpdate { .. } => true,
+                // Plan content should surface immediately
+                StreamingUpdate::PlanContent { .. } => true,
                 // Text/reasoning chunks are throttled to prevent UI overload
                 StreamingUpdate::TextChunk { .. } | StreamingUpdate::ReasoningChunk { .. } => {
                     last_status_update.elapsed() >= throttle_duration
@@ -2901,6 +2903,7 @@ async fn start_task_internal(
                             ("Waiting for input...".to_string(), "#4ade80")
                         }
                         StreamingUpdate::PlanUpdate { .. } => ("Plan updated".to_string(), "white"),
+                        StreamingUpdate::PlanContent { .. } => ("Plan content".to_string(), "white"),
                         StreamingUpdate::AvailableCommands { .. } => {
                             // Handled separately, won't reach here due to should_emit_status check
                             continue;
@@ -3005,6 +3008,24 @@ async fn start_task_internal(
                                 &task_id_clone,
                                 "plan_update",
                                 Some(&content),
+                                None,
+                                None,
+                                None,
+                                None,
+                                &ts,
+                            )
+                        }
+                        StreamingUpdate::PlanContent { file_path, content } => {
+                            let payload = serde_json::json!({
+                                "file_path": file_path,
+                                "content": content
+                            });
+                            let content_str = serde_json::to_string(&payload).unwrap_or_default();
+                            db::save_message(
+                                &conn,
+                                &task_id_clone,
+                                "plan_content",
+                                Some(&content_str),
                                 None,
                                 None,
                                 None,
@@ -3128,6 +3149,14 @@ async fn start_task_internal(
                             "turn_id": turn_id,
                             "explanation": explanation,
                             "plan": steps
+                        })
+                    }
+                    StreamingUpdate::PlanContent { file_path, content } => {
+                        serde_json::json!({
+                            "type": "streaming",
+                            "message_type": "plan_content",
+                            "file_path": file_path,
+                            "content": content
                         })
                     }
                 };
@@ -5918,6 +5947,7 @@ pub(crate) async fn send_chat_message_internal(
                 StreamingUpdate::PermissionRequest { .. } => true,
                 StreamingUpdate::UserInputRequest { .. } => true,
                 StreamingUpdate::PlanUpdate { .. } => true,
+                StreamingUpdate::PlanContent { .. } => true,
                 StreamingUpdate::TextChunk { .. } | StreamingUpdate::ReasoningChunk { .. } => {
                     last_status_update.elapsed() >= throttle_duration
                 }
@@ -5945,6 +5975,7 @@ pub(crate) async fn send_chat_message_internal(
                             ("Waiting for input...".to_string(), "#4ade80")
                         }
                         StreamingUpdate::PlanUpdate { .. } => ("Plan updated".to_string(), "white"),
+                        StreamingUpdate::PlanContent { .. } => ("Plan content".to_string(), "white"),
                         StreamingUpdate::AvailableCommands { .. } => continue,
                     };
                     let _ = main_window.emit(
@@ -6066,6 +6097,14 @@ pub(crate) async fn send_chat_message_internal(
                             "turn_id": turn_id,
                             "explanation": explanation,
                             "plan": steps
+                        })
+                    }
+                    StreamingUpdate::PlanContent { file_path, content } => {
+                        serde_json::json!({
+                            "type": "streaming",
+                            "message_type": "plan_content",
+                            "file_path": file_path,
+                            "content": content
                         })
                     }
                 };

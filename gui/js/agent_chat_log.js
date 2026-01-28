@@ -487,6 +487,70 @@
       const card = btn.closest(".ask-user-question");
       if (!card.length) return;
 
+      const questionBlocks = card.find(".user-input-question");
+      if (questionBlocks.length > 1) {
+        const answers = [];
+        let missing = false;
+        questionBlocks.each(function (idx, el) {
+          const block = $(el);
+          const header = block
+            .find(".permission-action-label")
+            .clone()
+            .children()
+            .remove()
+            .end()
+            .text()
+            .trim();
+          const label =
+            header ||
+            block.find(".permission-reason").first().text().trim() ||
+            `Question ${idx + 1}`;
+          const choices = block.find(".user-input-choices").first();
+
+          let answerText = "";
+          if (choices.length) {
+            const selected = choices.find(".user-input-option.is-selected");
+            if (selected.length) {
+              if (choices.attr("data-multiselect") === "true") {
+                const labels = selected
+                  .map((_, item) => $(item).attr("data-value") || "")
+                  .get()
+                  .filter(Boolean);
+                answerText = labels.join(", ");
+              } else {
+                answerText = selected.first().attr("data-value") || "";
+              }
+            }
+          }
+
+          if (!answerText) {
+            const input = block.find(".user-input-freeform").first();
+            if (input.length) {
+              answerText = (input.val() || "").toString().trim();
+            }
+          }
+
+          if (!answerText) {
+            missing = true;
+            return false;
+          }
+
+          answers.push(`${label}: ${answerText}`);
+          return true;
+        });
+
+        if (missing || answers.length === 0) return;
+
+        card.find(".permission-btn").prop("disabled", true);
+        card.addClass("responded");
+        const statusEl = card.find(".permission-status");
+        statusEl.removeClass("denied").addClass("confirmed");
+        statusEl.find("span").text("Answered");
+
+        sendMessageWithText(answers.join("\n"));
+        return;
+      }
+
       let answer = "";
       const selected = card.find(".user-input-option.is-selected").first();
       if (selected.length) {
@@ -553,8 +617,12 @@
       card.find(".user-input-question").removeClass("is-active-question");
       question.addClass("is-active");
       card.find(`.user-input-question[data-qid="${qid}"]`).addClass("is-active-question");
-      question.find(".user-input-option").removeClass("is-selected");
-      btn.addClass("is-selected");
+      if (question.attr("data-multiselect") === "true") {
+        btn.toggleClass("is-selected");
+      } else {
+        question.find(".user-input-option").removeClass("is-selected");
+        btn.addClass("is-selected");
+      }
       card.attr("data-active-qid", qid);
     });
 
@@ -972,6 +1040,16 @@
         finalizeStreamingMessage();
         upsertPlanPanel(update);
         updateStatus("Plan updated", "running");
+        break;
+
+      case "plan_content":
+        finalizeStreamingMessage();
+        addMessage({
+          type: "plan_content",
+          file_path: update.file_path,
+          content: update.content,
+        });
+        updateStatus("Plan content", "running");
         break;
     }
   }
@@ -1500,6 +1578,19 @@
       return;
     }
 
+    if (type === "plan_content") {
+      // Handle plan_content - render as a special assistant message with the plan
+      let payload = message;
+      if (typeof message.content === "string" && message.content.startsWith("{")) {
+        try {
+          payload = JSON.parse(message.content);
+        } catch (e) {
+          payload = message;
+        }
+      }
+      // Fall through to render as a message with the content
+    }
+
     // Skip duplicate assistant messages (already rendered via streaming)
     if ((type === "assistant" || type === "assistant_message") && streamingType === "assistant") {
       if (streamingElement && content && streamingContent && content.trim() === streamingContent.trim()) {
@@ -1732,6 +1823,96 @@
               parsedArgs = null;
             }
           }
+          const questions = Array.isArray(parsedArgs?.questions)
+            ? parsedArgs.questions
+            : null;
+
+          if (questions && questions.length > 0) {
+            const questionsHtml = questions
+              .map((q, idx) => {
+                const qid = q?.id ? q.id.toString() : `askuserquestion-${idx + 1}`;
+                const header = q?.header || `Question ${idx + 1}`;
+                const questionText =
+                  q?.question || q?.prompt || q?.text || q?.message || "";
+                const opts = Array.isArray(q?.options)
+                  ? q.options
+                  : Array.isArray(q?.choices)
+                    ? q.choices
+                    : null;
+                const multiSelect = q?.multiSelect === true;
+
+                if (opts && opts.length > 0) {
+                  const optionButtons = opts
+                    .map((opt, optIdx) => {
+                      const label =
+                        typeof opt === "string"
+                          ? opt
+                          : opt.label || opt.value || "";
+                      const desc =
+                        typeof opt === "string" ? "" : opt.description || "";
+                      return `
+                        <button
+                          class="user-input-option ${optIdx === 0 ? "is-selected" : ""}"
+                          type="button"
+                          data-qid="${escapeHtml(qid)}"
+                          data-value="${escapeHtml(label)}"
+                          data-index="${optIdx}"
+                        >
+                          <span class="user-input-option-number">${optIdx + 1}.</span>
+                          <span class="user-input-option-text">
+                            <strong>${escapeHtml(label)}</strong>
+                            ${desc ? `<span class="user-input-option-desc"> — ${escapeHtml(desc)}</span>` : ""}
+                          </span>
+                        </button>
+                      `;
+                    })
+                    .join("");
+                  return `
+                    <div class="permission-action user-input-question" data-qid="${escapeHtml(qid)}" style="margin-top: 10px;">
+                      <div class="permission-action-label">
+                        ${escapeHtml(header)}
+                        <span class="user-input-active-badge">Active</span>
+                      </div>
+                      <div class="permission-reason">${escapeHtml(questionText)}</div>
+                      <div class="user-input-choices" data-qid="${escapeHtml(qid)}" data-multiselect="${multiSelect ? "true" : "false"}">${optionButtons}</div>
+                    </div>
+                  `;
+                }
+
+                return `
+                  <div class="permission-action user-input-question" data-qid="${escapeHtml(qid)}" style="margin-top: 10px;">
+                    <div class="permission-action-label">
+                      ${escapeHtml(header)}
+                      <span class="user-input-active-badge">Active</span>
+                    </div>
+                    <div class="permission-reason">${escapeHtml(questionText)}</div>
+                    <input class="user-input-freeform" data-qid="${escapeHtml(qid)}" type="text" placeholder="Type your answer" style="width: 100%; margin-top: 8px;" />
+                  </div>
+                `;
+              })
+              .join("");
+
+            div.innerHTML = `
+              <div class="permission-header">
+                <span class="permission-icon"><i class="fal fa-question-circle"></i></span>
+                <div class="permission-header-text">
+                  <h4>Question</h4>
+                </div>
+              </div>
+              <div class="permission-body">
+                ${questionsHtml}
+              </div>
+              <div class="permission-actions" style="margin-top: 10px;">
+                <button class="permission-btn approve ask-question-submit">Submit</button>
+              </div>
+              <div class="permission-status">
+                <div class="status-dot"></div>
+                <span>Waiting for your answer</span>
+              </div>
+            `;
+            break;
+          }
+
           const questionText =
             parsedArgs?.question ||
             parsedArgs?.prompt ||
@@ -2051,6 +2232,31 @@
           }
         }
         div.innerHTML = renderPlanPanel(payload);
+        break;
+      }
+
+      case "plan_content": {
+        // Plan content from ExitPlanMode - display the plan as a markdown message
+        div.className += " assistant plan-content";
+        let planContent = message.content || "";
+        let filePath = message.file_path || "";
+        
+        // Parse JSON payload if needed
+        if (typeof message.content === "string" && message.content.startsWith("{")) {
+          try {
+            const payload = JSON.parse(message.content);
+            planContent = payload.content || message.content;
+            filePath = payload.file_path || "";
+          } catch (e) {
+            // Use raw content
+          }
+        }
+        
+        const headerHtml = filePath 
+          ? `<div class="plan-content-header"><i class="fal fa-file-alt"></i> ${escapeHtml(filePath)}</div>`
+          : "";
+        
+        div.innerHTML = headerHtml + '<div class="markdown-content">' + renderMarkdown(planContent) + '</div>';
         break;
       }
 
