@@ -924,7 +924,17 @@
         taskStatusState = taskInfo.status_state || "idle";
         // Store resolved path for "Open in..." functionality (worktree_path preferred, project_path fallback)
         currentTaskPath = taskInfo.worktree_path || taskInfo.project_path || null;
+        // Update branch indicator
+        updateBranchIndicator(taskInfo.branch);
         updatePendingUI();
+      }
+    });
+
+    // Handle branch name updates (deferred branch naming after worktree creation)
+    ipcRenderer.on("BranchUpdate", function (e, taskId, branchName) {
+      if (taskId === currentTaskId) {
+        console.log("[ChatLog] BranchUpdate:", branchName);
+        updateBranchIndicator(branchName);
       }
     });
 
@@ -1413,6 +1423,20 @@
       $("#agentName").text(taskInfo.title_summary);
     } else {
       $("#agentName").text(name + " Chat Log");
+    }
+  }
+
+  // Update branch indicator in the status bar
+  function updateBranchIndicator(branchName) {
+    const indicator = document.getElementById("branchIndicator");
+    const nameSpan = document.getElementById("branchName");
+    if (!indicator || !nameSpan) return;
+
+    if (branchName && branchName.trim()) {
+      nameSpan.textContent = branchName.trim();
+      indicator.style.display = "inline-flex";
+    } else {
+      indicator.style.display = "none";
     }
   }
 

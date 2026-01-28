@@ -5242,6 +5242,7 @@ async fn get_task_history(
         created_at,
         worktree_path,
         project_path,
+        branch,
     ) = match &task {
         Some(t) => (
             t.agent_id.clone(),
@@ -5251,11 +5252,13 @@ async fn get_task_history(
             Some(t.created_at),
             t.worktree_path.clone(),
             t.project_path.clone(),
+            t.branch.clone(),
         ),
         None => (
             "Agent".to_string(),
             None,
             "idle".to_string(),
+            None,
             None,
             None,
             None,
@@ -5311,7 +5314,8 @@ async fn get_task_history(
         "status_state": status_state,
         "title_summary": title_summary,
         "worktree_path": worktree_path,
-        "project_path": project_path
+        "project_path": project_path,
+        "branch": branch
     }))
 }
 
