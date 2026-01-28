@@ -89,6 +89,7 @@
     amp: 'images/ampcode.png',
     droid: 'images/factorydroid.png',
     opencode: 'images/opencode.png',
+    'factory-droid': 'images/factorydroid.png',
   };
 
   // Image lightbox functionality
@@ -1346,7 +1347,7 @@
     codeReviewLoading = true;
     var btn = document.getElementById('codeReviewBtn');
     var labelEl = document.getElementById('codeReviewLabel');
-    var originalLabel = labelEl ? labelEl.textContent : 'Code Review';
+    var originalLabel = labelEl ? labelEl.textContent : 'Review';
     if (btn) btn.classList.add('loading');
     if (labelEl) labelEl.innerHTML = 'Gathering\u2026 <span class="code-review-spinner"></span>';
 
