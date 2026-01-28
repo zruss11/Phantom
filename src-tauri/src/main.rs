@@ -2298,6 +2298,30 @@ async fn create_agent_session_internal(
         task_id, session.session_id, selected
     );
 
+    // Emit AddTask to main window so task list updates regardless of which window initiated creation
+    // (e.g., code review from chat log window)
+    if let Some(main_window) = app.get_webview_window("main") {
+        let initial_branch = worktree_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
+        let add_task_payload = serde_json::json!({
+            "ID": task_id,
+            "agent": payload.agent_id,
+            "model": selected,
+            "Status": "Ready",
+            "statusState": "idle",
+            "cost": 0,
+            "worktreePath": worktree_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+            "projectPath": payload.project_path,
+            "branch": initial_branch,
+            "totalTokens": serde_json::Value::Null,
+            "contextWindow": serde_json::Value::Null,
+        });
+        let _ = main_window.emit("AddTask", (&task_id, add_task_payload));
+    }
+
     Ok(CreateAgentResult {
         task_id,
         session_id: session.session_id,
