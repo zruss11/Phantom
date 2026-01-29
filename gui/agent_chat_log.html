@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="vendor/bootstrap.min.css" />
     <link rel="stylesheet" href="fontawesome/fontawesome-all.css" />
     <link rel="stylesheet" href="fonts/fonts.css" />
+    <link rel="stylesheet" href="vendor/xterm.css" />
     <!-- Markdown rendering -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <!-- Syntax highlighting -->
@@ -1309,6 +1310,94 @@
         display: flex;
         gap: 10px;
         align-items: flex-end;
+      }
+
+      .terminal-toggle-button {
+        width: 40px;
+        height: 40px;
+        min-width: 40px;
+        flex-shrink: 0;
+        border-radius: 10px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: linear-gradient(140deg, rgba(28, 26, 32, 0.9), rgba(12, 10, 16, 0.9));
+        color: rgba(255, 255, 255, 0.75);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        box-shadow:
+          0 8px 18px rgba(0, 0, 0, 0.35),
+          inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+      }
+
+      .terminal-toggle-button:hover {
+        color: #f78a97;
+        border-color: rgba(247, 138, 151, 0.45);
+        background: linear-gradient(140deg, rgba(40, 32, 45, 0.95), rgba(18, 14, 20, 0.95));
+      }
+
+      .terminal-toggle-button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+
+      .terminal-panel {
+        height: 0;
+        opacity: 0;
+        transform: translateY(10px);
+        overflow: hidden;
+        background: #1a171c;
+        border-top: 1px solid rgba(255, 255, 255, 0.06);
+        transition:
+          height 0.32s ease,
+          opacity 0.2s ease,
+          transform 0.32s ease;
+      }
+
+      body.terminal-open .terminal-panel {
+        height: 35%;
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      .terminal-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 8px 14px;
+        background: rgba(18, 14, 20, 0.9);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: rgba(255, 255, 255, 0.55);
+      }
+
+      .terminal-title {
+        font-weight: 600;
+      }
+
+      .terminal-path {
+        font-family: "Roboto Mono", monospace;
+        font-size: 10px;
+        color: rgba(255, 255, 255, 0.45);
+        text-transform: none;
+        letter-spacing: 0.02em;
+        max-width: 70%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .terminal-mount {
+        height: calc(100% - 34px);
+        padding: 10px 12px;
+        box-sizing: border-box;
+      }
+
+      .terminal-mount .xterm {
+        height: 100%;
       }
 
       .chat-input {
@@ -3231,6 +3320,14 @@
       <div class="chat-empty">No messages yet</div>
     </div>
 
+    <div class="terminal-panel" id="terminalPanel" aria-hidden="true">
+      <div class="terminal-header">
+        <span class="terminal-title">Terminal</span>
+        <span class="terminal-path" id="terminalPath"></span>
+      </div>
+      <div class="terminal-mount" id="terminalMount"></div>
+    </div>
+
     <div class="pending-actions" id="pendingActions" style="display: none">
       <button class="start-session-btn" id="startSessionBtn">
         <i class="fal fa-play"></i> Start Session &amp; Send
@@ -3240,6 +3337,9 @@
     <div class="chat-input-container">
       <div class="chat-attachment-strip hidden" id="chatAttachmentStrip"></div>
       <div class="chat-input-wrapper">
+        <button class="terminal-toggle-button" id="terminalToggleButton" title="Toggle terminal">
+          <i class="fal fa-terminal"></i>
+        </button>
         <textarea
           class="chat-input"
           id="chatInput"
@@ -3257,6 +3357,8 @@
 
     <script src="js/vendor/jquery.js"></script>
     <script src="js/tauri-bridge.js"></script>
+    <script src="vendor/xterm.min.js"></script>
+    <script src="vendor/xterm-addon-fit.min.js"></script>
     <!-- Slash command autocomplete -->
     <script src="js/slash-commands-data.js"></script>
     <script src="js/slash-commands.js"></script>

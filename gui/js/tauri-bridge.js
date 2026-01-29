@@ -409,7 +409,9 @@
       var args = Array.prototype.slice.call(arguments, 1);
       console.log('[Tauri Bridge] Invoke: ' + channel, args);
       console.log('[Tauri Bridge] tauriInvoke available:', !!tauriInvoke);
+      console.log('[Tauri Bridge] channel value:', JSON.stringify(channel), 'type:', typeof channel);
       if (tauriInvoke) {
+        console.log('[Tauri Bridge] Entered tauriInvoke block');
         if (channel === 'getAgentModels') {
           console.log('[Tauri Bridge] Calling tauriInvoke for get_agent_models with agentId:', args[0]);
           return tauriInvoke('get_agent_models', { agentId: args[0] }).then(function(result) {
@@ -554,6 +556,41 @@
           var reviewPayload = args[0] || {};
           return tauriInvoke('gather_code_review_context', { projectPath: reviewPayload.projectPath || null });
         }
+        if (channel === 'startTerminalSession') {
+          console.log('[Tauri Bridge] Matched startTerminalSession, calling start_terminal_session');
+          var terminalPayload = args[0] || {};
+          return tauriInvoke('start_terminal_session', {
+            taskId: terminalPayload.taskId,
+            cwd: terminalPayload.cwd
+          }).then(function(result) {
+            console.log('[Tauri Bridge] start_terminal_session result:', result);
+            return result;
+          }).catch(function(err) {
+            console.error('[Tauri Bridge] start_terminal_session error:', err);
+            throw err;
+          });
+        }
+        if (channel === 'writeTerminalSession') {
+          var writePayload = args[0] || {};
+          return tauriInvoke('terminal_write', {
+            sessionId: writePayload.sessionId,
+            data: writePayload.data
+          });
+        }
+        if (channel === 'resizeTerminalSession') {
+          var resizePayload = args[0] || {};
+          return tauriInvoke('terminal_resize', {
+            sessionId: resizePayload.sessionId,
+            cols: resizePayload.cols,
+            rows: resizePayload.rows
+          });
+        }
+        if (channel === 'closeTerminalSession') {
+          var closePayload = args[0] || {};
+          return tauriInvoke('terminal_close', {
+            sessionId: closePayload.sessionId
+          });
+        }
         if (channel === 'save_attachment') {
           return tauriInvoke('save_attachment', { payload: args[0] });
         }
@@ -591,6 +628,18 @@
             break;
           case 'getClaudeCommands':
             resolve([]);
+            break;
+          case 'startTerminalSession':
+            resolve({ session_id: 'mock-terminal', cwd: (args[0] && args[0].cwd) || '' });
+            break;
+          case 'writeTerminalSession':
+            resolve();
+            break;
+          case 'resizeTerminalSession':
+            resolve();
+            break;
+          case 'closeTerminalSession':
+            resolve();
             break;
           case 'toggleSkill':
             // Mock toggle - just resolve successfully
