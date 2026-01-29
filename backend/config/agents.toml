@@ -3,6 +3,20 @@ version = 1
 # Max concurrent sessions; UI should also enforce this.
 max_parallel = 5
 
+[container]
+enabled = false
+image_strategy = "local_build"
+runtime = "runc"
+
+[container.resources]
+memory = "4g"
+cpus = 2
+max_pids = 256
+timeout_secs = 3600
+
+[container.network]
+mode = "bridge"
+
 [name_generation]
 provider = "anthropic"
 model = "claude-3-haiku-20240307"
@@ -34,6 +48,7 @@ models = [
 ]
 default_plan_model = "sonnet"
 default_exec_model = "sonnet"
+container_image = "ghcr.io/phantom-harness/agent-claude:latest"
 
 [[agents]]
 id = "codex"
@@ -51,6 +66,7 @@ model_source = "app-server"
 models = []
 default_plan_model = "gpt-5.2-codex"
 default_exec_model = "gpt-5.2-codex"
+container_image = "ghcr.io/phantom-harness/agent-codex:latest"
 
 [[agents]]
 id = "factory-droid"
@@ -78,6 +94,7 @@ models = [
 ]
 default_plan_model = "claude-sonnet-4-5-20250929"
 default_exec_model = "claude-sonnet-4-5-20250929"
+container_image = "ghcr.io/phantom-harness/agent-droid:latest"
 
 # Provider-style aliases (match Emdash2 / tauri wiring)
 [[agents]]
@@ -106,6 +123,7 @@ models = [
 ]
 default_plan_model = "claude-sonnet-4-5-20250929"
 default_exec_model = "claude-sonnet-4-5-20250929"
+container_image = "ghcr.io/phantom-harness/agent-droid:latest"
 
 [[agents]]
 id = "amp"
@@ -122,6 +140,7 @@ model_source = "config"
 models = ["default", "smart", "rush"]
 default_plan_model = "smart"
 default_exec_model = "smart"
+container_image = "ghcr.io/phantom-harness/agent-amp:latest"
 
 [[agents]]
 id = "opencode"
@@ -151,3 +170,4 @@ agents = ["build", "plan", "general", "explore"]
 default_plan_model = "default"
 default_exec_model = "default"
 default_agent = "build"
+container_image = "ghcr.io/phantom-harness/agent-opencode:latest"

@@ -310,6 +310,159 @@ function updateProjectAllowlist(nextAllowlist) {
   renderProjectAllowlist();
 }
 
+function getCreateTaskButtonLabel() {
+  return $("#containerIsolationEnabled").is(":checked")
+    ? "Create Contained Task"
+    : "Create Task";
+}
+
+function updateCreateTaskButtonLabel() {
+  const btn = document.getElementById("createAgentButton");
+  if (!btn) return;
+  if (btn.disabled && btn.textContent === "Creating...") {
+    return;
+  }
+  btn.textContent = getCreateTaskButtonLabel();
+}
+
+window.updateCreateTaskButtonLabel = updateCreateTaskButtonLabel;
+
+function setCreateTaskMessage(message, tone) {
+  const el = document.getElementById("createTaskError");
+  if (!el) return;
+  el.classList.remove("text-danger", "text-warning");
+  if (message && message.trim()) {
+    if (tone === "warning") {
+      el.classList.add("text-warning");
+    } else {
+      el.classList.add("text-danger");
+    }
+    el.textContent = message;
+    el.style.display = "block";
+  } else {
+    el.textContent = "";
+    el.style.display = "none";
+  }
+}
+
+function setCreateTaskError(message) {
+  setCreateTaskMessage(message, "error");
+}
+
+function setCreateTaskWarning(message) {
+  setCreateTaskMessage(message, "warning");
+}
+
+function clearCreateTaskError() {
+  setCreateTaskError("");
+  const btn = document.getElementById("fixWithAgentButton");
+  if (btn) {
+    btn.style.display = "none";
+    btn.disabled = false;
+    btn.textContent = "Fix with Agent";
+  }
+  pendingFixTask = null;
+}
+
+let pendingFixTask = null;
+let lastCreateAgentId = null;
+
+function updateFixTaskButton(worktreePath, agentId) {
+  pendingFixTask = {
+    worktreePath: worktreePath || null,
+    agentId: agentId || lastCreateAgentId || primaryAgentId || activeAgentId || null,
+  };
+  const btn = document.getElementById("fixWithAgentButton");
+  if (btn) {
+    if (pendingFixTask.worktreePath) {
+      btn.style.display = "inline-block";
+      btn.disabled = false;
+    } else {
+      btn.style.display = "none";
+    }
+  }
+}
+
+function showCreateTaskWarning(message, worktreePath, agentId) {
+  setCreateTaskWarning(message);
+  updateFixTaskButton(worktreePath, agentId);
+}
+
+function showCreateTaskConflict(message, worktreePath, agentId) {
+  setCreateTaskError(message);
+  updateFixTaskButton(worktreePath, agentId);
+}
+
+window.setCreateTaskError = setCreateTaskError;
+window.clearCreateTaskError = clearCreateTaskError;
+window.setCreateTaskWarning = setCreateTaskWarning;
+window.showCreateTaskWarning = showCreateTaskWarning;
+window.showCreateTaskConflict = showCreateTaskConflict;
+
+function buildConflictFixPrompt(worktreePath) {
+  return [
+    "You are in a git worktree with conflicts from applying local changes.",
+    "",
+    `Worktree path: ${worktreePath}`,
+    "",
+    "Please:",
+    "1) Resolve all merge conflicts.",
+    "2) Run git status to confirm clean.",
+    "3) Summarize what was changed.",
+    "4) Do NOT start the original task; only fix the conflicts.",
+    "",
+    "If you need to inspect files, do so directly in the worktree.",
+  ].join("\n");
+}
+
+function createFixTaskFromWarning() {
+  if (!pendingFixTask || !pendingFixTask.worktreePath) return;
+  const agentId =
+    pendingFixTask.agentId || primaryAgentId || activeAgentId || "codex";
+  const agentModels = (currentSettings && currentSettings.taskAgentModels) || {};
+  const prefs = agentModels[agentId] || {};
+  const execModel = prefs.execModel || "default";
+  const reasoningEffort = agentId === "codex" ? (prefs.reasoningEffort || "default") : null;
+  const agentMode = agentId === "opencode" ? (prefs.agentMode || "build") : null;
+  const codexMode = agentId === "codex" ? (prefs.agentMode || "default") : null;
+
+  const payload = {
+    agentId: agentId,
+    prompt: buildConflictFixPrompt(pendingFixTask.worktreePath),
+    projectPath: pendingFixTask.worktreePath,
+    baseBranch: null,
+    planMode: false,
+    thinking: true,
+    useWorktree: false,
+    permissionMode: "bypassPermissions",
+    execModel: execModel,
+    reasoningEffort: reasoningEffort !== "default" ? reasoningEffort : null,
+    agentMode: agentMode,
+    codexMode: codexMode !== "default" ? codexMode : null,
+    attachments: [],
+    multiCreate: false,
+  };
+
+  const btn = document.getElementById("fixWithAgentButton");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Creating...";
+  }
+  ipcRenderer.send("CreateAgentSession", payload);
+}
+
+ipcRenderer.on("CreateTaskError", (e, message) => {
+  if (typeof window.setCreateTaskError === "function") {
+    window.setCreateTaskError(message || "Failed to create task.");
+  }
+});
+
+ipcRenderer.on("CreateTaskWarning", (e, message) => {
+  if (typeof window.showCreateTaskWarning === "function") {
+    window.showCreateTaskWarning(message || "Created task with warnings.", null, lastCreateAgentId);
+  }
+});
+
 async function saveSettingsFromUi() {
   let discordBotToken = $("#discordBotToken").val();
   let discordChannelId = $("#discordChannelId").val();
@@ -329,6 +482,7 @@ async function saveSettingsFromUi() {
       agentNotificationsEnabled: $("#agentNotificationsEnabled").is(":checked"),
       agentNotificationStack: $("#agentNotificationStack").is(":checked"),
       aiSummariesEnabled: $("#aiSummariesEnabled").is(":checked"),
+      containerIsolationEnabled: $("#containerIsolationEnabled").is(":checked"),
       taskProjectAllowlist: taskProjectAllowlist,
     },
     collectAuthInputs(),
@@ -345,7 +499,8 @@ async function saveSettingsFromUi() {
 
 // Auto-save settings on any change (inputs and toggles)
 $("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay").on("change", saveSettingsFromUi);
-$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #aiSummariesEnabled").on("change", saveSettingsFromUi);
+$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #aiSummariesEnabled, #containerIsolationEnabled").on("change", saveSettingsFromUi);
+$("#containerIsolationEnabled").on("change", updateCreateTaskButtonLabel);
 
 $(document).on("click", ".project-allowlist-star", function () {
   const path = $(this).data("path");
@@ -1704,6 +1859,30 @@ ipcRenderer.on("socket_event", (e, d) => {
   $("#statusMessage").addClass("red-text");
 });
 
+let footerStatusSticky = false;
+
+function setFooterStatus(message, color) {
+  $("#statusMessage").removeClass("green-text blue-text red-text");
+  if (color) {
+    $("#statusMessage").addClass(`${color}-text`);
+  }
+  $("#statusMessage").text(message);
+}
+
+window.setFooterStatus = setFooterStatus;
+
+ipcRenderer.on("FooterStatus", (e, message, color, sticky) => {
+  footerStatusSticky = !!sticky;
+  setFooterStatus(message, color || "blue");
+});
+
+ipcRenderer.on("FooterStatusClear", () => {
+  footerStatusSticky = false;
+  $("#statusMessage").removeClass("green-text blue-text red-text");
+  $("#statusMessage").addClass("green-text");
+  $("#statusMessage").text("Connected");
+});
+
 window.ghost_uid = remote.getGlobal("user_id");
 window.app_version = remote.getGlobal("app_version");
 window.device_id = remote.getGlobal("machine_id");
@@ -1765,6 +1944,15 @@ async function getSettings() {
     $("#aiSummariesEnabled").prop("checked", true);
   }
 
+  if (settingsPayload.containerIsolationEnabled !== undefined) {
+    $("#containerIsolationEnabled").prop(
+      "checked",
+      !!settingsPayload.containerIsolationEnabled,
+    );
+  } else {
+    $("#containerIsolationEnabled").prop("checked", false);
+  }
+
   if (settingsPayload.taskProjectAllowlist !== undefined) {
     currentSettings.taskProjectAllowlist = Array.isArray(
       settingsPayload.taskProjectAllowlist,
@@ -1775,6 +1963,8 @@ async function getSettings() {
     currentSettings.taskProjectAllowlist = [];
   }
   renderProjectAllowlist();
+
+  updateCreateTaskButtonLabel();
 
 
   document.querySelectorAll("[data-auth-key]").forEach((input) => {
@@ -3112,6 +3302,7 @@ init();
   });
 
   $("#createAgentButton").on("click", async () => {
+    clearCreateTaskError();
     // Get pending attachments if any
     const attachments = window.getPendingAttachments
       ? window.getPendingAttachments()
@@ -3122,6 +3313,7 @@ init();
 
     const selectedAgents = getSelectedAgents();
     const primaryAgent = primaryAgentId || activeAgentId || selectedAgents[0] || "codex";
+    lastCreateAgentId = primaryAgent;
     const multiCreate = selectedAgents.length > 1;
 
     // Ensure current primary agent selections are saved before using prefs
@@ -3191,6 +3383,10 @@ init();
     if (window.clearPendingAttachments) {
       window.clearPendingAttachments();
     }
+  });
+
+  $("#fixWithAgentButton").on("click", () => {
+    createFixTaskFromWarning();
   });
 
   // Cmd+Enter in prompt contenteditable triggers create task

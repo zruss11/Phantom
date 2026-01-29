@@ -1,4 +1,6 @@
 pub mod cli;
+pub mod container;
+pub mod container_build;
 pub mod models;
 
 pub use models::{
@@ -7,3 +9,9 @@ pub use models::{
     get_factory_custom_models, set_session_model, AgentLaunchConfig, EnrichedModelOption,
     ModeOption, ModelOption, ReasoningEffort,
 };
+
+pub use container::{
+    docker_available, ensure_container_image_available, ContainerMount, ContainerRuntime,
+    ContainerRuntimeConfig,
+};
+pub use container_build::ensure_local_image;

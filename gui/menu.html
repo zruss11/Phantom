@@ -300,6 +300,18 @@
                         >
                           Create Task
                         </a>
+                        <div
+                          id="createTaskError"
+                          class="mt-2"
+                          style="display: none;"
+                        ></div>
+                        <button
+                          id="fixWithAgentButton"
+                          class="btn btn-warning btn-sm mt-2"
+                          style="display: none;"
+                        >
+                          Fix with Agent
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -1233,6 +1245,29 @@
                   </div>
                   <small class="text-muted d-block mb-0">
                     Re-check installed agent CLIs and update availability.
+                  </small>
+                </div>
+              </div>
+
+              <!-- Container Isolation Card -->
+              <div class="card settings-card">
+                <div class="card-body">
+                  <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h5 class="settings-card-title mb-0">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px; opacity: 0.7;">
+                        <rect x="3" y="7" width="18" height="13" rx="2"></rect>
+                        <path d="M7 7V4h10v3"></path>
+                      </svg>
+                      Container Isolation
+                    </h5>
+                    <div class="toggle-buttons" data-toggle="container-isolation">
+                      <button class="toggle-button" type="button" data-value="false">Off</button>
+                      <button class="toggle-button" type="button" data-value="true">On</button>
+                      <input type="checkbox" id="containerIsolationEnabled" />
+                    </div>
+                  </div>
+                  <small class="text-muted d-block mb-0">
+                    Run agents inside a local container for stronger isolation.
                   </small>
                 </div>
               </div>

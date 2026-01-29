@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::container::ContainerRuntime;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -58,12 +59,18 @@ impl AcpClient {
         args: &[String],
         cwd: &Path,
         env: &[(String, String)],
+        container: Option<std::sync::Arc<ContainerRuntime>>,
     ) -> Result<Self> {
-        let mut cmd = Command::new(command);
-        cmd.args(args)
-            .current_dir(cwd)
-            .envs(env.to_vec())
-            .stdin(Stdio::piped())
+        let mut cmd = if let Some(container) = container.as_ref() {
+            container.exec_command(command, args)
+        } else {
+            let mut cmd = Command::new(command);
+            cmd.args(args)
+                .current_dir(cwd)
+                .envs(env.to_vec());
+            cmd
+        };
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -187,12 +194,21 @@ impl AcpClient {
 }
 
 impl CodexAppServerClient {
-    async fn start(cwd: &Path, env: &[(String, String)]) -> Result<Self> {
-        let mut cmd = Command::new("codex");
-        cmd.args(["app-server"])
-            .current_dir(cwd)
-            .envs(env.to_vec())
-            .stdin(Stdio::piped())
+    async fn start(
+        cwd: &Path,
+        env: &[(String, String)],
+        container: Option<std::sync::Arc<ContainerRuntime>>,
+    ) -> Result<Self> {
+        let mut cmd = if let Some(container) = container.as_ref() {
+            container.exec_command("codex", &["app-server".to_string()])
+        } else {
+            let mut cmd = Command::new("codex");
+            cmd.args(["app-server"])
+                .current_dir(cwd)
+                .envs(env.to_vec());
+            cmd
+        };
+        cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -966,6 +982,8 @@ pub struct AgentProcessClient {
     args: Vec<String>,
     env: Vec<(String, String)>,
     cwd: PathBuf,
+    runtime_cwd: Option<PathBuf>,
+    container: Option<std::sync::Arc<ContainerRuntime>>,
     model: std::sync::Mutex<Option<String>>,
     reasoning_effort: std::sync::Mutex<Option<String>>,
     permission_mode: std::sync::Mutex<Option<String>>,
@@ -1175,13 +1193,53 @@ impl AgentProcessClient {
         cwd: &Path,
         env: &[(String, String)],
     ) -> Result<Self> {
+        Self::spawn_with_container(command, args, cwd, env, None).await
+    }
+
+    pub async fn spawn_with_container(
+        command: &str,
+        args: &[String],
+        cwd: &Path,
+        env: &[(String, String)],
+        container: Option<std::sync::Arc<ContainerRuntime>>,
+    ) -> Result<Self> {
+        let mut command_path = command.to_string();
+        let mut container_command: Option<String> = None;
+        let mut runtime_cwd: Option<PathBuf> = None;
+        if let Some(container_ref) = container.as_ref() {
+            runtime_cwd = Some(
+                container_ref
+                    .map_host_path(cwd)
+                    .ok_or_else(|| anyhow::anyhow!("failed to map cwd into container"))?,
+            );
+            let target = Path::new(command);
+            if target.is_absolute() {
+                if let Some(mapped) = container_ref.map_host_path(target) {
+                    container_command = Some(mapped.to_string_lossy().to_string());
+                }
+            } else if target.components().count() > 1 {
+                let resolved = cwd.join(target);
+                if let Some(mapped) = container_ref.map_host_path(&resolved) {
+                    container_command = Some(mapped.to_string_lossy().to_string());
+                }
+            }
+            if let Some(mapped) = container_command.as_ref() {
+                command_path = mapped.clone();
+            } else if target.is_absolute() {
+                if let Some(name) = target.file_name().and_then(|s| s.to_str()) {
+                    command_path = name.to_string();
+                }
+            }
+        }
+
         // Codex uses the JSON-RPC app-server protocol (not stream-json prompts).
         let codex_app_server = if std::path::Path::new(command)
             .file_name()
             .and_then(|s| s.to_str())
             == Some("codex")
         {
-            let client = CodexAppServerClient::start(cwd, env).await?;
+            let runtime_path = runtime_cwd.as_deref().unwrap_or(cwd);
+            let client = CodexAppServerClient::start(runtime_path, env, container.clone()).await?;
             client.initialize().await?;
             Some(std::sync::Arc::new(client))
         } else {
@@ -1196,7 +1254,10 @@ impl AgentProcessClient {
                 .unwrap_or("");
             let is_acp = filename.contains("claude-code-acp");
             if is_acp {
-                let client = AcpClient::start(command, args, cwd, env).await?;
+                let runtime_path = runtime_cwd.as_deref().unwrap_or(cwd);
+                let client =
+                    AcpClient::start(&command_path, args, runtime_path, env, container.clone())
+                        .await?;
                 Some(TokioMutex::new(client))
             } else {
                 None
@@ -1204,10 +1265,12 @@ impl AgentProcessClient {
         };
 
         Ok(Self {
-            command: command.to_string(),
+            command: command_path,
             args: args.to_vec(),
             env: env.to_vec(),
             cwd: cwd.to_path_buf(),
+            runtime_cwd,
+            container,
             model: std::sync::Mutex::new(None),
             reasoning_effort: std::sync::Mutex::new(None),
             permission_mode: std::sync::Mutex::new(None),
@@ -1233,6 +1296,10 @@ impl AgentProcessClient {
         if let Some(acp) = &self.acp_client {
             let mut acp = acp.lock().await;
             let _ = acp.shutdown().await;
+        }
+        if let Some(container) = self.container.as_ref() {
+            let _ = container.stop(5).await;
+            let _ = container.remove(true).await;
         }
         Ok(())
     }
@@ -1265,9 +1332,10 @@ impl AgentProcessClient {
     }
 
     pub async fn session_new(&self, _cwd: &str) -> Result<NewSessionResult> {
+        let runtime_cwd = self.runtime_cwd.as_deref().unwrap_or(&self.cwd);
         if let Some(acp) = &self.acp_client {
             let mut acp = acp.lock().await;
-            return acp.session_new(&self.cwd).await;
+            return acp.session_new(runtime_cwd).await;
         }
         if let Some(codex) = &self.codex_app_server {
             let model = self.model.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -1283,7 +1351,7 @@ impl AgentProcessClient {
                 .clone();
             let thread_id = codex
                 .thread_start(
-                    &self.cwd,
+                    runtime_cwd,
                     model.as_deref(),
                     reasoning_effort.as_deref(),
                     codex_mode.as_deref(),
@@ -1313,6 +1381,7 @@ impl AgentProcessClient {
         _servers: Vec<String>,
     ) -> Result<LoadSessionResult> {
         if let Some(codex) = &self.codex_app_server {
+            let runtime_cwd = self.runtime_cwd.as_deref().unwrap_or(&self.cwd);
             let model = self.model.lock().unwrap_or_else(|e| e.into_inner()).clone();
             let reasoning_effort = self
                 .reasoning_effort
@@ -1327,7 +1396,7 @@ impl AgentProcessClient {
             let thread_id = codex
                 .thread_resume(
                     session_id,
-                    &self.cwd,
+                    runtime_cwd,
                     model.as_deref(),
                     reasoning_effort.as_deref(),
                     codex_mode.as_deref(),
@@ -1462,12 +1531,13 @@ impl AgentProcessClient {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();
+            let runtime_cwd = self.runtime_cwd.as_deref().unwrap_or(&self.cwd);
             let (text, usage) = codex
                 .turn_start_streaming(
                     session_id,
                     content,
                     model.as_deref(),
-                    &self.cwd,
+                    runtime_cwd,
                     reasoning_effort.as_deref(),
                     codex_mode.as_deref(),
                     on_update,
@@ -1495,7 +1565,11 @@ impl AgentProcessClient {
             });
         }
 
-        let mut cmd = Command::new(&self.command);
+        let mut cmd = if let Some(container) = self.container.as_ref() {
+            container.exec_command(&self.command, &[])
+        } else {
+            Command::new(&self.command)
+        };
         let mut args = self.args.clone();
 
         // Not every CLI supports Phantom's stream-json parsing.
@@ -1619,14 +1693,25 @@ impl AgentProcessClient {
         // Keep temp image files alive until the subprocess completes.
         let mut temp_images: Vec<tempfile::TempPath> = Vec::new();
         let mut attachment_markdown = String::new();
+        let temp_dir = self.container.as_ref().and_then(|c| c.shared_temp_dir());
+        let map_container_path = |path: &Path| -> PathBuf {
+            if let Some(container) = self.container.as_ref() {
+                container
+                    .map_host_path(path)
+                    .unwrap_or_else(|| path.to_path_buf())
+            } else {
+                path.to_path_buf()
+            }
+        };
         if cmd_name == "claude" {
             let mut index = 1;
             for image in images {
-                if let Some(path) = write_image_temp(image)? {
+                if let Some(path) = write_image_temp(image, temp_dir.as_deref())? {
                     if attachment_markdown.is_empty() {
                         attachment_markdown.push_str("\n\nAttached images:\n");
                     }
-                    let file_url = file_url_for_path(&path);
+                    let mapped = map_container_path(path.as_ref());
+                    let file_url = file_url_for_path(&mapped);
                     attachment_markdown.push_str(&format!("\n![Image {}]({})", index, file_url));
                     index += 1;
                     temp_images.push(path);
@@ -1634,9 +1719,10 @@ impl AgentProcessClient {
             }
         } else {
             for image in images {
-                if let Some(path) = write_image_temp(image)? {
+                if let Some(path) = write_image_temp(image, temp_dir.as_deref())? {
+                    let mapped = map_container_path(path.as_ref());
                     args.push("--image".to_string());
-                    args.push(path.to_string_lossy().to_string());
+                    args.push(mapped.to_string_lossy().to_string());
                     temp_images.push(path);
                 }
             }
@@ -1698,11 +1784,12 @@ impl AgentProcessClient {
                 .join(" ")
         );
 
-        cmd.args(&args)
-            .current_dir(&self.cwd)
-            .envs(self.env.clone())
-            // Prevent the CLI from waiting on any stdin interaction.
-            .stdin(Stdio::null())
+        cmd.args(&args);
+        if self.container.is_none() {
+            cmd.current_dir(&self.cwd).envs(self.env.clone());
+        }
+        // Prevent the CLI from waiting on any stdin interaction.
+        cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -2099,7 +2186,10 @@ fn ensure_output_format(args: &mut Vec<String>) {
     args.push("stream-json".to_string());
 }
 
-fn write_image_temp(image: &ImageContent) -> Result<Option<tempfile::TempPath>> {
+fn write_image_temp(
+    image: &ImageContent,
+    temp_dir: Option<&Path>,
+) -> Result<Option<tempfile::TempPath>> {
     use base64::Engine;
     use std::io::Write;
 
@@ -2116,11 +2206,19 @@ fn write_image_temp(image: &ImageContent) -> Result<Option<tempfile::TempPath>> 
         .context("failed to decode image data")?;
 
     // Use tempfile so the file is automatically removed when dropped.
-    let mut f = tempfile::Builder::new()
-        .prefix("phantom-image-")
-        .suffix(&format!(".{extension}"))
-        .tempfile()
-        .context("failed to create temp image file")?;
+    let mut builder = tempfile::Builder::new();
+    let suffix = format!(".{extension}");
+    builder.prefix("phantom-image-").suffix(&suffix);
+    let mut f = if let Some(dir) = temp_dir {
+        std::fs::create_dir_all(dir).context("failed to create image temp dir")?;
+        builder
+            .tempfile_in(dir)
+            .context("failed to create temp image file")?
+    } else {
+        builder
+            .tempfile()
+            .context("failed to create temp image file")?
+    };
 
     f.write_all(&data)
         .context("failed to write temp image file")?;

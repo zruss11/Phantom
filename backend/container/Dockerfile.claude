@@ -1,0 +1,10 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+USER root
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+ENV PATH=/home/agent/.claude/bin:/home/agent/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+USER agent
+WORKDIR /workspace

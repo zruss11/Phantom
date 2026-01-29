@@ -11,7 +11,8 @@
     "createUpdaterArtifacts": true,
     "resources": [
       "bin/node-darwin-arm64",
-      "../backend/config/agents.toml"
+      "../backend/config/agents.toml",
+      "../backend/container"
     ],
     "icon": [
       "icons/32x32.png",

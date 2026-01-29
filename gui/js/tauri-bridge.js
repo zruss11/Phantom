@@ -29,6 +29,7 @@
       anthropicApiKey: '',
       codexAuthMethod: '',
       claudeAuthMethod: '',
+      containerIsolationEnabled: false,
       taskProjectAllowlist: []
     },
     projectPath: '~',
@@ -96,6 +97,24 @@
           tauriInvoke('create_agent_session', { payload: payload })
             .then(function(result) {
               console.log('[Tauri Bridge] CreateAgentSession result:', result);
+              if (result && result.warningKind === 'worktree_conflict') {
+                if (typeof window.showCreateTaskConflict === 'function') {
+                  window.showCreateTaskConflict(
+                    result.warning || 'Uncommitted changes could not be applied.',
+                    result.warningWorktreePath || result.worktreePath || null,
+                    null
+                  );
+                } else if (typeof window.showCreateTaskWarning === 'function') {
+                  window.showCreateTaskWarning(
+                    result.warning || 'Uncommitted changes could not be applied.',
+                    result.warningWorktreePath || result.worktreePath || null,
+                    null
+                  );
+                } else if (typeof window.setCreateTaskError === 'function') {
+                  window.setCreateTaskError(result.warning || 'Uncommitted changes could not be applied.');
+                }
+                return;
+              }
               var agentTask = {
                 ID: result.task_id,
                 agent: payload.agentId || 'codex',
@@ -110,25 +129,54 @@
               // Emit AddTask event - handler will append to DOM
               emitEvent('AddTask', null, result.task_id, agentTask);
 
+              if (result.warning && typeof window.showCreateTaskWarning === 'function') {
+                window.showCreateTaskWarning(
+                  result.warning,
+                  result.warningWorktreePath || result.worktreePath || null,
+                  null
+                );
+              }
+
               // Wait for DOM to settle before navigating (double RAF pattern)
               // First RAF waits for paint, second RAF ensures DOM mutations are complete
-              requestAnimationFrame(function() {
+              if (!result.warning) {
                 requestAnimationFrame(function() {
-                  if (typeof switchToPage === 'function') {
-                    switchToPage('viewTasksPage');
-                  } else {
-                    // Fallback: click the nav element
-                    var navEl = document.querySelector('[data-page="viewTasksPage"]');
-                    if (navEl) navEl.click();
-                  }
+                  requestAnimationFrame(function() {
+                    if (typeof switchToPage === 'function') {
+                      switchToPage('viewTasksPage');
+                    } else {
+                      // Fallback: click the nav element
+                      var navEl = document.querySelector('[data-page="viewTasksPage"]');
+                      if (navEl) navEl.click();
+                    }
+                  });
                 });
-              });
+              }
             })
             .catch(function(err) {
               console.error('[Tauri Bridge] create_agent_session error:', err);
-              // Show notification if available
-              if (typeof sendNotification === 'function') {
-                sendNotification('Failed to create task: ' + (err.message || err), 'red');
+              if (typeof window.setCreateTaskError === 'function') {
+                var rawMessage = err && err.message ? err.message : String(err || '');
+                var displayMessage = rawMessage || 'Failed to create task.';
+                if (rawMessage && rawMessage.indexOf('Applied with conflicts') !== -1) {
+                  displayMessage = 'Uncommitted changes could not be applied cleanly. Resolve conflicts in the new worktree, then retry.';
+                  if (rawMessage.indexOf('Worktree:') !== -1) {
+                    displayMessage += ' ' + rawMessage.split('Worktree:').pop().trim();
+                  }
+                } else if (rawMessage && rawMessage.indexOf('Patch applied partially') !== -1) {
+                  displayMessage = 'Uncommitted changes were only partially applied. Resolve changes in the worktree, then retry.';
+                  if (rawMessage.indexOf('Worktree:') !== -1) {
+                    displayMessage += ' ' + rawMessage.split('Worktree:').pop().trim();
+                  }
+                }
+                window.setCreateTaskError(displayMessage);
+              } else {
+                var fallbackMessage = (err && err.message) ? err.message : String(err || 'Failed to create task.');
+                var errorEl = document.getElementById('createTaskError');
+                if (errorEl) {
+                  errorEl.textContent = fallbackMessage;
+                  errorEl.style.display = fallbackMessage ? 'block' : 'none';
+                }
               }
             })
             .finally(function() {
@@ -138,7 +186,11 @@
                 createSessionInProgress = false;
                 if (btn) {
                   btn.disabled = false;
-                  btn.textContent = 'Create Task';
+                  if (typeof window.updateCreateTaskButtonLabel === 'function') {
+                    window.updateCreateTaskButtonLabel();
+                  } else {
+                    btn.textContent = 'Create Task';
+                  }
                 }
               }
             });

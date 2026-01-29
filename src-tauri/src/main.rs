@@ -22,6 +22,8 @@ use phantom_harness_backend::{
     get_agent_modes as backend_get_agent_modes, get_codex_models as backend_get_codex_models,
     get_codex_models_enriched as backend_get_codex_models_enriched,
     get_codex_modes as backend_get_codex_modes, get_factory_custom_models, AgentLaunchConfig,
+    docker_available, ensure_container_image_available, ensure_local_image, ContainerMount,
+    ContainerRuntime, ContainerRuntimeConfig,
     EnrichedModelOption, ModeOption, ModelOption,
 };
 use serde::{Deserialize, Serialize};
@@ -270,7 +272,41 @@ struct AgentsConfig {
     #[allow(dead_code)]
     max_parallel: Option<u32>,
     #[serde(default)]
+    container: Option<ContainerConfig>,
+    #[serde(default)]
     agents: Vec<AgentConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct ContainerConfig {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    image_strategy: Option<String>,
+    #[serde(default)]
+    runtime: Option<String>,
+    #[serde(default)]
+    resources: Option<ContainerResourcesConfig>,
+    #[serde(default)]
+    network: Option<ContainerNetworkConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct ContainerResourcesConfig {
+    #[serde(default)]
+    memory: Option<String>,
+    #[serde(default)]
+    cpus: Option<f64>,
+    #[serde(default)]
+    max_pids: Option<i64>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct ContainerNetworkConfig {
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -294,6 +330,10 @@ struct AgentConfig {
     model_source: Option<String>,
     #[serde(default)]
     models: Vec<String>,
+    #[serde(default)]
+    container_image: Option<String>,
+    #[serde(default)]
+    container_override: Option<ContainerResourcesConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -380,6 +420,9 @@ struct Settings {
     // AI-powered summarization for task titles and status
     #[serde(rename = "aiSummariesEnabled")]
     ai_summaries_enabled: Option<bool>,
+    // Container isolation toggle
+    #[serde(rename = "containerIsolationEnabled")]
+    container_isolation_enabled: Option<bool>,
     // Task creation settings (sticky between restarts)
     #[serde(rename = "taskProjectPath")]
     task_project_path: Option<String>,
@@ -645,6 +688,52 @@ fn config_path() -> PathBuf {
     }
 }
 
+fn container_assets_dir() -> PathBuf {
+    #[cfg(debug_assertions)]
+    {
+        return PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("backend")
+            .join("container");
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        return std::env::current_exe()
+            .ok()
+            .and_then(|exe| {
+                exe.parent().map(|dir| {
+                    if cfg!(target_os = "macos") {
+                        let direct = dir.join("../Resources/backend/container");
+                        if direct.exists() {
+                            return direct;
+                        }
+                        let nested = dir.join("../Resources/container");
+                        if nested.exists() {
+                            return nested;
+                        }
+                        let updater_path = dir.join("../Resources/_up_/backend/container");
+                        if updater_path.exists() {
+                            return updater_path;
+                        }
+                        dir.join("../Resources/backend/container")
+                    } else {
+                        let direct = dir.join("backend/container");
+                        if direct.exists() {
+                            return direct;
+                        }
+                        let nested = dir.join("container");
+                        if nested.exists() {
+                            return nested;
+                        }
+                        direct
+                    }
+                })
+            })
+            .unwrap_or_else(|| PathBuf::from("backend/container"));
+    }
+}
+
 fn settings_path() -> Result<PathBuf, String> {
     let base = dirs::config_dir().ok_or_else(|| "config dir unavailable".to_string())?;
     let dir = base.join("phantom-harness");
@@ -757,6 +846,348 @@ fn auth_env_for(agent_id: &str, settings: &Settings) -> Vec<(String, String)> {
         env.retain(|(key, _)| key != "ANTHROPIC_API_KEY");
     }
     env
+}
+
+fn emit_footer_status(app: &AppHandle, message: &str, color: &str, sticky: bool) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("FooterStatus", (message, color, sticky));
+    }
+}
+
+fn clear_footer_status(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("FooterStatusClear", ());
+    }
+}
+
+fn container_enabled(settings: &Settings, config: &AgentsConfig) -> bool {
+    if let Some(enabled) = settings.container_isolation_enabled {
+        return enabled;
+    }
+    config
+        .container
+        .as_ref()
+        .and_then(|c| c.enabled)
+        .unwrap_or(false)
+}
+
+fn build_container_runtime_config(
+    image: String,
+    agent: &AgentConfig,
+    container: &ContainerConfig,
+    workspace_root: &Path,
+    cwd: &Path,
+    env: &[(String, String)],
+    task_id: &str,
+    extra_mounts: Vec<ContainerMount>,
+) -> Result<ContainerRuntimeConfig, String> {
+    let runtime = container.runtime.clone();
+    let network_mode = container
+        .network
+        .as_ref()
+        .and_then(|n| n.mode.clone());
+
+    let base_resources = container.resources.clone().unwrap_or_default();
+    let override_resources = agent.container_override.clone().unwrap_or_default();
+
+    let memory = override_resources
+        .memory
+        .or(base_resources.memory)
+        .or(Some("4g".to_string()));
+    let cpus = override_resources.cpus.or(base_resources.cpus).or(Some(2.0));
+    let max_pids = override_resources
+        .max_pids
+        .or(base_resources.max_pids)
+        .or(Some(256));
+
+    let workdir = if let Ok(relative) = cwd.strip_prefix(workspace_root) {
+        if relative.as_os_str().is_empty() {
+            "/workspace".to_string()
+        } else {
+            format!("/workspace/{}", relative.to_string_lossy())
+        }
+    } else {
+        "/workspace".to_string()
+    };
+
+    let name = format!(
+        "phantom-{}",
+        task_id
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+            .collect::<String>()
+    );
+
+    let mut mounts = vec![ContainerMount {
+        host_path: workspace_root.to_path_buf(),
+        container_path: "/workspace".to_string(),
+        read_only: false,
+    }];
+    mounts.extend(extra_mounts);
+
+    let filtered_env: Vec<(String, String)> = env
+        .iter()
+        .filter(|(key, _)| key != "PATH")
+        .cloned()
+        .collect();
+
+    Ok(ContainerRuntimeConfig {
+        image,
+        workdir,
+        mounts,
+        env: filtered_env,
+        runtime,
+        network_mode,
+        memory,
+        cpus,
+        pids_limit: max_pids,
+        user: None,
+        read_only: false,
+        tmpfs: vec!["/tmp:size=100M,mode=1777".to_string()],
+        extra_hosts: Vec::new(),
+        name: Some(name),
+    })
+}
+
+fn container_auth_mounts(agent_id: &str, settings: &Settings) -> Result<Vec<ContainerMount>, String> {
+    let mut mounts = Vec::new();
+    let home = dirs::home_dir().ok_or_else(|| "home dir unavailable".to_string())?;
+
+    let make_mount = |host_path: PathBuf, container_path: String| -> ContainerMount {
+        ContainerMount {
+            host_path,
+            container_path,
+            read_only: false,
+        }
+    };
+
+    let first_existing_mount = |candidates: Vec<(PathBuf, String)>| -> Option<ContainerMount> {
+        for (host_path, container_path) in candidates {
+            if host_path.exists() {
+                return Some(make_mount(host_path, container_path));
+            }
+        }
+        None
+    };
+
+    match agent_id {
+        "codex" => {
+            if settings.openai_api_key.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+                return Ok(mounts);
+            }
+            if settings.codex_auth_method.as_deref() == Some("chatgpt") {
+                let auth_dir = home.join(".codex");
+                if auth_dir.exists() {
+                    mounts.push(make_mount(auth_dir, "/home/agent/.codex".to_string()));
+                    return Ok(mounts);
+                }
+                let auth_file = home.join(".codex").join("auth.json");
+                if auth_file.exists() {
+                    mounts.push(make_mount(
+                        auth_file,
+                        "/home/agent/.codex/auth.json".to_string(),
+                    ));
+                    return Ok(mounts);
+                }
+                return Err(
+                    "Codex sign-in required. Sign in with ChatGPT in Settings, then retry."
+                        .to_string(),
+                );
+            }
+            return Err(
+                "Codex auth not configured. Add an OpenAI API key or sign in with ChatGPT."
+                    .to_string(),
+            );
+        }
+        "claude-code" => {
+            if settings
+                .anthropic_api_key
+                .as_ref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false)
+            {
+                return Ok(mounts);
+            }
+            if settings.claude_auth_method.as_deref() == Some("oauth") {
+                let config_path = home.join(".claude.json");
+                if config_path.exists() {
+                    mounts.push(make_mount(
+                        config_path,
+                        "/home/agent/.claude.json".to_string(),
+                    ));
+                    return Ok(mounts);
+                }
+                return Err(
+                    "Claude Code sign-in required. Sign in with Claude in Settings, then retry."
+                        .to_string(),
+                );
+            }
+            return Err(
+                "Claude auth not configured. Add an Anthropic API key or sign in with Claude."
+                    .to_string(),
+            );
+        }
+        "droid" | "factory-droid" => {
+            let factory_dir = home.join(".factory");
+            if factory_dir.exists() {
+                mounts.push(make_mount(
+                    factory_dir,
+                    "/home/agent/.factory".to_string(),
+                ));
+            } else {
+                return Err(
+                    "Factory Droid sign-in required. Sign in to Factory Droid on this machine, then retry."
+                        .to_string(),
+                );
+            }
+        }
+        "amp" => {
+            if let Some(mount) = first_existing_mount(vec![
+                (home.join(".amp"), "/home/agent/.amp".to_string()),
+                (home.join(".amp.json"), "/home/agent/.amp.json".to_string()),
+                (
+                    home.join(".config").join("amp"),
+                    "/home/agent/.config/amp".to_string(),
+                ),
+            ]) {
+                mounts.push(mount);
+            } else {
+                return Err(
+                    "Amp sign-in required. Sign in to Amp on this machine, then retry."
+                        .to_string(),
+                );
+            }
+        }
+        "opencode" => {
+            if let Some(mount) = first_existing_mount(vec![
+                (home.join(".opencode"), "/home/agent/.opencode".to_string()),
+                (
+                    home.join(".config").join("opencode"),
+                    "/home/agent/.config/opencode".to_string(),
+                ),
+                (
+                    home.join(".opencode.json"),
+                    "/home/agent/.opencode.json".to_string(),
+                ),
+            ]) {
+                mounts.push(mount);
+            } else {
+                return Err(
+                    "OpenCode sign-in required. Sign in to OpenCode on this machine, then retry."
+                        .to_string(),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    Ok(mounts)
+}
+
+async fn maybe_spawn_container_runtime(
+    agent: &AgentConfig,
+    state: &AppState,
+    settings: &Settings,
+    workspace_root: &Path,
+    cwd: &Path,
+    env: &[(String, String)],
+    task_id: &str,
+    app: Option<&AppHandle>,
+) -> Result<Option<std::sync::Arc<ContainerRuntime>>, String> {
+    if !container_enabled(settings, &state.config) {
+        return Ok(None);
+    }
+    let Some(container_cfg) = state.config.container.as_ref() else {
+        return Err(
+            "Container isolation is enabled but container config is missing.".to_string(),
+        );
+    };
+    if !docker_available() {
+        return Err(
+            "Container isolation is enabled but Docker/OrbStack is not running.".to_string(),
+        );
+    }
+
+    let strategy = container_cfg
+        .image_strategy
+        .as_deref()
+        .unwrap_or("local_build");
+    if let Some(app) = app {
+        emit_footer_status(app, "Preparing container...", "blue", true);
+    }
+    let app_for_status = app.cloned();
+    let image_result = match strategy {
+        "registry" => {
+            let image = agent.container_image.as_ref().ok_or_else(|| {
+                "Container isolation is enabled but this agent has no container image configured."
+                    .to_string()
+            })?;
+            ensure_container_image_available(image, |msg| {
+                if let Some(app) = app_for_status.as_ref() {
+                    emit_footer_status(app, msg, "blue", true);
+                }
+            })
+            .await?;
+            Ok(image.clone())
+        }
+        _ => {
+            let container_dir = container_assets_dir();
+            ensure_local_image(&agent.id, &container_dir, |msg| {
+                if let Some(app) = app_for_status.as_ref() {
+                    emit_footer_status(app, msg, "blue", true);
+                }
+            })
+            .await
+        }
+    };
+    if let Some(app) = app {
+        clear_footer_status(app);
+    }
+    let image = image_result?;
+
+    let extra_mounts = container_auth_mounts(&agent.id, settings)?;
+
+    let config = build_container_runtime_config(
+        image,
+        agent,
+        container_cfg,
+        workspace_root,
+        cwd,
+        env,
+        task_id,
+        extra_mounts,
+    )?;
+
+    let runtime = match ContainerRuntime::start(config.clone()).await {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            let message = err.to_string();
+            if strategy != "registry" && message.contains("No such image") {
+                if let Some(app) = app {
+                    emit_footer_status(app, "Building container...", "blue", true);
+                }
+                let app_for_status = app.cloned();
+                let container_dir = container_assets_dir();
+                let rebuilt_image = ensure_local_image(&agent.id, &container_dir, |msg| {
+                    if let Some(app) = app_for_status.as_ref() {
+                        emit_footer_status(app, msg, "blue", true);
+                    }
+                })
+                .await?;
+                if let Some(app) = app {
+                    clear_footer_status(app);
+                }
+                let mut retry_config = config.clone();
+                retry_config.image = rebuilt_image;
+                ContainerRuntime::start(retry_config)
+                    .await
+                    .map_err(|err| format!("container start failed: {}", err))?
+            } else {
+                return Err(format!("container start failed: {}", err));
+            }
+        }
+    };
+    Ok(Some(std::sync::Arc::new(runtime)))
 }
 
 fn default_path_entries() -> Vec<String> {
@@ -1317,9 +1748,11 @@ async fn spawn_agent_client(
     cwd: &Path,
     env: &[(String, String)],
     args: &[String],
+    container: Option<std::sync::Arc<ContainerRuntime>>,
 ) -> Result<Arc<AgentProcessClient>, String> {
     let command = resolve_agent_command(agent);
-    match AgentProcessClient::spawn(&command, args, cwd, env).await {
+    let cleanup_container = container.clone();
+    match AgentProcessClient::spawn_with_container(&command, args, cwd, env, container).await {
         Ok(client) => {
             tracing::info!(agent_id = %agent.id, command = %command, "Agent CLI spawned");
             Ok(Arc::new(client))
@@ -1331,6 +1764,10 @@ async fn spawn_agent_client(
                 error = %err,
                 "Failed to spawn agent CLI"
             );
+            if let Some(container) = cleanup_container {
+                let _ = container.stop(5).await;
+                let _ = container.remove(true).await;
+            }
             Err(err.to_string())
         }
     }
@@ -1346,13 +1783,14 @@ async fn reconnect_session_with_context(
     task: &db::TaskRecord,
     cwd: &Path,
     env: &[(String, String)],
+    container: Option<std::sync::Arc<ContainerRuntime>>,
     db: &Arc<StdMutex<rusqlite::Connection>>,
 ) -> Result<(Arc<AgentProcessClient>, String, bool), String> {
     let cwd_str = cwd.to_string_lossy().to_string();
     let args = substitute_args(&agent.args, &cwd_str);
 
     // Spawn and initialize Agent client
-    let client = spawn_agent_client(agent, cwd, env, &args).await?;
+    let client = spawn_agent_client(agent, cwd, env, &args, container).await?;
     let _capabilities = client
         .initialize("Phantom Harness", "0.1.0")
         .await
@@ -2035,6 +2473,11 @@ struct CreateAgentResult {
     session_id: String,
     #[serde(rename = "worktreePath")]
     worktree_path: Option<String>,
+    warning: Option<String>,
+    #[serde(rename = "warningKind")]
+    warning_kind: Option<String>,
+    #[serde(rename = "warningWorktreePath")]
+    warning_worktree_path: Option<String>,
 }
 
 #[tauri::command]
@@ -2045,7 +2488,25 @@ async fn create_agent_session(
     state: State<'_, AppState>,
 ) -> Result<CreateAgentResult, String> {
     let emit_to_main = window.label() != "main";
-    create_agent_session_internal(app, payload, state.inner(), emit_to_main).await
+    let result =
+        create_agent_session_internal(app.clone(), payload, state.inner(), emit_to_main).await;
+    if emit_to_main {
+        match &result {
+            Ok(ok) => {
+                if let Some(warning) = ok.warning.as_ref() {
+                    if let Some(main_window) = app.get_webview_window("main") {
+                        let _ = main_window.emit("CreateTaskWarning", warning.clone());
+                    }
+                }
+            }
+            Err(err) => {
+                if let Some(main_window) = app.get_webview_window("main") {
+                    let _ = main_window.emit("CreateTaskError", err.clone());
+                }
+            }
+        }
+    }
+    result
 }
 
 async fn create_agent_session_internal(
@@ -2061,6 +2522,8 @@ async fn create_agent_session_internal(
     let mut cwd = source_path.clone();
     let mut worktree_path: Option<PathBuf> = None;
     let settings = state.settings.lock().await.clone();
+    let mut worktree_warning: Option<String> = None;
+    let mut worktree_warning_path: Option<PathBuf> = None;
 
     // Variables for deferred branch rename (populated if worktree is created)
     let mut deferred_branch_rename: Option<(PathBuf, String, PathBuf)> = None; // (repo_root, animal_name, workspace_path)
@@ -2104,7 +2567,19 @@ async fn create_agent_session_internal(
             // Create worktree with animal name as initial branch (non-blocking)
             // The branch will be renamed asynchronously after LLM generates the proper name
             worktree::create_worktree(repo_root, &workspace_path, &animal_name, &base_ref).await?;
-            worktree::apply_uncommitted_changes(sync_source, &workspace_path).await?;
+            if let Err(err) = worktree::apply_uncommitted_changes(sync_source, &workspace_path).await
+            {
+                let mut message = if err.contains("Applied with conflicts") {
+                    "We couldn't create the task because your uncommitted changes could not be applied cleanly. Resolve conflicts in the worktree, then retry.".to_string()
+                } else if err.contains("Patch applied partially") {
+                    "We couldn't create the task because your uncommitted changes were only partially applied. Resolve changes in the worktree, then retry.".to_string()
+                } else {
+                    "We couldn't create the task because your uncommitted changes could not be applied. Resolve changes in the worktree, then retry.".to_string()
+                };
+                message.push_str(&format!(" Worktree: {}", workspace_path.to_string_lossy()));
+                worktree_warning = Some(message);
+                worktree_warning_path = Some(workspace_path.clone());
+            }
 
             // Store info for deferred branch rename
             deferred_branch_rename = Some((repo_root.clone(), animal_name, workspace_path.clone()));
@@ -2128,7 +2603,21 @@ async fn create_agent_session_internal(
         worktree_path = Some(workspace_path);
     }
 
-    let cwd_str = cwd.to_string_lossy().to_string();
+    if let Some(warning) = worktree_warning.as_ref() {
+        return Ok(CreateAgentResult {
+            task_id: String::new(),
+            session_id: String::new(),
+            worktree_path: worktree_warning_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            warning: Some(warning.clone()),
+            warning_kind: Some("worktree_conflict".to_string()),
+            warning_worktree_path: worktree_warning_path
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+        });
+    }
+
     let overrides = auth_env_for(&payload.agent_id, &settings);
     let allow_missing = (payload.agent_id == "codex"
         && settings.codex_auth_method.as_deref() == Some("chatgpt"))
@@ -2138,8 +2627,30 @@ async fn create_agent_session_internal(
                 Some("cli") | Some("oauth")
             ));
     let env = build_env(&agent.required_env, &overrides, allow_missing)?;
+    let task_id = format!(
+        "task-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        uuid::Uuid::new_v4()
+            .to_string()
+            .split('-')
+            .next()
+            .unwrap_or("0000")
+    );
+    let workspace_root = worktree_path.clone().unwrap_or_else(|| source_path.clone());
+    let container_runtime = maybe_spawn_container_runtime(
+        agent,
+        state,
+        &settings,
+        &workspace_root,
+        &cwd,
+        &env,
+        &task_id,
+        Some(&app),
+    )
+    .await?;
+    let cwd_str = cwd.to_string_lossy().to_string();
     let args = substitute_args(&agent.args, &cwd_str);
-    let client = spawn_agent_client(agent, &cwd, &env, &args)
+    let client = spawn_agent_client(agent, &cwd, &env, &args, container_runtime)
         .await
         .map_err(|err| format!("spawn failed: {}", err))?;
     client
@@ -2233,16 +2744,6 @@ async fn create_agent_session_internal(
             .await
             .map_err(|err| format!("set model failed: {}", err))?;
     }
-
-    let task_id = format!(
-        "task-{}-{}",
-        chrono::Utc::now().timestamp_millis(),
-        uuid::Uuid::new_v4()
-            .to_string()
-            .split('-')
-            .next()
-            .unwrap_or("0000")
-    );
 
     // Spawn Claude usage watcher for real-time cost tracking
     let claude_watcher = if payload.agent_id == "claude-code" {
@@ -2457,6 +2958,9 @@ async fn create_agent_session_internal(
         task_id,
         session_id: session.session_id,
         worktree_path: worktree_path.map(|path| path.to_string_lossy().to_string()),
+        warning: worktree_warning.clone(),
+        warning_kind: None,
+        warning_worktree_path: None,
     })
 }
 
@@ -2781,6 +3285,19 @@ async fn start_task_internal(
             }
         };
 
+        let workspace_root = cwd.clone();
+        let container_runtime = maybe_spawn_container_runtime(
+            agent,
+            state,
+            &settings,
+            &workspace_root,
+            &cwd,
+            &env,
+            &task_id,
+            Some(&app),
+        )
+        .await?;
+
         // Reconnect with context restoration (hybrid: session/load or history injection)
         println!(
             "[Harness] Reconnecting Agent session for start_task: {}",
@@ -2789,7 +3306,16 @@ async fn start_task_internal(
         emit_status("Reconnecting...", "yellow", "running")?;
 
         let (client, session_id, used_session_load) =
-            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
+            match reconnect_session_with_context(
+                agent,
+                &task,
+                &cwd,
+                &env,
+                container_runtime,
+                &state.db,
+            )
+            .await
+            {
                 Ok(result) => result,
                 Err(e) => {
                     let error_msg = format!("Failed to reconnect: {}", e);
@@ -3418,8 +3944,29 @@ async fn start_task_internal(
                         }
                     };
 
+                    let workspace_root = cwd.clone();
+                    let container_runtime = maybe_spawn_container_runtime(
+                        agent,
+                        state,
+                        &settings,
+                        &workspace_root,
+                        &cwd,
+                        &env,
+                        &task_id,
+                        Some(&app),
+                    )
+                    .await?;
+
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await
+                    match reconnect_session_with_context(
+                        agent,
+                        &task,
+                        &cwd,
+                        &env,
+                        container_runtime,
+                        &state.db,
+                    )
+                    .await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(
@@ -6049,6 +6596,19 @@ pub(crate) async fn send_chat_message_internal(
             }
         };
 
+        let workspace_root = cwd.clone();
+        let container_runtime = maybe_spawn_container_runtime(
+            agent,
+            state,
+            &settings,
+            &workspace_root,
+            &cwd,
+            &env,
+            &task_id,
+            Some(&app),
+        )
+        .await?;
+
         // Reconnect with context restoration (hybrid: session/load or history injection)
         println!("[Harness] Reconnecting Agent session for task: {}", task_id);
         if let Some(window) = app.get_webview_window(&window_label) {
@@ -6056,7 +6616,16 @@ pub(crate) async fn send_chat_message_internal(
         }
 
         let (client, session_id, used_session_load) =
-            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
+            match reconnect_session_with_context(
+                agent,
+                &task,
+                &cwd,
+                &env,
+                container_runtime,
+                &state.db,
+            )
+            .await
+            {
                 Ok(result) => result,
                 Err(e) => {
                     let error_msg = format!("Failed to reconnect: {}", e);
@@ -6536,8 +7105,29 @@ pub(crate) async fn send_chat_message_internal(
                         }
                     };
 
+                    let workspace_root = cwd.clone();
+                    let container_runtime = maybe_spawn_container_runtime(
+                        agent,
+                        state,
+                        &settings,
+                        &workspace_root,
+                        &cwd,
+                        &env,
+                        &task_id,
+                        Some(&app),
+                    )
+                    .await?;
+
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await
+                    match reconnect_session_with_context(
+                        agent,
+                        &task,
+                        &cwd,
+                        &env,
+                        container_runtime,
+                        &state.db,
+                    )
+                    .await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(
@@ -7062,6 +7652,7 @@ fn main() {
             AgentsConfig {
                 version: Some(1),
                 max_parallel: Some(5),
+                container: None,
                 agents: Vec::new(),
             }
         }
