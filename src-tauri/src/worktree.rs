@@ -344,6 +344,26 @@ pub async fn unique_branch_name(repo_path: &PathBuf, desired: &str) -> Result<St
     Err("Could not find unique branch name after 100 attempts".to_string())
 }
 
+/// Generate a unique temporary branch name by appending -v2, -v3, etc. if the branch exists.
+/// Unlike `unique_branch_name`, this does not sanitize or require branch prefixes,
+/// making it suitable for animal-name branches used during worktree creation.
+pub async fn unique_temp_branch_name(repo_path: &PathBuf, base: &str) -> Result<String, String> {
+    // Check if base name is available
+    if !branch_exists(repo_path, base).await? {
+        return Ok(base.to_string());
+    }
+
+    // Try with -v2, -v3, etc. suffix (matches workspace naming convention)
+    for i in 2..1000 {
+        let candidate = format!("{}-v{}", base, i);
+        if !branch_exists(repo_path, &candidate).await? {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Could not find unique temporary branch name after 1000 attempts".to_string())
+}
+
 /// Get a list of local branch names.
 pub async fn list_branches(repo_path: &PathBuf) -> Result<Vec<String>, String> {
     let output = run_git_command(repo_path, &["branch", "--format=%(refname:short)"]).await?;

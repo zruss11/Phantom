@@ -2717,13 +2717,19 @@ async fn create_agent_session_internal(
                 base_branch.clone()
             };
 
-            // Create worktree with animal name as initial branch (non-blocking)
+            // Ensure the temporary branch name is unique (handles leftover branches from previous sessions)
+            let unique_animal_name =
+                worktree::unique_temp_branch_name(repo_root, &animal_name).await?;
+
+            // Create worktree with unique animal name as initial branch (non-blocking)
             // The branch will be renamed asynchronously after LLM generates the proper name
-            worktree::create_worktree(repo_root, &workspace_path, &animal_name, &base_ref).await?;
+            worktree::create_worktree(repo_root, &workspace_path, &unique_animal_name, &base_ref)
+                .await?;
             worktree::apply_uncommitted_changes(sync_source, &workspace_path).await?;
 
             // Store info for deferred branch rename
-            deferred_branch_rename = Some((repo_root.clone(), animal_name, workspace_path.clone()));
+            deferred_branch_rename =
+                Some((repo_root.clone(), unique_animal_name, workspace_path.clone()));
 
             // Preserve subdirectory path for monorepos
             if let Ok(relative) = source_path.strip_prefix(repo_root) {
