@@ -3,7 +3,7 @@
 //! This module provides utilities for creating and managing git worktrees,
 //! enabling agents to work in isolated branches without affecting the main working tree.
 
-use crate::utils::resolve_gh_binary;
+use crate::utils::{resolve_gh_binary, resolve_git_binary};
 use rand::seq::SliceRandom;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -203,7 +203,8 @@ async fn run_git_command_raw(
     repo_path: &PathBuf,
     args: &[&str],
 ) -> Result<std::process::Output, String> {
-    let mut cmd = Command::new("git");
+    let git_path = resolve_git_binary()?;
+    let mut cmd = Command::new(&git_path);
     cmd.args(args)
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -226,7 +227,8 @@ async fn run_git_command_raw_with_input(
     args: &[&str],
     input: &[u8],
 ) -> Result<std::process::Output, String> {
-    let mut cmd = Command::new("git");
+    let git_path = resolve_git_binary()?;
+    let mut cmd = Command::new(&git_path);
     cmd.args(args)
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -290,7 +292,9 @@ async fn git_empty_tree_hash(repo_path: &PathBuf) -> Result<String, String> {
 
 /// Check if a branch exists locally.
 pub async fn branch_exists(repo_path: &PathBuf, branch: &str) -> Result<bool, String> {
-    let result = run_git_command(
+    // Use run_git_command_raw to distinguish between "branch doesn't exist" (exit code 1)
+    // and actual errors (git not found, timeout, etc.)
+    let output = run_git_command_raw(
         repo_path,
         &[
             "show-ref",
@@ -299,11 +303,10 @@ pub async fn branch_exists(repo_path: &PathBuf, branch: &str) -> Result<bool, St
             &format!("refs/heads/{}", branch),
         ],
     )
-    .await;
-    match result {
-        Ok(_) => Ok(true),
-        Err(_) => Ok(false), // show-ref returns error if branch doesn't exist
-    }
+    .await?; // Propagate actual errors (git not found, timeout, etc.)
+
+    // Exit code 0 = branch exists, exit code 1 = branch doesn't exist
+    Ok(output.status.success())
 }
 
 /// Check if a remote branch exists.
