@@ -1248,6 +1248,58 @@ input:checked + .slider:before {
   background: #2e242c !important;
 }
 
+/* Modal dark theme styling */
+#app .modal-content {
+  background: #2e242c;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+#app .modal-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 1rem 1.25rem;
+}
+
+#app .modal-header .modal-title {
+  color: #fff;
+  font-weight: 600;
+}
+
+#app .modal-header .close {
+  color: rgba(255, 255, 255, 0.6);
+  text-shadow: none;
+  opacity: 1;
+  font-size: 1.5rem;
+  font-weight: 300;
+}
+
+#app .modal-header .close:hover {
+  color: #fff;
+}
+
+#app .modal-body {
+  color: rgba(255, 255, 255, 0.85);
+  padding: 1.25rem;
+}
+
+#app .modal-body p {
+  margin-bottom: 0.75rem;
+}
+
+#app .modal-body .text-muted {
+  color: rgba(255, 255, 255, 0.4) !important;
+}
+
+#app .modal-footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  padding: 1rem 1.25rem;
+}
+
+#app .modal-backdrop.show {
+  opacity: 0.7;
+}
+
 #app .btn.btn-sm {
   padding-left: 0.9rem;
   padding-right: 0.9rem;
