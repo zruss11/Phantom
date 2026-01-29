@@ -1045,6 +1045,7 @@ function getSizes(s, e, sizeArray) {
 let tasksOnPage = [];
 let taskDataMap = {}; // Store full task data for sorting
 let startingTasks = {}; // Guard against rapid Start clicks per task
+let pendingDeleteTaskId = null; // Task ID awaiting deletion confirmation
 let displayIdCounter = 1; // Sequential display IDs
 let currentSortState = { column: null, direction: "asc" };
 let pendingStatusUpdates = {}; // Queue status updates for tasks not yet in DOM
@@ -1385,7 +1386,25 @@ function StopTask(id) {
   }
 }
 
-function DeleteTask(id) {
+async function DeleteTask(id) {
+  try {
+    const result = await ipcRenderer.invoke('checkTaskUncommittedChanges', id);
+
+    if (result && result.has_changes) {
+      pendingDeleteTaskId = id;
+      const pathEl = document.getElementById('deleteTaskWorktreePath');
+      if (pathEl) pathEl.textContent = result.worktree_path || '';
+      $('#deleteTaskWarningModal').modal('show');
+    } else {
+      performTaskDeletion(id);
+    }
+  } catch (err) {
+    console.error('[Harness] Error checking uncommitted changes:', err);
+    performTaskDeletion(id); // Fail-open: allow deletion if check fails
+  }
+}
+
+function performTaskDeletion(id) {
   ipcRenderer.send("DeleteTask", id);
   $(`#task-${id}`).remove();
   let index = tasksOnPage.indexOf(id);
@@ -1415,6 +1434,15 @@ $("#tasks-table").on("click", "a.play, a.stop, a.view-log, a.delete", function (
     ViewTaskLog(taskId);
   } else if (action === "delete") {
     DeleteTask(taskId);
+  }
+});
+
+// Delete task confirmation modal handler
+$('#confirmDeleteTask').on('click', function() {
+  $('#deleteTaskWarningModal').modal('hide');
+  if (pendingDeleteTaskId) {
+    performTaskDeletion(pendingDeleteTaskId);
+    pendingDeleteTaskId = null;
   }
 });
 

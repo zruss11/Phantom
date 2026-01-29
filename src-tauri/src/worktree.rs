@@ -686,6 +686,13 @@ pub async fn rename_worktree_branch(
     Ok(())
 }
 
+/// Check if a worktree has uncommitted changes (staged, unstaged, or untracked).
+/// Returns Ok(true) if there are uncommitted changes, Ok(false) if clean.
+pub async fn has_uncommitted_changes(worktree_path: &PathBuf) -> Result<bool, String> {
+    let output = run_git_command(worktree_path, &["status", "--porcelain"]).await?;
+    Ok(!output.trim().is_empty())
+}
+
 /// Remove a worktree.
 ///
 /// This removes both the worktree directory and its git metadata.

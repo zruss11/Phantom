@@ -5242,6 +5242,41 @@ fn load_tasks(state: State<'_, AppState>) -> Result<Vec<db::TaskRecord>, String>
     db::list_tasks(&conn).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UncommittedChangesResult {
+    has_changes: bool,
+    worktree_path: Option<String>,
+}
+
+#[tauri::command]
+async fn check_task_uncommitted_changes(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<UncommittedChangesResult, String> {
+    // Fetch task from database
+    let task_snapshot = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
+        tasks.into_iter().find(|t| t.id == task_id)
+    };
+
+    // If no task or no worktree, no changes to worry about
+    let Some(task) = task_snapshot else {
+        return Ok(UncommittedChangesResult { has_changes: false, worktree_path: None });
+    };
+    let Some(path) = task.worktree_path else {
+        return Ok(UncommittedChangesResult { has_changes: false, worktree_path: None });
+    };
+
+    let worktree_path = PathBuf::from(&path);
+    if !worktree_path.exists() {
+        return Ok(UncommittedChangesResult { has_changes: false, worktree_path: Some(path) });
+    }
+
+    let has_changes = worktree::has_uncommitted_changes(&worktree_path).await?;
+    Ok(UncommittedChangesResult { has_changes, worktree_path: Some(path) })
+}
+
 #[tauri::command]
 async fn delete_task(
     task_id: String,
@@ -7290,6 +7325,7 @@ fn main() {
             check_claude_auth,
             claude_rate_limits,
             load_tasks,
+            check_task_uncommitted_changes,
             delete_task,
             get_task_history,
             open_task_directory,

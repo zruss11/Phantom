@@ -488,6 +488,9 @@
         if (channel === 'loadTasks') {
           return tauriInvoke('load_tasks');
         }
+        if (channel === 'checkTaskUncommittedChanges') {
+          return tauriInvoke('check_task_uncommitted_changes', { taskId: args[0] });
+        }
         if (channel === 'getCachedModels') {
           return tauriInvoke('get_cached_models', { agentId: args[0] });
         }
