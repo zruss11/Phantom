@@ -15,3 +15,5 @@ pub use container::{
     ContainerRuntimeConfig,
 };
 pub use container_build::ensure_local_image;
+// Re-export CancellationToken for use in Tauri app
+pub use tokio_util::sync::CancellationToken;

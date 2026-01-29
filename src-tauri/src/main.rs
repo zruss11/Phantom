@@ -24,7 +24,7 @@ use phantom_harness_backend::{
     get_codex_modes as backend_get_codex_modes, get_factory_custom_models, AgentLaunchConfig,
     docker_available, ensure_container_image_available, ensure_local_image, ContainerMount,
     ContainerRuntime, ContainerRuntimeConfig,
-    EnrichedModelOption, ModeOption, ModelOption,
+    CancellationToken, EnrichedModelOption, ModeOption, ModelOption,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -495,6 +495,8 @@ struct SessionHandle {
     /// Real-time cost watcher for Claude Code sessions (None for other agents)
     #[allow(dead_code)] // Kept for future graceful shutdown
     claude_watcher: Option<claude_usage_watcher::WatcherHandle>,
+    /// Token to signal cancellation of current generation without killing the session
+    cancel_token: CancellationToken,
 }
 
 type SharedSessionHandle = Arc<Mutex<SessionHandle>>;
@@ -2766,6 +2768,7 @@ async fn create_agent_session_internal(
         pending_attachments: payload.attachments.clone(),
         messages: Vec::new(),
         claude_watcher,
+        cancel_token: CancellationToken::new(),
     };
 
     let mut sessions = state.sessions.lock().await;
@@ -3388,6 +3391,7 @@ async fn start_task_internal(
             pending_attachments: Vec::new(),
             messages: Vec::new(),
             claude_watcher,
+            cancel_token: CancellationToken::new(),
         };
 
         let handle_ref = Arc::new(Mutex::new(handle));
@@ -3397,7 +3401,7 @@ async fn start_task_internal(
     };
 
     let user_timestamp = chrono::Utc::now().to_rfc3339();
-    let (agent_id, model, prompt, attachments, client, session_id) = {
+    let (agent_id, model, prompt, attachments, client, session_id, cancel_token) = {
         let mut handle = handle_ref.lock().await;
         let prompt = handle
             .pending_prompt
@@ -3409,6 +3413,8 @@ async fn start_task_internal(
             "content": prompt,
             "timestamp": user_timestamp
         }));
+        // Create a fresh cancellation token for this generation
+        handle.cancel_token = CancellationToken::new();
         (
             handle.agent_id.clone(),
             handle.model.clone(),
@@ -3416,6 +3422,7 @@ async fn start_task_internal(
             attachments,
             handle.client.clone(),
             handle.session_id.clone(),
+            handle.cancel_token.clone(),
         )
     };
 
@@ -3867,16 +3874,27 @@ async fn start_task_internal(
 
         let result = if images.is_empty() {
             client
-                .session_prompt_streaming(&session_id, &prompt, |update| {
-                    let _ = stream_tx.send(update);
-                })
+                .session_prompt_streaming_with_cancellation(
+                    &session_id,
+                    &prompt,
+                    |update| {
+                        let _ = stream_tx.send(update);
+                    },
+                    Some(&cancel_token),
+                )
                 .await
         } else {
             println!("[Harness] Sending prompt with {} image(s)", images.len());
             client
-                .session_prompt_streaming_with_images(&session_id, &prompt, &images, |update| {
-                    let _ = stream_tx.send(update);
-                })
+                .session_prompt_streaming_with_images_and_cancellation(
+                    &session_id,
+                    &prompt,
+                    &images,
+                    |update| {
+                        let _ = stream_tx.send(update);
+                    },
+                    Some(&cancel_token),
+                )
                 .await
         };
 
@@ -4223,6 +4241,61 @@ async fn stop_task(
     }
     if let Some(main_window) = app.get_webview_window("main") {
         let _ = main_window.emit("StatusUpdate", (&task_id, "Stopped", "red", "idle"));
+    }
+
+    Ok(())
+}
+
+/// Soft stop: cancel the current generation without killing the session.
+/// This allows users to stop the current response but continue chatting later.
+#[tauri::command]
+async fn soft_stop_task(
+    task_id: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    println!("[Harness] soft_stop_task: task_id={}", task_id);
+
+    // Get the session handle without removing it (session stays alive)
+    let handle_ref = {
+        let sessions = state.sessions.lock().await;
+        sessions.get(&task_id).cloned()
+    };
+
+    if let Some(handle_ref) = handle_ref {
+        // Cancel the current generation
+        let handle = handle_ref.lock().await;
+        handle.cancel_token.cancel();
+        println!("[Harness] Cancelled generation for task_id={}", task_id);
+    } else {
+        println!(
+            "[Harness] soft_stop_task: no session found for task_id={}",
+            task_id
+        );
+    }
+
+    // Remove from running_tasks so new messages can be sent
+    {
+        let mut running = state.running_tasks.lock().await;
+        running.remove(&task_id);
+    }
+
+    // Update DB status to "Ready" (not "Stopped") since session is still alive
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::update_task_status(&conn, &task_id, "Ready", "idle");
+    }
+
+    // Emit GenerationStopped event to chat window
+    let window_label = format!(
+        "chat-{}",
+        task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
+    );
+    if let Some(window) = app.get_webview_window(&window_label) {
+        let _ = window.emit("GenerationStopped", &task_id);
+    }
+    if let Some(main_window) = app.get_webview_window("main") {
+        let _ = main_window.emit("StatusUpdate", (&task_id, "Ready", "#04d885", "idle"));
     }
 
     Ok(())
@@ -5716,6 +5789,41 @@ fn load_tasks(state: State<'_, AppState>) -> Result<Vec<db::TaskRecord>, String>
     db::list_tasks(&conn).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UncommittedChangesResult {
+    has_changes: bool,
+    worktree_path: Option<String>,
+}
+
+#[tauri::command]
+async fn check_task_uncommitted_changes(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<UncommittedChangesResult, String> {
+    // Fetch task from database
+    let task_snapshot = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
+        tasks.into_iter().find(|t| t.id == task_id)
+    };
+
+    // If no task or no worktree, no changes to worry about
+    let Some(task) = task_snapshot else {
+        return Ok(UncommittedChangesResult { has_changes: false, worktree_path: None });
+    };
+    let Some(path) = task.worktree_path else {
+        return Ok(UncommittedChangesResult { has_changes: false, worktree_path: None });
+    };
+
+    let worktree_path = PathBuf::from(&path);
+    if !worktree_path.exists() {
+        return Ok(UncommittedChangesResult { has_changes: false, worktree_path: Some(path) });
+    }
+
+    let has_changes = worktree::has_uncommitted_changes(&worktree_path).await?;
+    Ok(UncommittedChangesResult { has_changes, worktree_path: Some(path) })
+}
+
 #[tauri::command]
 async fn delete_task(
     task_id: String,
@@ -6693,6 +6801,7 @@ pub(crate) async fn send_chat_message_internal(
             pending_attachments: Vec::new(),
             messages: Vec::new(),
             claude_watcher,
+            cancel_token: CancellationToken::new(),
         };
 
         let handle_ref = Arc::new(Mutex::new(handle));
@@ -6702,7 +6811,7 @@ pub(crate) async fn send_chat_message_internal(
     };
 
     let user_timestamp = chrono::Utc::now().to_rfc3339();
-    let (agent_id, model, client, session_id, effective_message) = {
+    let (agent_id, model, client, session_id, effective_message, cancel_token) = {
         let mut handle = handle_ref.lock().await;
         let effective_message = handle
             .pending_prompt
@@ -6713,12 +6822,15 @@ pub(crate) async fn send_chat_message_internal(
             "content": message,
             "timestamp": user_timestamp
         }));
+        // Create a fresh cancellation token for this generation
+        handle.cancel_token = CancellationToken::new();
         (
             handle.agent_id.clone(),
             handle.model.clone(),
             handle.client.clone(),
             handle.session_id.clone(),
             effective_message,
+            handle.cancel_token.clone(),
         )
     };
 
@@ -7004,20 +7116,26 @@ pub(crate) async fn send_chat_message_internal(
 
         let result = if images.is_empty() {
             client
-                .session_prompt_streaming(&session_id, &effective_message, |update| {
-                    let _ = stream_tx.send(update);
-                })
+                .session_prompt_streaming_with_cancellation(
+                    &session_id,
+                    &effective_message,
+                    |update| {
+                        let _ = stream_tx.send(update);
+                    },
+                    Some(&cancel_token),
+                )
                 .await
         } else {
             println!("[Harness] send_chat_message with {} image(s)", images.len());
             client
-                .session_prompt_streaming_with_images(
+                .session_prompt_streaming_with_images_and_cancellation(
                     &session_id,
                     &effective_message,
                     &images,
                     |update| {
                         let _ = stream_tx.send(update);
                     },
+                    Some(&cancel_token),
                 )
                 .await
         };
@@ -7777,6 +7895,7 @@ fn main() {
             create_agent_session,
             start_task,
             stop_task,
+            soft_stop_task,
             start_pending_prompt,
             get_settings,
             save_settings,
@@ -7797,6 +7916,7 @@ fn main() {
             check_claude_auth,
             claude_rate_limits,
             load_tasks,
+            check_task_uncommitted_changes,
             delete_task,
             get_task_history,
             open_task_directory,
