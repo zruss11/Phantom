@@ -24,6 +24,53 @@
     }
   }
 
+  // Detect intermediate "thinking" messages that should be hidden
+  // These are short status updates like "Let me look at..." before tool calls
+  function isIntermediateThinkingMessage(content) {
+    if (!content || typeof content !== 'string') return false;
+
+    const trimmed = content.trim();
+
+    // Must be relatively short (under 300 chars) to be considered intermediate
+    if (trimmed.length > 300) return false;
+
+    // Check if it ends with a colon (common pattern for "Let me X:")
+    const endsWithColon = trimmed.endsWith(':');
+
+    // Common patterns for intermediate thinking messages
+    const thinkingPatterns = [
+      /^(now )?let me (look|check|examine|search|read|find|explore|see|review|analyze|investigate)/i,
+      /^(now )?i('ll| will) (look|check|examine|search|read|find|explore|see|review|analyze|investigate)/i,
+      /^(first|next),? (let me|i('ll| will))/i,
+      /^looking at /i,
+      /^checking /i,
+      /^searching /i,
+      /^reading /i,
+    ];
+
+    for (const pattern of thinkingPatterns) {
+      if (pattern.test(trimmed)) {
+        return true;
+      }
+    }
+
+    // If it's short, ends with colon, and mentions files/code - likely intermediate
+    if (endsWithColon && trimmed.length < 150) {
+      const fileCodePatterns = [
+        /\.(js|ts|rs|py|rb|go|java|html|css|json|md|toml|yaml|yml)\b/i,
+        /the (file|code|function|module|class|implementation|source)/i,
+        /understand (how|what|the)/i,
+      ];
+      for (const pattern of fileCodePatterns) {
+        if (pattern.test(trimmed)) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
   // Render markdown content safely
   function renderMarkdown(content) {
     if (!content) return '';
@@ -212,7 +259,7 @@
     currentTaskId = getTaskIdFromUrl();
 
     if (currentTaskId) {
-      $("#taskId .task-id-text").text("Task ID: " + currentTaskId);
+      $("#taskId .task-id-value").text(currentTaskId);
     }
 
     // Request task info from main process
@@ -303,6 +350,34 @@
       copyToClipboard(currentTaskId, this);
     });
 
+    const branchIndicator = document.getElementById("branchIndicator");
+    if (branchIndicator) {
+      const copyBranchName = () => {
+        const nameSpan = document.getElementById("branchName");
+        const branchName = nameSpan ? nameSpan.textContent.trim() : "";
+        const copyValue =
+          branchName && branchName !== "-"
+            ? branchName
+            : (currentTaskPath || "");
+        if (!copyValue) return;
+        copyToClipboard(copyValue);
+        flashCopiedState(branchIndicator);
+      };
+
+      branchIndicator.addEventListener("click", function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        copyBranchName();
+      });
+
+      branchIndicator.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          copyBranchName();
+        }
+      });
+    }
+
     const logSwitcherWrap = $("#logSwitcherWrap");
     const logSwitcher = $("#logSwitcher");
     const logSwitcherLabel = $("#logSwitcherLabel");
@@ -387,6 +462,8 @@
         codeReviewWrap.removeClass("open");
         codeReviewBtn.attr("aria-expanded", false);
       }
+      // Close plan send menus
+      $(".plan-send-wrapper.open").removeClass("open");
     });
 
     $(document).on("keydown", function (e) {
@@ -399,6 +476,33 @@
           codeReviewWrap.removeClass("open");
           codeReviewBtn.attr("aria-expanded", false);
         }
+        // Close plan send menus
+        $(".plan-send-wrapper.open").removeClass("open");
+      }
+    });
+
+    // --- Plan Send Button Handlers (for delegation) ---
+    // Plan send button toggle
+    $("#chatContainer").on("click", ".plan-send-btn", function(e) {
+      e.stopPropagation();
+      var wrapper = $(this).closest(".plan-send-wrapper");
+      // Close any other open menus
+      $(".plan-send-wrapper.open").not(wrapper).removeClass("open");
+      wrapper.toggleClass("open");
+    });
+
+    // Plan send menu item selection
+    $("#chatContainer").on("click", ".plan-send-item", function(e) {
+      e.stopPropagation();
+      var agentId = $(this).data("agent");
+      var wrapper = $(this).closest(".plan-send-wrapper");
+      var planMessage = $(this).closest(".plan-content");
+      var planContent = planMessage.data("planContent");
+
+      wrapper.removeClass("open");
+
+      if (agentId && planContent) {
+        initiatePlanDelegation(agentId, planContent);
       }
     });
 
@@ -530,6 +634,36 @@
       const content = header.siblings(".tool-section-content");
       header.toggleClass("collapsed");
       content.toggleClass("hidden");
+    });
+
+    // Tool bundle summary toggle (expand/collapse bundle details)
+    $("#chatContainer").on("click", ".tool-bundle-summary", function () {
+      const summary = $(this);
+      const bundle = summary.closest(".tool-call-bundle");
+      const details = bundle.find(".tool-bundle-details");
+      bundle.toggleClass("expanded");
+      details.toggleClass("hidden");
+      const chevron = summary.find(".tool-bundle-toggle");
+      if (bundle.hasClass("expanded")) {
+        chevron.removeClass("fa-chevron-down").addClass("fa-chevron-up");
+      } else {
+        chevron.removeClass("fa-chevron-up").addClass("fa-chevron-down");
+      }
+    });
+
+    // Tool bundle item header toggle (expand/collapse individual tool details)
+    $("#chatContainer").on("click", ".tool-bundle-item-header", function () {
+      const header = $(this);
+      const item = header.closest(".tool-bundle-item");
+      const details = item.find(".tool-item-details");
+      item.toggleClass("item-expanded");
+      details.toggleClass("hidden");
+      const chevron = header.find(".tool-bundle-item-toggle");
+      if (item.hasClass("item-expanded")) {
+        chevron.removeClass("fa-chevron-down").addClass("fa-chevron-up");
+      } else {
+        chevron.removeClass("fa-chevron-up").addClass("fa-chevron-down");
+      }
     });
 
     // Permission request: raw input toggle (delegated)
@@ -990,7 +1124,7 @@
     // Receive chat log updates
     ipcRenderer.on("ChatLogUpdate", function (e, taskId, message) {
       if (taskId === currentTaskId) {
-        addMessage(message);
+        addMessageWithBundling(message);
       }
     });
 
@@ -999,8 +1133,10 @@
       if (taskId === currentTaskId && Array.isArray(messages)) {
         clearMessages();
         messages.forEach(function (msg) {
-          addMessage(msg, false);
+          addMessageWithBundling(msg, false);
         });
+        // Finalize any remaining bundle after batch load
+        finalizeToolBundle();
         scrollToBottom();
       }
     });
@@ -1082,6 +1218,157 @@
   let streamingItemId = null; // Track by itemId for Codex app-server
   let lastFinalizedContent = ""; // Track last finalized content to prevent duplicates
 
+  // Tool call bundle state - groups consecutive tool calls into collapsible bundle
+  let toolCallBundle = {
+    calls: [],      // Array of {name, arguments, result, status}
+    element: null,  // The bundle DOM element
+    expanded: false, // Whether bundle is expanded
+    iconNames: new Set() // Track unique tool names for icon deduplication
+  };
+
+  // Create a new tool call bundle element
+  function createToolBundle() {
+    const container = $("#chatContainer");
+    container.find(".chat-empty").remove();
+
+    const div = document.createElement("div");
+    div.className = "chat-message tool-call-bundle pending";
+    div.innerHTML = `
+      <div class="tool-bundle-summary">
+        <div class="tool-bundle-icons"></div>
+        <span class="tool-bundle-label">0 Tool Calls</span>
+        <i class="fal fa-chevron-down tool-bundle-toggle"></i>
+      </div>
+      <div class="tool-bundle-details"></div>
+    `;
+    container.append(div);
+    toolCallBundle.element = div;
+    toolCallBundle.calls = [];
+    toolCallBundle.expanded = false;
+    return div;
+  }
+
+  // Add a tool call to the current bundle
+  function addToToolBundle(toolCall) {
+    if (!toolCallBundle.element) {
+      createToolBundle();
+      toolCallBundle.iconNames = new Set();
+    }
+
+    const call = {
+      name: toolCall.name || "Tool",
+      arguments: toolCall.arguments || "",
+      result: null,
+      status: "pending"
+    };
+    toolCallBundle.calls.push(call);
+
+    // Update the bundle summary
+    const bundleEl = $(toolCallBundle.element);
+    const count = toolCallBundle.calls.length;
+    bundleEl.find(".tool-bundle-label").text(count + " Tool Call" + (count !== 1 ? "s" : ""));
+
+    // Add icon to the icon strip (only if unique)
+    const iconHtml = getToolIconHtml(call.name);
+    if (!toolCallBundle.iconNames.has(call.name)) {
+      toolCallBundle.iconNames.add(call.name);
+      const iconWrapper = document.createElement("span");
+      iconWrapper.className = "tool-bundle-icon";
+      iconWrapper.innerHTML = iconHtml;
+      bundleEl.find(".tool-bundle-icons").append(iconWrapper);
+    }
+
+    // Add item to the details section
+    const formattedArgs = formatArgs(call.arguments);
+    const hasArgs = formattedArgs && formattedArgs.trim() !== "{}";
+    const itemHtml = `
+      <div class="tool-bundle-item pending" data-index="${count - 1}">
+        <div class="tool-bundle-item-header">
+          <span class="tool-bundle-item-icon">${iconHtml}</span>
+          <span class="tool-bundle-item-name">${escapeHtml(call.name)}</span>
+          <span class="tool-bundle-item-status"><i class="fal fa-spinner-third fa-spin"></i></span>
+          <i class="fal fa-chevron-down tool-bundle-item-toggle"></i>
+        </div>
+        <div class="tool-item-details hidden">
+          ${hasArgs ? `
+          <div class="tool-section tool-args-section">
+            <div class="tool-section-header" data-section="args">
+              <span class="tool-section-label">ARGUMENTS</span>
+            </div>
+            <div class="tool-section-content">${escapeHtml(formattedArgs)}</div>
+          </div>
+          ` : ''}
+          <div class="tool-result-section"></div>
+        </div>
+      </div>
+    `;
+    bundleEl.find(".tool-bundle-details").append(itemHtml);
+
+    if (autoScroll) scrollToBottom();
+  }
+
+  // Merge a tool result into the bundle's last pending call
+  function mergeBundleToolResult(rawContent) {
+    if (!toolCallBundle.element || toolCallBundle.calls.length === 0) {
+      return false;
+    }
+
+    // Find the last pending call
+    const pendingIndex = toolCallBundle.calls.findIndex(c => c.status === "pending");
+    if (pendingIndex === -1) return false;
+
+    const call = toolCallBundle.calls[pendingIndex];
+    call.status = "complete";
+    call.result = rawContent;
+
+    const bundleEl = $(toolCallBundle.element);
+    const itemEl = bundleEl.find(`.tool-bundle-item[data-index="${pendingIndex}"]`);
+
+    itemEl.removeClass("pending").addClass("complete");
+    itemEl.find(".tool-bundle-item-status").html('<i class="fal fa-check"></i>');
+
+    const returnValue = (rawContent || "").toString().trim();
+    if (returnValue && returnValue !== "null" && returnValue !== "undefined") {
+      const returnDetails = extractToolReturnDetails(rawContent);
+      const resultText = returnDetails.text || returnValue;
+      const truncatedResult = truncateText(resultText, 500);
+
+      itemEl.find(".tool-result-section").html(`
+        <div class="tool-section-header" data-section="result">
+          <span class="tool-section-label">RESULT</span>
+        </div>
+        <div class="tool-section-content">${escapeHtml(truncatedResult)}</div>
+      `);
+    }
+
+    if (autoScroll) scrollToBottom();
+    return true;
+  }
+
+  // Finalize the tool bundle (mark complete, no more calls expected)
+  function finalizeToolBundle() {
+    if (!toolCallBundle.element) return;
+
+    const bundleEl = $(toolCallBundle.element);
+    bundleEl.removeClass("pending").addClass("complete");
+
+    // Mark any remaining pending calls as complete
+    toolCallBundle.calls.forEach((call, idx) => {
+      if (call.status === "pending") {
+        call.status = "complete";
+        const itemEl = bundleEl.find(`.tool-bundle-item[data-index="${idx}"]`);
+        itemEl.removeClass("pending").addClass("complete");
+        itemEl.find(".tool-bundle-item-status").html('<i class="fal fa-check"></i>');
+      }
+    });
+
+    // Reset bundle state for next group
+    toolCallBundle.element = null;
+    toolCallBundle.calls = [];
+    toolCallBundle.expanded = false;
+    toolCallBundle.iconNames = new Set();
+  }
+
   // Handle a streaming update from the agent
   function handleStreamingUpdate(update) {
     const messageType = update.message_type;
@@ -1090,6 +1377,8 @@
     // Handle different streaming message types
     switch (messageType) {
       case "text_chunk":
+        // Finalize any pending tool bundle before assistant response
+        finalizeToolBundle();
         appendToStreamingMessage("assistant", content, update.item_id);
         updateStatus("Responding...", "running");
         break;
@@ -1102,9 +1391,8 @@
       case "tool_call":
         // Finalize any existing streaming message first
         finalizeStreamingMessage();
-        // Add the tool call as a regular message
-        addMessage({
-          type: "tool_call",
+        // Add the tool call to the current bundle
+        addToToolBundle({
           name: update.name,
           arguments: update.arguments,
         });
@@ -1112,8 +1400,10 @@
         break;
 
       case "tool_return":
-        // Instead of adding a separate message, merge result into the last tool call
-        mergeToolResult(content);
+        // Try to merge into bundle first, then fall back to individual tool calls
+        if (!mergeBundleToolResult(content)) {
+          mergeToolResult(content);
+        }
         break;
 
       case "status":
@@ -1454,6 +1744,16 @@
     streamingElement.classList.remove("streaming");
 
     if (streamingType === "assistant") {
+      // Check if this is an intermediate thinking message that should be hidden
+      if (isIntermediateThinkingMessage(streamingContent)) {
+        console.log("[ChatLog] Removing intermediate thinking message:", streamingContent?.substring(0, 50));
+        streamingElement.remove();
+        streamingElement = null;
+        streamingContent = "";
+        streamingType = null;
+        streamingItemId = null;
+        return;
+      }
       // Render final content with markdown
       streamingElement.innerHTML = '<div class="markdown-content">' +
         renderMarkdown(streamingContent) + '</div>';
@@ -1545,6 +1845,73 @@
     if (labelEl) labelEl.textContent = originalLabel;
   }
 
+  // Build the dropdown menu HTML for plan delegation
+  function buildPlanSendMenu() {
+    var agents = Object.keys(AGENT_NAMES);
+    return agents.map(function(agentId) {
+      var name = AGENT_NAMES[agentId];
+      var icon = AGENT_REVIEW_ICONS[agentId] || 'images/codex.png';
+      return '<button class="plan-send-item" type="button" data-agent="' + agentId + '">' +
+        '<img class="log-switcher-item-icon" src="' + icon + '" alt="" aria-hidden="true" />' +
+        name +
+        '</button>';
+    }).join('');
+  }
+
+  // Delegate plan implementation to another agent
+  async function initiatePlanDelegation(agentId, planContent) {
+    if (!currentTaskPath) {
+      window.alert('No project path available.');
+      return;
+    }
+
+    // Build the implementation prompt
+    var prompt = 'Implement this plan:\n\n' + planContent;
+
+    // Get current branch from the UI
+    var branchNameEl = document.getElementById("branchName");
+    var currentBranch = branchNameEl ? branchNameEl.textContent.trim() : null;
+    if (currentBranch === '-' || currentBranch === '') {
+      currentBranch = null;
+    }
+
+    // Fetch user's settings to get last preferences for this agent
+    var prefs = {};
+    try {
+      var settings = await ipcRenderer.invoke("get_settings");
+      var agentModels = (settings && settings.taskAgentModels) || {};
+      prefs = agentModels[agentId] || {};
+    } catch (e) {
+      console.warn("[ChatLog] Could not load settings for delegation:", e);
+    }
+
+    var execModel = prefs.execModel || "default";
+    var permissionMode = prefs.permissionMode || "default";
+    var reasoningEffort = agentId === "codex" ? (prefs.reasoningEffort || null) : null;
+    var agentMode = agentId === "opencode" ? (prefs.agentMode || "build") : null;
+    var codexMode = agentId === "codex" ? (prefs.agentMode || "default") : null;
+
+    console.log("[ChatLog] Delegating plan to", agentId, "on branch", currentBranch);
+
+    // Create new session on the same branch
+    ipcRenderer.send('CreateAgentSession', {
+      agentId: agentId,
+      prompt: prompt,
+      projectPath: currentTaskPath,
+      baseBranch: currentBranch,  // Stay on same branch
+      planMode: false,            // Implementation mode, not plan mode
+      thinking: true,
+      useWorktree: false,         // Same worktree/branch
+      permissionMode: permissionMode,
+      execModel: execModel,
+      reasoningEffort: reasoningEffort,
+      agentMode: agentMode,
+      codexMode: codexMode,
+      multiCreate: false,
+      attachments: []
+    });
+  }
+
   function buildCodeReviewPrompt(context) {
     var lines = [];
     lines.push('You are performing a code review on the changes in the current branch.');
@@ -1630,10 +1997,15 @@
     if (!indicator || !nameSpan) return;
 
     if (branchName && branchName.trim()) {
-      nameSpan.textContent = branchName.trim();
+      const trimmed = branchName.trim();
+      nameSpan.textContent = trimmed;
       indicator.style.display = "inline-flex";
+      indicator.setAttribute("title", `Current branch: ${trimmed} (click to copy)`);
+      indicator.setAttribute("aria-label", `Copy branch ${trimmed}`);
     } else {
       indicator.style.display = "none";
+      indicator.setAttribute("title", "Current branch (click to copy)");
+      indicator.setAttribute("aria-label", "Copy branch name");
     }
   }
 
@@ -1641,6 +2013,15 @@
   function updateStatus(status, statusState) {
     const statusDot = $("#statusDot");
     const statusText = $("#statusText");
+
+    // For completed/idle states, always show "Ready" instead of any message content
+    if (statusState === "idle" || statusState === "completed") {
+      statusText.text("Ready");
+      statusText.removeClass("status-thinking");
+      statusDot.removeClass("running error");
+      finishGeneration();
+      return;
+    }
 
     const safeStatus = (status || "Ready").trim();
     const isGenericWork =
@@ -1659,8 +2040,6 @@
     if (statusState === "running") {
       statusDot.addClass("running");
       startElapsedTimer();
-    } else if (statusState === "idle" || statusState === "completed") {
-      finishGeneration();
     } else if (statusState === "error") {
       statusDot.addClass("error");
       stopElapsedTimer();
@@ -1824,6 +2203,59 @@
     return GHOST_SVG;
   }
 
+  // Add a message with bundling support for tool calls
+  // Routes tool_call messages through the bundle system, non-tool messages finalize any pending bundle
+  function addMessageWithBundling(message, shouldScroll = true) {
+    if (!message) return;
+
+    const type = message.type || message.message_type || "system";
+
+    // Route tool calls through the bundle system
+    if (type === "tool_call" || type === "tool_call_message") {
+      const toolName = message.tool_call
+        ? message.tool_call.name
+        : message.name || "Tool";
+      const toolArgs = message.tool_call
+        ? message.tool_call.arguments
+        : message.arguments || "";
+
+      // Skip bundling for AskUserQuestion (interactive UI)
+      if (toolName.toLowerCase() === "askuserquestion") {
+        finalizeToolBundle();
+        addMessage(message, shouldScroll);
+        return;
+      }
+
+      addToToolBundle({
+        name: toolName,
+        arguments: toolArgs,
+      });
+      if (shouldScroll && autoScroll) {
+        scrollToBottom();
+      }
+      return;
+    }
+
+    // Route tool returns through the bundle system
+    if (type === "tool_return" || type === "tool_return_message") {
+      const rawReturn = message.tool_return || message.result || message.content || "";
+      if (mergeBundleToolResult(rawReturn)) {
+        if (shouldScroll && autoScroll) {
+          scrollToBottom();
+        }
+        return;
+      }
+      // Fall through to addMessage if no bundle to merge into
+    }
+
+    // Non-tool messages finalize any pending bundle first
+    if (type !== "tool_return" && type !== "tool_return_message") {
+      finalizeToolBundle();
+    }
+
+    addMessage(message, shouldScroll);
+  }
+
   // Add a message to the chat
   function addMessage(message, shouldScroll = true) {
     if (!message) return;
@@ -1876,6 +2308,15 @@
         return;
       }
       lastFinalizedContent = ""; // Reset if content doesn't match
+    }
+
+    // Skip intermediate "thinking" messages from the agent
+    // These are short status updates like "Let me look at..." or "Now I'll check..."
+    if (type === "assistant" || type === "assistant_message") {
+      if (isIntermediateThinkingMessage(content)) {
+        console.log("[ChatLog] Skipping intermediate thinking message:", content?.substring(0, 50));
+        return;
+      }
     }
 
     // Handle tool_return specially - try to merge into pending tool call first
@@ -2511,7 +2952,7 @@
         div.className += " assistant plan-content";
         let planContent = message.content || "";
         let filePath = message.file_path || "";
-        
+
         // Parse JSON payload if needed
         if (typeof message.content === "string" && message.content.startsWith("{")) {
           try {
@@ -2522,11 +2963,29 @@
             // Use raw content
           }
         }
-        
-        const headerHtml = filePath 
-          ? `<div class="plan-content-header"><i class="fal fa-file-alt"></i> ${escapeHtml(filePath)}</div>`
-          : "";
-        
+
+        // Build header with file path and send button
+        const sendMenuHtml = buildPlanSendMenu();
+        const filePathHtml = filePath
+          ? `<span class="plan-file-path"><i class="fal fa-file-alt"></i> ${escapeHtml(filePath)}</span>`
+          : '';
+
+        const headerHtml = `
+          <div class="plan-content-header">
+            ${filePathHtml}
+            <div class="plan-send-wrapper">
+              <button class="plan-send-btn" type="button" title="Send to agent for implementation">
+                <i class="fal fa-paper-plane"></i>
+                <span>Implement</span>
+                <i class="fal fa-chevron-down"></i>
+              </button>
+              <div class="plan-send-menu">${sendMenuHtml}</div>
+            </div>
+          </div>
+        `;
+
+        // Store plan content as data attribute for later retrieval
+        div.dataset.planContent = planContent;
         div.innerHTML = headerHtml + '<div class="markdown-content">' + renderMarkdown(planContent) + '</div>';
         break;
       }
@@ -2570,6 +3029,18 @@
     }
 
     fallbackCopy(text, finish);
+  }
+
+  function flashCopiedState(element) {
+    if (!element) return;
+    if (element._copyTimeout) {
+      clearTimeout(element._copyTimeout);
+    }
+    element.classList.add("copied");
+    element._copyTimeout = setTimeout(() => {
+      element.classList.remove("copied");
+      element._copyTimeout = null;
+    }, 1200);
   }
 
   function fallbackCopy(text, finish) {
