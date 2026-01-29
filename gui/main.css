@@ -3052,6 +3052,39 @@ input:checked + .slider:before {
   flex-shrink: 0;
 }
 
+.slash-command-item .command-name-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.slash-command-item .command-scope {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.slash-command-item .command-scope.scope-global {
+  background: rgba(129, 140, 248, 0.2);
+  color: #c7d2fe;
+}
+
+.slash-command-item .command-scope.scope-user {
+  background: rgba(45, 212, 191, 0.2);
+  color: #99f6e4;
+}
+
+.slash-command-item .command-scope.scope-project {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fcd34d;
+}
+
 .slash-command-item .command-description {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.5);

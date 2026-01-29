@@ -516,6 +516,9 @@
             throw err;
           });
         }
+        if (channel === 'getCodexCommands') {
+          return tauriInvoke('get_codex_commands', { projectPath: args[0] || null });
+        }
           // Mode commands
         if (channel === 'getAgentModes') {
           return tauriInvoke('get_agent_modes', { agentId: args[0] });
@@ -579,6 +582,9 @@
               { name: 'disabled-skill', description: 'A disabled mock skill', source: 'personal', enabled: false, path: '/mock/disabled', can_toggle: true },
               { name: 'project-skill', description: 'A project skill (read-only)', source: 'project', enabled: true, path: '/project/skill', can_toggle: false }
             ]);
+            break;
+          case 'getCodexCommands':
+            resolve([]);
             break;
           case 'toggleSkill':
             // Mock toggle - just resolve successfully

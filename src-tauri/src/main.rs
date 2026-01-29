@@ -15,7 +15,8 @@ use utils::truncate_str;
 
 use chrono::TimeZone;
 use phantom_harness_backend::cli::{
-    AgentProcessClient, ImageContent, StreamingUpdate, TokenUsageInfo, UserInputQuestion,
+    AgentProcessClient, AvailableCommand, ImageContent, StreamingUpdate, TokenUsageInfo,
+    UserInputQuestion,
 };
 use phantom_harness_backend::{
     apply_model_selection, get_agent_models as backend_get_agent_models,
@@ -261,6 +262,7 @@ pub(crate) struct AppState {
     discord_bot: Arc<StdMutex<Option<discord_bot::DiscordBotHandle>>>,
     pending_user_inputs: Arc<Mutex<HashMap<String, PendingUserInput>>>,
     pending_discord_tasks: Arc<Mutex<HashMap<String, PendingDiscordTask>>>,
+    codex_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -889,6 +891,187 @@ async fn resolve_repo_root(path: &Path) -> Option<PathBuf> {
     match worktree::run_git_command(&repo_path, &["rev-parse", "--show-toplevel"]).await {
         Ok(output) if !output.trim().is_empty() => Some(PathBuf::from(output.trim())),
         _ => None,
+    }
+}
+
+fn codex_builtin_commands() -> Vec<AvailableCommand> {
+    let scope = Some("global".to_string());
+    let commands = [
+        ("/model", "Choose model and reasoning effort"),
+        ("/approvals", "Configure approval policy"),
+        ("/setup-elevated-sandbox", "Set up elevated agent sandbox"),
+        ("/experimental", "Toggle beta features"),
+        ("/skills", "Use skills to improve task performance"),
+        ("/review", "Review current changes and find issues"),
+        ("/new", "Start a new chat during a conversation"),
+        ("/resume", "Resume a saved chat"),
+        ("/fork", "Fork the current chat"),
+        ("/init", "Create an AGENTS.md file"),
+        ("/compact", "Summarize conversation to prevent context limit"),
+        ("/collab", "Change collaboration mode"),
+        ("/diff", "Show git diff (including untracked files)"),
+        ("/mention", "Mention a file"),
+        ("/status", "Show session configuration and token usage"),
+        ("/mcp", "List configured MCP tools"),
+        ("/logout", "Log out of Codex"),
+        ("/quit", "Exit Codex"),
+        ("/exit", "Exit Codex"),
+        ("/feedback", "Send logs to maintainers"),
+        ("/ps", "List background terminals"),
+    ];
+
+    commands
+        .iter()
+        .map(|(name, description)| AvailableCommand {
+            name: (*name).to_string(),
+            description: (*description).to_string(),
+            scope: scope.clone(),
+        })
+        .collect()
+}
+
+fn first_non_empty_line<'a, I>(lines: I) -> Option<String>
+where
+    I: IntoIterator<Item = &'a str>,
+{
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let cleaned = trimmed.trim_start_matches('#').trim();
+        if !cleaned.is_empty() {
+            return Some(cleaned.to_string());
+        }
+    }
+    None
+}
+
+fn parse_codex_prompt_description(contents: &str) -> Option<String> {
+    let mut lines = contents.lines();
+
+    let first = lines.next()?;
+    if first.trim() == "---" {
+        let mut description: Option<String> = None;
+        for line in &mut lines {
+            let trimmed = line.trim();
+            if trimmed == "---" {
+                break;
+            }
+            if let Some(rest) = trimmed.strip_prefix("description:") {
+                let value = rest
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
+                if !value.is_empty() {
+                    description = Some(value.to_string());
+                }
+            }
+        }
+        if description.is_some() {
+            return description;
+        }
+        return first_non_empty_line(lines);
+    }
+
+    first_non_empty_line(std::iter::once(first).chain(lines))
+}
+
+fn read_codex_prompt_commands(
+    prompt_dir: &Path,
+    scope: &str,
+) -> Result<Vec<AvailableCommand>, std::io::Error> {
+    if !prompt_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut commands = Vec::new();
+    for entry in std::fs::read_dir(prompt_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("")
+            .trim();
+        if name.is_empty() {
+            continue;
+        }
+
+        let description = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|content| parse_codex_prompt_description(&content))
+            .unwrap_or_default();
+
+        commands.push(AvailableCommand {
+            name: format!("/prompts:{}", name),
+            description,
+            scope: Some(scope.to_string()),
+        });
+    }
+
+    commands.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(commands)
+}
+
+fn collect_codex_commands(state: &AppState, project_root: &Path) -> Vec<AvailableCommand> {
+    let cache_key = project_root.to_string_lossy().to_string();
+    let mut commands = codex_builtin_commands();
+    let mut had_error = false;
+
+    if let Some(home) = dirs::home_dir() {
+        let user_dir = home.join(".codex").join("prompts");
+        match read_codex_prompt_commands(&user_dir, "user") {
+            Ok(mut user_commands) => commands.append(&mut user_commands),
+            Err(err) => {
+                eprintln!("[Harness] Failed to read Codex user prompts: {}", err);
+                had_error = true;
+            }
+        }
+    }
+
+    let project_dir = project_root.join(".codex").join("prompts");
+    match read_codex_prompt_commands(&project_dir, "project") {
+        Ok(mut project_commands) => commands.append(&mut project_commands),
+        Err(err) => {
+            eprintln!("[Harness] Failed to read Codex project prompts: {}", err);
+            had_error = true;
+        }
+    }
+
+    if !had_error {
+        if let Ok(mut cache) = state.codex_command_cache.lock() {
+            cache.insert(cache_key, commands.clone());
+        }
+        return commands;
+    }
+
+    if let Ok(cache) = state.codex_command_cache.lock() {
+        if let Some(cached) = cache.get(&cache_key) {
+            return cached.clone();
+        }
+    }
+
+    commands
+}
+
+fn emit_available_commands(
+    app: &AppHandle,
+    task_id: &str,
+    agent_id: &str,
+    commands: &[AvailableCommand],
+) {
+    if let Some(main_window) = app.get_webview_window("main") {
+        let _ = main_window.emit("AvailableCommands", (task_id, agent_id, commands));
+    }
+    if let Some(chat_window) = app.get_webview_window(&format!("chat-{}", task_id)) {
+        let _ = chat_window.emit("AvailableCommands", (task_id, agent_id, commands));
     }
 }
 
@@ -2137,6 +2320,16 @@ async fn get_enriched_models(
 }
 
 #[tauri::command]
+async fn get_codex_commands(
+    project_path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<AvailableCommand>, String> {
+    let source_path = resolve_project_path(&project_path)?;
+    let repo_root = resolve_repo_root(&source_path).await.unwrap_or(source_path);
+    Ok(collect_codex_commands(state.inner(), &repo_root))
+}
+
+#[tauri::command]
 async fn pick_project_path(app: tauri::AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
 
@@ -2576,6 +2769,20 @@ async fn create_agent_session_internal(
         }
     }
 
+    if payload.agent_id == "codex" {
+        let command_root = if let Some(ref worktree_path) = worktree_path {
+            resolve_repo_root(worktree_path)
+                .await
+                .unwrap_or_else(|| worktree_path.clone())
+        } else {
+            resolve_repo_root(&source_path)
+                .await
+                .unwrap_or_else(|| source_path.clone())
+        };
+        let commands = collect_codex_commands(state, &command_root);
+        emit_available_commands(&app, &task_id, &payload.agent_id, &commands);
+    }
+
     Ok(CreateAgentResult {
         task_id,
         session_id: session.session_id,
@@ -2991,6 +3198,12 @@ async fn start_task_internal(
         let handle_ref = Arc::new(Mutex::new(handle));
         let mut sessions = state.sessions.lock().await;
         sessions.insert(task_id.clone(), handle_ref.clone());
+
+        if task.agent_id == "codex" {
+            let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
+            let commands = collect_codex_commands(state, &command_root);
+            emit_available_commands(&app, &task_id, &task.agent_id, &commands);
+        }
         handle_ref
     };
 
@@ -3132,6 +3345,7 @@ async fn start_task_internal(
     emit_status("Sending to agent...", "yellow", "running")?;
 
     let chat_window_label_streaming = chat_window_label.clone();
+    let agent_id_for_stream = agent_id.clone();
 
     // Set up channel for streaming updates
     let (stream_tx, stream_rx) = std::sync::mpsc::channel::<StreamingUpdate>();
@@ -3396,11 +3610,15 @@ async fn start_task_internal(
                     }),
                     StreamingUpdate::AvailableCommands { commands } => {
                         // Emit available commands to all windows for slash command autocomplete
-                        if let Some(main_window) = app_handle.get_webview_window("main") {
-                            let _ =
-                                main_window.emit("AvailableCommands", (&task_id_clone, &commands));
+                        if agent_id_for_stream == "codex" {
+                            continue;
                         }
-                        let _ = chat_window.emit("AvailableCommands", (&task_id_clone, &commands));
+                        emit_available_commands(
+                            &app_handle,
+                            &task_id_clone,
+                            &agent_id_for_stream,
+                            commands,
+                        );
                         continue;
                     }
                     StreamingUpdate::PermissionRequest {
@@ -6429,6 +6647,12 @@ pub(crate) async fn send_chat_message_internal(
         let handle_ref = Arc::new(Mutex::new(handle));
         let mut sessions = state.sessions.lock().await;
         sessions.insert(task_id.clone(), handle_ref.clone());
+
+        if task.agent_id == "codex" {
+            let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
+            let commands = collect_codex_commands(state, &command_root);
+            emit_available_commands(&app, &task_id, &task.agent_id, &commands);
+        }
         handle_ref
     };
 
@@ -6511,6 +6735,7 @@ pub(crate) async fn send_chat_message_internal(
     let app_handle = app.clone();
     let task_id_streaming = task_id.clone();
     let window_label_streaming = window_label.clone();
+    let agent_id_for_stream = agent_id.clone();
     let state_for_stream: AppState = state.clone();
     let stream_emit_handle = tokio::task::spawn_blocking(move || {
         use std::time::{Duration, Instant};
@@ -6634,12 +6859,15 @@ pub(crate) async fn send_chat_message_internal(
                     }),
                     StreamingUpdate::AvailableCommands { commands } => {
                         // Emit available commands to all windows for slash command autocomplete
-                        if let Some(main_window) = app_handle.get_webview_window("main") {
-                            let _ = main_window
-                                .emit("AvailableCommands", (&task_id_streaming, &commands));
+                        if agent_id_for_stream == "codex" {
+                            continue;
                         }
-                        let _ =
-                            chat_window.emit("AvailableCommands", (&task_id_streaming, &commands));
+                        emit_available_commands(
+                            &app_handle,
+                            &task_id_streaming,
+                            &agent_id_for_stream,
+                            commands,
+                        );
                         continue;
                     }
                     StreamingUpdate::PermissionRequest {
@@ -7488,6 +7716,7 @@ fn main() {
                 discord_bot: Arc::new(StdMutex::new(None)),
                 pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
                 pending_discord_tasks: Arc::new(Mutex::new(HashMap::new())),
+                codex_command_cache: Arc::new(StdMutex::new(HashMap::new())),
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -7496,6 +7725,7 @@ fn main() {
             get_all_cached_models,
             refresh_agent_models,
             get_enriched_models,
+            get_codex_commands,
             // Mode commands
             get_agent_modes,
             get_cached_modes,

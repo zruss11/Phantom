@@ -222,26 +222,32 @@
      * Update commands dynamically from ACP
      * @param {Array} commands - Array of {name, description} objects from ACP
      */
-    updateCommands: function(commands) {
+    updateCommands: function(commands, agentId) {
       if (!Array.isArray(commands)) return;
+
+      var targetAgent = agentId || this.agentId;
 
       // Store in global dynamic commands cache
       window.DynamicSlashCommands = window.DynamicSlashCommands || {};
-      window.DynamicSlashCommands[this.agentId] = commands.map(function(cmd) {
+      window.DynamicSlashCommands[targetAgent] = commands.map(function(cmd) {
+        var name = cmd.name || '';
         return {
-          name: cmd.name.startsWith('/') ? cmd.name : '/' + cmd.name,
-          description: cmd.description || ''
+          name: name.startsWith('/') ? name : '/' + name,
+          description: cmd.description || '',
+          scope: cmd.scope || null
         };
       });
 
-      console.log('[SlashCommands] Updated', commands.length, 'dynamic commands for', this.agentId);
+      console.log('[SlashCommands] Updated', commands.length, 'dynamic commands for', targetAgent);
 
       // Reload if this is the current agent
-      this.loadCommands();
+      if (targetAgent === this.agentId) {
+        this.loadCommands();
 
-      // Refresh dropdown if visible
-      if (this.isVisible) {
-        this.checkForTrigger();
+        // Refresh dropdown if visible
+        if (this.isVisible) {
+          this.checkForTrigger();
+        }
       }
     },
 
@@ -380,8 +386,15 @@
 
       this.filteredCommands.forEach(function(cmd, index) {
         var selected = index === self.selectedIndex ? ' selected' : '';
+        var scope = self.normalizeScope(cmd.scope);
+        var scopeLabel = scope ? self.formatScopeLabel(scope) : '';
         html += '<div class="slash-command-item' + selected + '" data-index="' + index + '">';
+        html += '<div class="command-name-group">';
         html += '<span class="command-name">' + self.escapeHtml(cmd.name) + '</span>';
+        if (scope) {
+          html += '<span class="command-scope scope-' + self.escapeHtml(scope) + '">' + self.escapeHtml(scopeLabel) + '</span>';
+        }
+        html += '</div>';
         html += '<span class="command-description">' + self.escapeHtml(cmd.description || '') + '</span>';
         html += '</div>';
       });
@@ -544,6 +557,20 @@
         sel.removeAllRanges();
         sel.addRange(range);
       }
+    },
+
+    normalizeScope: function(scope) {
+      if (!scope) return null;
+      var value = scope.toString().toLowerCase();
+      if (value === 'global' || value === 'user' || value === 'project') {
+        return value;
+      }
+      return null;
+    },
+
+    formatScopeLabel: function(scope) {
+      if (!scope) return '';
+      return scope.charAt(0).toUpperCase() + scope.slice(1);
     },
 
     /**

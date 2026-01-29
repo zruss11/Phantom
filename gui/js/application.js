@@ -2300,6 +2300,8 @@ init();
     if (primaryAgentId && window.promptSlashCommands) {
       window.promptSlashCommands.setAgent(primaryAgentId);
     }
+
+    refreshCodexCommands();
   }
 
   function getSelectedAgents() {
@@ -3165,6 +3167,7 @@ init();
     refreshBaseBranchOptions();
     addRecentProjectPath(getProjectPath());
     renderProjectAllowlist();
+    refreshCodexCommands();
   });
 
   $("#pickProjectPath").on("click", async () => {
@@ -3176,6 +3179,7 @@ init();
         refreshBaseBranchOptions();
         addRecentProjectPath(picked);
         renderProjectAllowlist();
+        refreshCodexCommands();
       }
     } catch (err) {
       console.log("[Harness] Project picker unavailable");
@@ -3282,6 +3286,25 @@ init();
     console.log("[Harness] Slash command autocomplete initialized");
   }
 
+  async function refreshCodexCommands() {
+    if (!ipcRenderer || !window.promptSlashCommands) return;
+
+    var agentId = primaryAgentId || activeAgentId || window.activeAgentId;
+    if (agentId !== "codex") return;
+
+    var projectPath = typeof getProjectPath === "function" ? getProjectPath() : null;
+    try {
+      var commands = await ipcRenderer.invoke("getCodexCommands", projectPath);
+      if (Array.isArray(commands)) {
+        window.promptSlashCommands.updateCommands(commands, "codex");
+      }
+    } catch (err) {
+      console.log("[Harness] Failed to load Codex commands", err);
+    }
+  }
+
+  refreshCodexCommands();
+
   // Auto-focus the prompt textarea on initial page load (Notion-style UX)
   // Navigation focus is handled in gui.js
   requestAnimationFrame(() => {
@@ -3293,15 +3316,24 @@ init();
 
   // Listen for dynamic slash commands from ACP
   if (ipcRenderer) {
-    ipcRenderer.on("AvailableCommands", function (e, taskId, commands) {
+    ipcRenderer.on("AvailableCommands", function (e, taskId, agentId, commands) {
+      var resolvedCommands = commands;
+      var resolvedAgentId = agentId;
+      if (Array.isArray(agentId) && commands === undefined) {
+        resolvedCommands = agentId;
+        resolvedAgentId = null;
+      }
       console.log(
         "[Harness] Received",
-        commands.length,
+        Array.isArray(resolvedCommands) ? resolvedCommands.length : 0,
         "available commands from ACP",
       );
       // Update the slash commands for the current agent
-      if (window.promptSlashCommands && Array.isArray(commands)) {
-        window.promptSlashCommands.updateCommands(commands);
+      if (window.promptSlashCommands && Array.isArray(resolvedCommands)) {
+        window.promptSlashCommands.updateCommands(
+          resolvedCommands,
+          resolvedAgentId,
+        );
       }
     });
   }

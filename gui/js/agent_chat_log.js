@@ -1344,18 +1344,27 @@
     });
 
     // Handle available commands update from ACP (for slash command autocomplete)
-    ipcRenderer.on("AvailableCommands", function (e, taskId, commands) {
+    ipcRenderer.on("AvailableCommands", function (e, taskId, agentId, commands) {
+      var resolvedCommands = commands;
+      var resolvedAgentId = agentId;
+      if (Array.isArray(agentId) && commands === undefined) {
+        resolvedCommands = agentId;
+        resolvedAgentId = null;
+      }
       if (
         taskId === currentTaskId &&
         window.chatSlashCommands &&
-        Array.isArray(commands)
+        Array.isArray(resolvedCommands)
       ) {
         console.log(
           "[ChatLog] Received",
-          commands.length,
+          resolvedCommands.length,
           "available commands from ACP",
         );
-        window.chatSlashCommands.updateCommands(commands);
+        window.chatSlashCommands.updateCommands(
+          resolvedCommands,
+          resolvedAgentId,
+        );
       }
     });
 
