@@ -2,9 +2,13 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 USER root
-RUN curl -fsSL https://claude.ai/install.sh | bash
+RUN curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh \
+    && chmod +x /tmp/claude-install.sh \
+    && su - agent -c "/tmp/claude-install.sh" \
+    && su - agent -c "command -v claude" \
+    && rm /tmp/claude-install.sh
 
-ENV PATH=/home/agent/.claude/bin:/home/agent/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV PATH=/home/agent/.local/bin:/home/agent/.claude/bin:/home/agent/.npm-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 USER agent
 WORKDIR /workspace

@@ -1010,7 +1010,18 @@ fn container_auth_mounts(agent_id: &str, settings: &Settings) -> Result<Vec<Cont
             {
                 return Ok(mounts);
             }
-            if settings.claude_auth_method.as_deref() == Some("oauth") {
+            if matches!(
+                settings.claude_auth_method.as_deref(),
+                Some("oauth") | Some("cli")
+            ) {
+                let claude_dir = home.join(".claude");
+                if claude_dir.exists() {
+                    mounts.push(make_mount(
+                        claude_dir,
+                        "/home/agent/.claude".to_string(),
+                    ));
+                    return Ok(mounts);
+                }
                 let config_path = home.join(".claude.json");
                 if config_path.exists() {
                     mounts.push(make_mount(
