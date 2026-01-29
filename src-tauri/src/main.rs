@@ -2787,15 +2787,6 @@ pub(crate) async fn create_agent_session_internal(
         let repo_root = resolve_repo_root(&source_path).await;
         let sync_source = repo_root.as_deref().unwrap_or(&source_path);
         let repo_slug = worktree::repo_slug(sync_source);
-        let workspace_path = worktree::build_workspace_path(&repo_slug)?;
-
-        // Extract the animal name from the workspace path (last component)
-        // This is guaranteed unique via the -v1, -v2 suffix logic in build_workspace_path
-        let animal_name = workspace_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("task")
-            .to_string();
 
         if let Some(repo_root) = repo_root.as_ref() {
             let requested_base = payload
@@ -2819,38 +2810,40 @@ pub(crate) async fn create_agent_session_internal(
                 base_branch.clone()
             };
 
-            // Create worktree with a unique temporary branch, retrying on conflicts.
+            // Create worktree with a unique animal name (base, then -v1, -v2, etc.).
             // The branch will be renamed asynchronously after LLM generates the proper name.
-            let unique_animal_name = worktree::create_worktree_with_unique_branch(
+            let (created_path, created_branch) = worktree::create_worktree_with_animal_name(
                 repo_root,
-                &workspace_path,
+                &repo_slug,
                 &base_ref,
-                &animal_name,
             )
             .await?;
-            worktree::apply_uncommitted_changes(sync_source, &workspace_path).await?;
+            worktree::apply_uncommitted_changes(sync_source, &created_path).await?;
 
             // Store info for deferred branch rename
             deferred_branch_rename =
-                Some((repo_root.clone(), unique_animal_name, workspace_path.clone()));
+                Some((repo_root.clone(), created_branch.clone(), created_path.clone()));
+
+            worktree_path = Some(created_path.clone());
 
             // Preserve subdirectory path for monorepos
             if let Ok(relative) = source_path.strip_prefix(repo_root) {
                 if relative.as_os_str().len() > 0 {
-                    cwd = workspace_path.join(relative);
+                    cwd = created_path.join(relative);
                 } else {
-                    cwd = workspace_path.clone();
+                    cwd = created_path.clone();
                 }
             } else {
-                cwd = workspace_path.clone();
+                cwd = created_path.clone();
             }
         } else {
-            std::fs::create_dir_all(&workspace_path)
+            let created_path = worktree::build_workspace_path(&repo_slug)?;
+            std::fs::create_dir_all(&created_path)
                 .map_err(|err| format!("Failed to create workspace directory: {}", err))?;
-            worktree::sync_workspace_from_source(sync_source, &workspace_path).await?;
-            cwd = workspace_path.clone();
+            worktree::sync_workspace_from_source(sync_source, &created_path).await?;
+            cwd = created_path.clone();
+            worktree_path = Some(created_path.clone());
         }
-        worktree_path = Some(workspace_path);
     }
 
     let cwd_str = cwd.to_string_lossy().to_string();

@@ -792,32 +792,73 @@ fn is_branch_conflict_error(err: &str) -> bool {
         || (lower.contains("cannot lock ref") && lower.contains("refs/heads"))
 }
 
-/// Create a worktree, retrying with a unique temporary branch name on conflicts.
-pub async fn create_worktree_with_unique_branch(
-    repo_path: &PathBuf,
-    worktree_path: &PathBuf,
-    base_branch: &str,
-    branch_base: &str,
-) -> Result<String, String> {
-    const MAX_ATTEMPTS: usize = 10;
-    let mut candidate = unique_temp_branch_name(repo_path, branch_base).await?;
+fn is_worktree_path_conflict_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("already exists")
+        || lower.contains("already registered")
+        || lower.contains("already checked out")
+}
 
-    for _ in 0..MAX_ATTEMPTS {
-        match create_worktree(repo_path, worktree_path, &candidate, base_branch).await {
-            Ok(()) => return Ok(candidate),
-            Err(err) => {
-                if is_branch_conflict_error(&err) {
-                    candidate = unique_temp_branch_name(repo_path, branch_base).await?;
-                    continue;
+fn worktree_candidate_name(base: &str, suffix: usize) -> String {
+    if suffix == 0 {
+        base.to_string()
+    } else {
+        format!("{}-v{}", base, suffix)
+    }
+}
+
+/// Create a worktree using an animal name, falling back to -v1, -v2, etc. on conflicts.
+pub async fn create_worktree_with_animal_name(
+    repo_path: &PathBuf,
+    repo_slug: &str,
+    base_branch: &str,
+) -> Result<(PathBuf, String), String> {
+    const MAX_ANIMAL_ATTEMPTS: usize = 25;
+    const MAX_SUFFIX_ATTEMPTS: usize = 100;
+
+    let root = workspace_root_dir()?;
+    let repo_dir = root.join(repo_slug);
+    std::fs::create_dir_all(&repo_dir)
+        .map_err(|e| format!("Failed to create repo workspace dir: {}", e))?;
+
+    let mut last_error: Option<String> = None;
+
+    for _ in 0..MAX_ANIMAL_ATTEMPTS {
+        let base_raw = random_animal_name()?;
+        let base = sanitize_workspace_slug(base_raw);
+        if base.is_empty() {
+            continue;
+        }
+
+        for suffix in 0..MAX_SUFFIX_ATTEMPTS {
+            let candidate = worktree_candidate_name(&base, suffix);
+            let worktree_path = repo_dir.join(&candidate);
+
+            if worktree_path.exists() {
+                continue;
+            }
+
+            if branch_exists(repo_path, &candidate).await? {
+                continue;
+            }
+
+            match create_worktree(repo_path, &worktree_path, &candidate, base_branch).await {
+                Ok(()) => return Ok((worktree_path, candidate)),
+                Err(err) => {
+                    if is_branch_conflict_error(&err) || is_worktree_path_conflict_error(&err) {
+                        last_error = Some(err);
+                        continue;
+                    }
+                    return Err(err);
                 }
-                return Err(err);
             }
         }
     }
 
     Err(format!(
-        "Failed to create worktree after {} attempts due to branch conflicts",
-        MAX_ATTEMPTS
+        "Failed to create worktree after {} animal attempts (last error: {})",
+        MAX_ANIMAL_ATTEMPTS,
+        last_error.unwrap_or_else(|| "no error details".to_string())
     ))
 }
 
@@ -1035,5 +1076,26 @@ mod tests {
             "fatal: cannot lock ref 'refs/heads/feat/foo': unable to create"
         ));
         assert!(!is_branch_conflict_error("fatal: not a git repository"));
+    }
+
+    #[test]
+    fn test_is_worktree_path_conflict_error() {
+        assert!(is_worktree_path_conflict_error(
+            "fatal: '/tmp/worktrees/otter' already exists"
+        ));
+        assert!(is_worktree_path_conflict_error(
+            "fatal: '/tmp/worktrees/otter' already registered"
+        ));
+        assert!(is_worktree_path_conflict_error(
+            "fatal: 'feat/foo' is already checked out at '/tmp/foo'"
+        ));
+        assert!(!is_worktree_path_conflict_error("fatal: not a git repository"));
+    }
+
+    #[test]
+    fn test_worktree_candidate_name() {
+        assert_eq!(worktree_candidate_name("otter", 0), "otter");
+        assert_eq!(worktree_candidate_name("otter", 1), "otter-v1");
+        assert_eq!(worktree_candidate_name("otter", 2), "otter-v2");
     }
 }
