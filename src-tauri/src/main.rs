@@ -5431,12 +5431,14 @@ async fn get_task_diff_stats(
     };
 
     let task = task.ok_or_else(|| "Task not found".to_string())?;
-    let worktree_path = task
+    let repo_path = task
         .worktree_path
-        .ok_or_else(|| "Task has no worktree path".to_string())?;
+        .or(task.project_path)
+        .ok_or_else(|| "Task has no path".to_string())?;
 
-    let repo = std::path::PathBuf::from(worktree_path);
-    let (additions, deletions, files) = worktree::diff_stats(&repo).await?;
+    let repo = std::path::PathBuf::from(repo_path);
+    let repo_root = resolve_repo_root(&repo).await.unwrap_or(repo);
+    let (additions, deletions, files) = worktree::diff_stats(&repo_root).await?;
     Ok(DiffStats {
         additions,
         deletions,

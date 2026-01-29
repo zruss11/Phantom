@@ -222,6 +222,7 @@
   // Diff line counter (tracks additions and deletions)
   let diffAdditions = 0;
   let diffDeletions = 0;
+  let diffStatsMode = "local";
 
   // Current PR info (for existing PR display)
   let currentPrInfo = null;
@@ -282,6 +283,30 @@
     }
   }
 
+  function setDiffStats(additions, deletions, mode) {
+    diffAdditions = additions || 0;
+    diffDeletions = deletions || 0;
+    if (mode) {
+      diffStatsMode = mode;
+    }
+    updateDiffCounter();
+    persistDiffStats();
+  }
+
+  function loadPersistedDiffStats() {
+    if (!currentTaskId) return false;
+    try {
+      const raw = localStorage.getItem(`phantom-task-diff-stats-${currentTaskId}`);
+      if (!raw) return false;
+      const payload = JSON.parse(raw);
+      if (!payload) return false;
+      setDiffStats(payload.additions || 0, payload.deletions || 0, "local");
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
   function persistDiffStats() {
     if (!currentTaskId) return;
     try {
@@ -299,6 +324,7 @@
   }
 
   function addDiffLines(additions, deletions) {
+    if (diffStatsMode === "repo") return;
     diffAdditions += additions;
     diffDeletions += deletions || 0;
     updateDiffCounter();
@@ -306,10 +332,21 @@
   }
 
   function resetDiffCount() {
-    diffAdditions = 0;
-    diffDeletions = 0;
-    updateDiffCounter();
-    persistDiffStats();
+    setDiffStats(0, 0, "local");
+  }
+
+  async function refreshDiffStats() {
+    if (!currentTaskId) return;
+    if (!ipcRenderer || !ipcRenderer.invoke) return;
+    try {
+      const stats = await ipcRenderer.invoke("getWorktreeDiffStats", currentTaskId);
+      if (!stats || typeof stats.additions !== "number" || typeof stats.deletions !== "number") {
+        return;
+      }
+      setDiffStats(stats.additions, stats.deletions, "repo");
+    } catch (err) {
+      console.warn("[ChatLog] Failed to refresh diff stats:", err);
+    }
   }
 
   // Check for existing PR on the current branch
@@ -391,6 +428,7 @@
 
     if (currentTaskId) {
       $("#taskId .task-id-value").text(currentTaskId);
+      loadPersistedDiffStats();
     }
 
     // Request task info from main process
@@ -1247,6 +1285,7 @@
         currentBranch = taskInfo.branch;
         updateBranchIndicator(taskInfo.branch);
         updatePendingUI();
+        refreshDiffStats();
       }
     });
 
