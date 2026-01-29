@@ -7,6 +7,7 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
+use tokio_util::sync::CancellationToken;
 
 /// Token usage data from a Claude CLI session
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -401,6 +402,7 @@ impl CodexAppServerClient {
         effort: Option<&str>,
         mode: Option<&str>,
         on_update: &mut F,
+        cancel_token: Option<&CancellationToken>,
     ) -> Result<(String, Option<TokenUsageInfo>)>
     where
         F: FnMut(StreamingUpdate),
@@ -464,7 +466,19 @@ impl CodexAppServerClient {
 
         loop {
             // Prefer handling server requests (which can block turns) promptly.
+            // Also check for cancellation to support soft stop.
             let next = tokio::select! {
+                _ = async {
+                    if let Some(token) = cancel_token {
+                        token.cancelled().await
+                    } else {
+                        std::future::pending::<()>().await
+                    }
+                } => {
+                    // Cancellation requested - exit gracefully with accumulated results
+                    eprintln!("[Codex] Generation cancelled by user");
+                    return Ok((full, captured_usage));
+                }
                 req = server_req_rx.recv() => {
                     req.context("codex app-server closed")?
                 }
@@ -1421,7 +1435,21 @@ impl AgentProcessClient {
     where
         F: FnMut(StreamingUpdate),
     {
-        self.run_prompt(session_id, content, &[], &mut on_update)
+        self.run_prompt(session_id, content, &[], &mut on_update, None)
+            .await
+    }
+
+    pub async fn session_prompt_streaming_with_cancellation<F>(
+        &self,
+        session_id: &str,
+        content: &str,
+        mut on_update: F,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<SessionPromptResult>
+    where
+        F: FnMut(StreamingUpdate),
+    {
+        self.run_prompt(session_id, content, &[], &mut on_update, cancel_token)
             .await
     }
 
@@ -1435,7 +1463,22 @@ impl AgentProcessClient {
     where
         F: FnMut(StreamingUpdate),
     {
-        self.run_prompt(session_id, content, images, &mut on_update)
+        self.run_prompt(session_id, content, images, &mut on_update, None)
+            .await
+    }
+
+    pub async fn session_prompt_streaming_with_images_and_cancellation<F>(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: &[ImageContent],
+        mut on_update: F,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<SessionPromptResult>
+    where
+        F: FnMut(StreamingUpdate),
+    {
+        self.run_prompt(session_id, content, images, &mut on_update, cancel_token)
             .await
     }
 
@@ -1445,6 +1488,7 @@ impl AgentProcessClient {
         content: &str,
         images: &[ImageContent],
         on_update: &mut F,
+        cancel_token: Option<&CancellationToken>,
     ) -> Result<SessionPromptResult>
     where
         F: FnMut(StreamingUpdate),
@@ -1471,6 +1515,7 @@ impl AgentProcessClient {
                     reasoning_effort.as_deref(),
                     codex_mode.as_deref(),
                     on_update,
+                    cancel_token,
                 )
                 .await?;
 

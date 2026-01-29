@@ -1198,6 +1198,14 @@
       }
     });
 
+    // Handle soft stop (generation cancelled but session still alive)
+    ipcRenderer.on("GenerationStopped", function (e, taskId) {
+      if (taskId === currentTaskId) {
+        addSystemMessage("Generation stopped.");
+        finishGeneration();
+      }
+    });
+
     // Open markdown links in the user's browser, not inside the webview
     $(document).on("click", "a[data-external='true']", function (e) {
       const href = $(this).attr("href");

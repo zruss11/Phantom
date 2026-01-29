@@ -7,3 +7,6 @@ pub use models::{
     get_factory_custom_models, set_session_model, AgentLaunchConfig, EnrichedModelOption,
     ModeOption, ModelOption, ReasoningEffort,
 };
+
+// Re-export CancellationToken for use in Tauri app
+pub use tokio_util::sync::CancellationToken;

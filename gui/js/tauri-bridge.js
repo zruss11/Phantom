@@ -242,16 +242,17 @@
           }, 100);
           break;
         case 'StopGeneration':
+          // Soft stop: cancels current generation without killing the session
           if (tauriInvoke) {
-            tauriInvoke('stop_task', { taskId: args[0] })
+            tauriInvoke('soft_stop_task', { taskId: args[0] })
               .catch(function(err) {
-                console.error('[Tauri Bridge] stop_task error:', err);
+                console.error('[Tauri Bridge] soft_stop_task error:', err);
                 emitEvent('ChatLogStatus', null, args[0], 'Error: ' + err, 'error');
               });
             return;
           }
           setTimeout(function() {
-            emitEvent('ChatLogStatus', null, args[0], 'Stopped', 'idle');
+            emitEvent('ChatLogStatus', null, args[0], 'Ready', 'idle');
           }, 100);
           break;
         case 'DeleteTask':
