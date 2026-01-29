@@ -785,6 +785,42 @@ pub async fn create_worktree(
     Ok(())
 }
 
+fn is_branch_conflict_error(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    (lower.contains("branch") && lower.contains("already exists"))
+        || lower.contains("already checked out")
+        || (lower.contains("cannot lock ref") && lower.contains("refs/heads"))
+}
+
+/// Create a worktree, retrying with a unique temporary branch name on conflicts.
+pub async fn create_worktree_with_unique_branch(
+    repo_path: &PathBuf,
+    worktree_path: &PathBuf,
+    base_branch: &str,
+    branch_base: &str,
+) -> Result<String, String> {
+    const MAX_ATTEMPTS: usize = 10;
+    let mut candidate = unique_temp_branch_name(repo_path, branch_base).await?;
+
+    for _ in 0..MAX_ATTEMPTS {
+        match create_worktree(repo_path, worktree_path, &candidate, base_branch).await {
+            Ok(()) => return Ok(candidate),
+            Err(err) => {
+                if is_branch_conflict_error(&err) {
+                    candidate = unique_temp_branch_name(repo_path, branch_base).await?;
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    Err(format!(
+        "Failed to create worktree after {} attempts due to branch conflicts",
+        MAX_ATTEMPTS
+    ))
+}
+
 /// Rename a branch in a worktree.
 ///
 /// This is used to rename from the temporary animal name branch to the
@@ -985,5 +1021,19 @@ mod tests {
         );
         assert_eq!(sanitize_workspace_slug("  spaces  "), "spaces");
         assert_eq!(sanitize_workspace_slug(""), "task");
+    }
+
+    #[test]
+    fn test_is_branch_conflict_error() {
+        assert!(is_branch_conflict_error(
+            "Git command failed: fatal: a branch named 'garden-eel' already exists"
+        ));
+        assert!(is_branch_conflict_error(
+            "fatal: 'feat/foo' is already checked out at '/tmp/foo'"
+        ));
+        assert!(is_branch_conflict_error(
+            "fatal: cannot lock ref 'refs/heads/feat/foo': unable to create"
+        ));
+        assert!(!is_branch_conflict_error("fatal: not a git repository"));
     }
 }

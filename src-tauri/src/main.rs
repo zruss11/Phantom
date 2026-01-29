@@ -2819,14 +2819,15 @@ pub(crate) async fn create_agent_session_internal(
                 base_branch.clone()
             };
 
-            // Ensure the temporary branch name is unique (handles leftover branches from previous sessions)
-            let unique_animal_name =
-                worktree::unique_temp_branch_name(repo_root, &animal_name).await?;
-
-            // Create worktree with unique animal name as initial branch (non-blocking)
-            // The branch will be renamed asynchronously after LLM generates the proper name
-            worktree::create_worktree(repo_root, &workspace_path, &unique_animal_name, &base_ref)
-                .await?;
+            // Create worktree with a unique temporary branch, retrying on conflicts.
+            // The branch will be renamed asynchronously after LLM generates the proper name.
+            let unique_animal_name = worktree::create_worktree_with_unique_branch(
+                repo_root,
+                &workspace_path,
+                &base_ref,
+                &animal_name,
+            )
+            .await?;
             worktree::apply_uncommitted_changes(sync_source, &workspace_path).await?;
 
             // Store info for deferred branch rename
