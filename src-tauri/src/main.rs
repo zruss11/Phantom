@@ -25,8 +25,10 @@ use phantom_harness_backend::{
     get_codex_modes as backend_get_codex_modes, get_factory_custom_models, AgentLaunchConfig,
     CancellationToken, EnrichedModelOption, ModeOption, ModelOption,
 };
+use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
@@ -284,6 +286,8 @@ pub(crate) struct AppState {
     pending_discord_tasks: Arc<Mutex<HashMap<String, PendingDiscordTask>>>,
     codex_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
     claude_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
+    terminal_sessions: Arc<Mutex<HashMap<String, TerminalSession>>>,
+    task_terminal_sessions: Arc<Mutex<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -326,6 +330,32 @@ struct AttachmentRef {
     relative_path: String,
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
+}
+
+struct TerminalSession {
+    id: String,
+    task_id: String,
+    window_label: String,
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn portable_pty::Child + Send>,
+}
+
+#[derive(Debug, Serialize)]
+struct TerminalSessionInfo {
+    session_id: String,
+    cwd: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TerminalOutputPayload {
+    session_id: String,
+    data: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TerminalExitPayload {
+    session_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -6400,6 +6430,281 @@ async fn open_task_directory(
     Ok(())
 }
 
+fn default_terminal_command() -> (String, Vec<String>) {
+    #[cfg(target_os = "windows")]
+    {
+        if command_exists("pwsh") {
+            return (
+                "pwsh".to_string(),
+                vec!["-NoLogo".to_string(), "-NoProfile".to_string()],
+            );
+        }
+        if command_exists("powershell.exe") {
+            return (
+                "powershell.exe".to_string(),
+                vec!["-NoLogo".to_string(), "-NoProfile".to_string()],
+            );
+        }
+        return ("cmd.exe".to_string(), Vec::new());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(shell) = std::env::var("SHELL") {
+            if !shell.trim().is_empty() {
+                // -i for interactive mode (gives us a prompt)
+                // -l for login shell (loads profile/rc files)
+                return (shell, vec!["-i".to_string(), "-l".to_string()]);
+            }
+        }
+        for candidate in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+            if Path::new(candidate).exists() {
+                return (candidate.to_string(), vec!["-i".to_string(), "-l".to_string()]);
+            }
+        }
+        ("sh".to_string(), vec!["-i".to_string()])
+    }
+}
+
+fn chat_window_label(task_id: &str) -> String {
+    format!(
+        "chat-{}",
+        task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
+    )
+}
+
+async fn cleanup_terminal_session_by_task(state: &AppState, task_id: &str) {
+    let session_id = {
+        let task_sessions = state.task_terminal_sessions.lock().await;
+        task_sessions.get(task_id).cloned()
+    };
+    if let Some(session_id) = session_id {
+        {
+            let mut sessions = state.terminal_sessions.lock().await;
+            if let Some(mut session) = sessions.remove(&session_id) {
+                let _ = session.child.kill();
+            }
+        }
+        {
+            let mut task_sessions = state.task_terminal_sessions.lock().await;
+            if let Some(existing) = task_sessions.get(task_id) {
+                if existing == &session_id {
+                    task_sessions.remove(task_id);
+                }
+            }
+        }
+    }
+}
+
+#[tauri::command]
+async fn start_terminal_session(
+    task_id: String,
+    cwd: String,
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<TerminalSessionInfo, String> {
+    let cwd_path = PathBuf::from(&cwd);
+    if !cwd_path.exists() {
+        return Err(format!("Path does not exist: {}", cwd_path.display()));
+    }
+
+    let existing_session_id = {
+        let task_sessions = state.task_terminal_sessions.lock().await;
+        task_sessions.get(&task_id).cloned()
+    };
+    if let Some(session_id) = existing_session_id {
+        let sessions = state.terminal_sessions.lock().await;
+        if sessions.contains_key(&session_id) {
+            return Ok(TerminalSessionInfo {
+                session_id,
+                cwd: cwd.clone(),
+            });
+        }
+        let mut task_sessions = state.task_terminal_sessions.lock().await;
+        task_sessions.remove(&task_id);
+    }
+
+    let (command, args) = default_terminal_command();
+    println!("[Harness] start_terminal_session: starting shell {} with args {:?}", command, args);
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|err| err.to_string())?;
+
+    let mut cmd = CommandBuilder::new(&command);
+    for arg in &args {
+        cmd.arg(arg);
+    }
+    cmd.cwd(&cwd_path);
+
+    println!("[Harness] start_terminal_session: spawning command in {:?}", cwd_path);
+    let child = pair
+        .slave
+        .spawn_command(cmd)
+        .map_err(|err| {
+            println!("[Harness] start_terminal_session: spawn failed: {}", err);
+            err.to_string()
+        })?;
+    println!("[Harness] start_terminal_session: shell spawned successfully");
+    drop(pair.slave);
+
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|err| err.to_string())?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|err| err.to_string())?;
+
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let window_label = chat_window_label(&task_id);
+
+    let app_handle = app.clone();
+    let sessions = state.terminal_sessions.clone();
+    let task_sessions = state.task_terminal_sessions.clone();
+    let session_id_clone = session_id.clone();
+    let task_id_clone = task_id.clone();
+    let window_label_clone = window_label.clone();
+
+    std::thread::spawn(move || {
+        let mut reader = reader;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if let Some(window) = app_handle.get_webview_window(&window_label_clone) {
+                        let _ = window.emit(
+                            "TerminalOutput",
+                            TerminalOutputPayload {
+                                session_id: session_id_clone.clone(),
+                                data,
+                            },
+                        );
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        if let Some(window) = app_handle.get_webview_window(&window_label_clone) {
+            let _ = window.emit(
+                "TerminalExit",
+                TerminalExitPayload {
+                    session_id: session_id_clone.clone(),
+                },
+            );
+        }
+
+        tauri::async_runtime::block_on(async {
+            let mut sessions = sessions.lock().await;
+            sessions.remove(&session_id_clone);
+            let mut task_sessions = task_sessions.lock().await;
+            if let Some(existing) = task_sessions.get(&task_id_clone) {
+                if existing == &session_id_clone {
+                    task_sessions.remove(&task_id_clone);
+                }
+            }
+        });
+    });
+
+    let session = TerminalSession {
+        id: session_id.clone(),
+        task_id: task_id.clone(),
+        window_label,
+        master: pair.master,
+        writer,
+        child,
+    };
+
+    {
+        let mut sessions = state.terminal_sessions.lock().await;
+        sessions.insert(session_id.clone(), session);
+    }
+    {
+        let mut task_sessions = state.task_terminal_sessions.lock().await;
+        task_sessions.insert(task_id, session_id.clone());
+    }
+
+    Ok(TerminalSessionInfo { session_id, cwd })
+}
+
+#[tauri::command]
+async fn terminal_write(
+    session_id: String,
+    data: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    println!("[Harness] terminal_write called: session_id={} data={:?}", session_id, data);
+    let mut sessions = state.terminal_sessions.lock().await;
+    let session = sessions
+        .get_mut(&session_id)
+        .ok_or_else(|| {
+            println!("[Harness] terminal_write: session not found: {}", session_id);
+            "Terminal session not found".to_string()
+        })?;
+    session
+        .writer
+        .write_all(data.as_bytes())
+        .map_err(|err| {
+            println!("[Harness] terminal_write: write failed: {}", err);
+            err.to_string()
+        })?;
+    session.writer.flush().map_err(|err| {
+        println!("[Harness] terminal_write: flush failed: {}", err);
+        err.to_string()
+    })?;
+    println!("[Harness] terminal_write success");
+    Ok(())
+}
+
+#[tauri::command]
+async fn terminal_resize(
+    session_id: String,
+    cols: u16,
+    rows: u16,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let sessions = state.terminal_sessions.lock().await;
+    let session = sessions
+        .get(&session_id)
+        .ok_or_else(|| "Terminal session not found".to_string())?;
+    session
+        .master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|err| err.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn terminal_close(session_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let task_id = {
+        let mut sessions = state.terminal_sessions.lock().await;
+        if let Some(mut session) = sessions.remove(&session_id) {
+            let _ = session.child.kill();
+            Some(session.task_id)
+        } else {
+            None
+        }
+    };
+    if let Some(task_id) = task_id {
+        cleanup_terminal_session_by_task(state.inner(), &task_id).await;
+    }
+    Ok(())
+}
+
 fn notification_enabled(settings: &Settings) -> bool {
     settings.agent_notifications_enabled.unwrap_or(true)
 }
@@ -8056,14 +8361,23 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() != "main" {
-                return;
-            }
             let should_close = matches!(
                 event,
                 tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
             );
             if !should_close {
+                return;
+            }
+            let label = window.label();
+            if label.starts_with("chat-") {
+                let task_id = label.trim_start_matches("chat-").to_string();
+                let state = window.app_handle().state::<AppState>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    cleanup_terminal_session_by_task(&state, &task_id).await;
+                });
+                return;
+            }
+            if label != "main" {
                 return;
             }
             let app = window.app_handle();
@@ -8088,6 +8402,8 @@ fn main() {
                 pending_discord_tasks: Arc::new(Mutex::new(HashMap::new())),
                 codex_command_cache: Arc::new(StdMutex::new(HashMap::new())),
                 claude_command_cache: Arc::new(StdMutex::new(HashMap::new())),
+                terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
+                task_terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -8136,6 +8452,10 @@ fn main() {
             delete_task,
             get_task_history,
             open_task_directory,
+            start_terminal_session,
+            terminal_write,
+            terminal_resize,
+            terminal_close,
             open_chat_window,
             send_chat_message,
             respond_to_permission,

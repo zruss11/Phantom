@@ -215,6 +215,17 @@
   let elapsedTimer = null;
   let startTime = null;
 
+  // Terminal drawer state
+  let terminalOpen = false;
+  let terminalSessionId = null;
+  let terminalInstance = null;
+  let terminalFitAddon = null;
+  let terminalReady = false;
+  let terminalPanelEl = null;
+  let terminalToggleButton = null;
+  let terminalPathEl = null;
+  let terminalMountEl = null;
+
   // Pending prompt state
   let pendingPrompt = null;
   let taskStatusState = "idle";
@@ -270,6 +281,175 @@
       }
     } catch (e) {
       // ignore
+    }
+  }
+
+  function cacheTerminalElements() {
+    if (terminalPanelEl) return;
+    terminalPanelEl = document.getElementById("terminalPanel");
+    terminalToggleButton = document.getElementById("terminalToggleButton");
+    terminalPathEl = document.getElementById("terminalPath");
+    terminalMountEl = document.getElementById("terminalMount");
+  }
+
+  function updateTerminalButtonState() {
+    if (!terminalToggleButton) return;
+    const enabled = !!currentTaskPath;
+    terminalToggleButton.disabled = !enabled;
+    terminalToggleButton.title = enabled
+      ? "Toggle terminal"
+      : "Terminal unavailable until task path is known";
+  }
+
+  function setTerminalPathLabel(path) {
+    if (terminalPathEl) {
+      terminalPathEl.textContent = path || "";
+    }
+  }
+
+  function initTerminal() {
+    if (terminalReady) return;
+    cacheTerminalElements();
+    if (!terminalMountEl) return;
+    if (typeof window.Terminal === "undefined") {
+      addSystemMessage("Terminal UI failed to load.");
+      return;
+    }
+    terminalInstance = new window.Terminal({
+      cursorBlink: true,
+      fontFamily: '"SF Mono", "Roboto Mono", Menlo, monospace',
+      fontSize: 12,
+      scrollback: 1000,
+      theme: {
+        background: "#0f0f12",
+        foreground: "#e6e6e6",
+        cursor: "#f78a97",
+        selection: "rgba(247, 138, 151, 0.25)",
+      },
+    });
+    if (window.FitAddon && window.FitAddon.FitAddon) {
+      terminalFitAddon = new window.FitAddon.FitAddon();
+      terminalInstance.loadAddon(terminalFitAddon);
+    }
+    terminalInstance.open(terminalMountEl);
+    terminalReady = true;
+
+    // Ensure terminal gets focus when clicking on the terminal area
+    terminalMountEl.addEventListener("click", function () {
+      if (terminalInstance) {
+        terminalInstance.focus();
+      }
+    });
+
+    terminalInstance.onData(function (data) {
+      console.log("[ChatLog] Terminal onData received:", JSON.stringify(data), "sessionId:", terminalSessionId);
+      if (!ipcRenderer) {
+        console.error("[ChatLog] Terminal write skipped: no ipcRenderer");
+        return;
+      }
+      if (!terminalSessionId) {
+        console.error("[ChatLog] Terminal write skipped: no terminalSessionId");
+        return;
+      }
+      ipcRenderer
+        .invoke("writeTerminalSession", {
+          sessionId: terminalSessionId,
+          data: data,
+        })
+        .then(function () {
+          console.log("[ChatLog] Terminal write success");
+        })
+        .catch(function (err) {
+          console.error("[ChatLog] Terminal write failed:", err);
+        });
+    });
+  }
+
+  async function ensureTerminalSession() {
+    console.log("[ChatLog] ensureTerminalSession called, current sessionId:", terminalSessionId);
+    if (terminalSessionId) return terminalSessionId;
+    if (!ipcRenderer || typeof ipcRenderer.invoke !== "function") {
+      console.error("[ChatLog] Terminal unavailable: no ipcRenderer");
+      addSystemMessage("Terminal unavailable in browser mode.");
+      return null;
+    }
+    if (!currentTaskId || !currentTaskPath) {
+      console.error("[ChatLog] Terminal unavailable: no task path. taskId:", currentTaskId, "taskPath:", currentTaskPath);
+      addSystemMessage("Terminal unavailable: no task path.");
+      return null;
+    }
+    try {
+      console.log("[ChatLog] Starting terminal session for task:", currentTaskId, "cwd:", currentTaskPath);
+      const result = await ipcRenderer.invoke("startTerminalSession", {
+        taskId: currentTaskId,
+        cwd: currentTaskPath,
+      });
+      console.log("[ChatLog] startTerminalSession result:", result);
+      if (result && result.session_id) {
+        terminalSessionId = result.session_id;
+        setTerminalPathLabel(result.cwd || currentTaskPath);
+        console.log("[ChatLog] Terminal session created:", terminalSessionId);
+        return terminalSessionId;
+      }
+    } catch (err) {
+      console.error("[ChatLog] Terminal start failed:", err);
+      addSystemMessage("Failed to start terminal: " + (err.message || err));
+    }
+    return null;
+  }
+
+  function fitTerminalToPanel() {
+    if (!terminalReady || !terminalFitAddon || !terminalInstance) return;
+    terminalFitAddon.fit();
+    if (
+      ipcRenderer &&
+      terminalSessionId &&
+      terminalInstance.cols &&
+      terminalInstance.rows
+    ) {
+      ipcRenderer
+        .invoke("resizeTerminalSession", {
+          sessionId: terminalSessionId,
+          cols: terminalInstance.cols,
+          rows: terminalInstance.rows,
+        })
+        .catch(function (err) {
+          console.error("[ChatLog] Terminal resize failed:", err);
+        });
+    }
+  }
+
+  function openTerminalDrawer() {
+    if (terminalOpen) return;
+    terminalOpen = true;
+    document.body.classList.add("terminal-open");
+    if (terminalPanelEl) {
+      terminalPanelEl.setAttribute("aria-hidden", "false");
+    }
+    initTerminal();
+    ensureTerminalSession().then(function () {
+      requestAnimationFrame(function () {
+        fitTerminalToPanel();
+        if (terminalInstance) terminalInstance.focus();
+      });
+      setTimeout(fitTerminalToPanel, 360);
+    });
+  }
+
+  function closeTerminalDrawer() {
+    if (!terminalOpen) return;
+    terminalOpen = false;
+    document.body.classList.remove("terminal-open");
+    if (terminalPanelEl) {
+      terminalPanelEl.setAttribute("aria-hidden", "true");
+    }
+  }
+
+  function toggleTerminalDrawer() {
+    if (terminalOpen) {
+      closeTerminalDrawer();
+    } else {
+      openTerminalDrawer();
     }
   }
 
@@ -454,6 +634,27 @@
 
   // Set up UI event listeners
   function setupEventListeners() {
+    cacheTerminalElements();
+    updateTerminalButtonState();
+
+    if (terminalToggleButton) {
+      $(terminalToggleButton).on("click", function () {
+        toggleTerminalDrawer();
+      });
+    }
+
+    window.addEventListener("resize", function () {
+      if (terminalOpen) {
+        fitTerminalToPanel();
+      }
+    });
+
+    window.addEventListener("beforeunload", function () {
+      if (ipcRenderer && terminalSessionId) {
+        ipcRenderer.invoke("closeTerminalSession", { sessionId: terminalSessionId });
+      }
+    });
+
     $("#closeWindow").on("click", function () {
       if (bridge && bridge.remote) {
         bridge.remote.getCurrentWindow().close();
@@ -1281,6 +1482,8 @@
         taskStatusState = taskInfo.status_state || "idle";
         // Store resolved path for "Open in..." functionality (worktree_path preferred, project_path fallback)
         currentTaskPath = taskInfo.worktree_path || taskInfo.project_path || null;
+        updateTerminalButtonState();
+        setTerminalPathLabel(currentTaskPath);
         // Update branch indicator (this will trigger PR check via updateBranchIndicator)
         currentBranch = taskInfo.branch;
         updateBranchIndicator(taskInfo.branch);
@@ -1334,6 +1537,22 @@
         }
         updateStatus(status, statusState);
       }
+    });
+
+    ipcRenderer.on("TerminalOutput", function (e, payload) {
+      if (!payload || payload.session_id !== terminalSessionId) return;
+      if (!terminalReady) initTerminal();
+      if (terminalInstance && payload.data) {
+        terminalInstance.write(payload.data);
+      }
+    });
+
+    ipcRenderer.on("TerminalExit", function (e, payload) {
+      if (!payload || payload.session_id !== terminalSessionId) return;
+      if (terminalInstance) {
+        terminalInstance.write("\r\n[process exited]\r\n");
+      }
+      terminalSessionId = null;
     });
 
     // Handle streaming updates (real-time token-by-token)
