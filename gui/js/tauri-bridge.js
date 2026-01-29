@@ -27,6 +27,7 @@
       errorDelay: 2000,
       openaiApiKey: '',
       anthropicApiKey: '',
+      claudeSetupToken: '',
       codexAuthMethod: '',
       claudeAuthMethod: '',
       containerIsolationEnabled: false,
@@ -769,10 +770,16 @@
             resolve();
             break;
           case 'checkClaudeAuth':
-            resolve({ authenticated: false, method: null, expires_at: null, email: null });
+            resolve({
+              authenticated: !!mockData.settings.claudeSetupToken,
+              method: mockData.settings.claudeSetupToken ? 'setupToken' : null,
+              expires_at: null,
+              email: null
+            });
             break;
           case 'claudeLogout':
             mockData.settings.claudeAuthMethod = null;
+            mockData.settings.claudeSetupToken = '';
             resolve();
             break;
           case 'claudeRateLimits':

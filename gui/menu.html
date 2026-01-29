@@ -436,8 +436,8 @@
                   <div>
                     <h5 class="mb-1">Agent Accounts</h5>
                     <p class="muted-text">
-                      Connect Codex and Claude Code with subscription login or
-                      API keys.
+                      Connect Codex and Claude Code with setup tokens or API
+                      keys.
                     </p>
                   </div>
                   <div class="accounts-actions">
@@ -654,21 +654,6 @@
                           </div>
                         </div>
                       </div>
-                      <!-- Keychain Permission Button (shown when usage unavailable) -->
-                      <div
-                        class="usage-keychain-prompt"
-                        data-usage-keychain="claude"
-                      >
-                        <button
-                          class="btn btn-sm btn-outline-secondary"
-                          data-auth-action="claude-keychain"
-                        >
-                          <i class="fal fa-key"></i> Enable Usage Tracking
-                        </button>
-                        <span class="usage-keychain-hint"
-                          >Requires Claude Code login</span
-                        >
-                      </div>
                       <!-- Inline Usage Tracker (hidden until permissions granted) -->
                       <div
                         class="usage-inline"
@@ -729,6 +714,15 @@
                     </div>
                     <div class="auth-body">
                       <label class="muted-label"
+                        >Claude setup token (CLAUDE_CODE_OAUTH_TOKEN)</label
+                      >
+                      <input
+                        type="password"
+                        class="form-control auth-input"
+                        data-auth-key="claudeSetupToken"
+                        placeholder="sk-ant-..."
+                      />
+                      <label class="muted-label"
                         >Anthropic API key (ANTHROPIC_API_KEY)</label
                       >
                       <input
@@ -739,13 +733,14 @@
                       />
                       <div class="auth-footer">
                         <p class="auth-help">
-                          Use CLI login or an API key for Claude Code.
+                          Run <code>claude setup-token</code>, paste the token
+                          here, and click Save Credentials.
                         </p>
                         <button
                           class="btn btn-default btn-sm btn-brand auth-login"
                           data-auth-action="claude-login"
                         >
-                          Sign in to Claude Code
+                          Generate setup token
                         </button>
                       </div>
                     </div>
