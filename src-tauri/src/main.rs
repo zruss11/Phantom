@@ -38,7 +38,7 @@ use tauri::{
 };
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 use tauri_plugin_updater::UpdaterExt;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
@@ -1841,6 +1841,71 @@ fn extract_claude_setup_token(line: &str) -> Option<String> {
     }
 
     None
+}
+
+fn extract_claude_redirect_port(auth_url: &str) -> Option<u16> {
+    let parsed = url::Url::parse(auth_url).ok()?;
+    for (key, value) in parsed.query_pairs() {
+        if key == "redirect_uri" {
+            if let Ok(redirect) = url::Url::parse(&value) {
+                if let Some(host) = redirect.host_str() {
+                    if host == "localhost" || host == "127.0.0.1" {
+                        return redirect.port();
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn start_claude_callback_listener(
+    port: u16,
+    callback_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<(), String> {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|err| format!("Failed to bind Claude callback listener: {}", err))?;
+
+    tokio::spawn(async move {
+        if let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = vec![0u8; 4096];
+            let read_len = match socket.read(&mut buf).await {
+                Ok(len) => len,
+                Err(_) => 0,
+            };
+            let request = String::from_utf8_lossy(&buf[..read_len]);
+            let path = request
+                .lines()
+                .next()
+                .and_then(|line| line.split_whitespace().nth(1))
+                .unwrap_or("/");
+
+            let mut host = format!("127.0.0.1:{}", port);
+            for line in request.lines().skip(1) {
+                let lower = line.to_lowercase();
+                if lower.starts_with("host:") {
+                    let value = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+                    if !value.is_empty() {
+                        host = if value.contains(':') {
+                            value.to_string()
+                        } else {
+                            format!("{}:{}", value, port)
+                        };
+                    }
+                    break;
+                }
+            }
+
+            let callback_url = format!("http://{}{}", host, path);
+            let _ = callback_tx.send(callback_url);
+
+            let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n<!DOCTYPE html><html><head><title>Claude Connected</title></head><body style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background:#0f1115; color:#f2f2f2; display:flex; align-items:center; justify-content:center; height:100vh; margin:0;\"><div><h2 style=\"margin:0 0 8px;\">Claude connected</h2><p style=\"margin:0; color:#9aa0a6;\">You can close this window and return to Phantom.</p></div></body></html>";
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+
+    Ok(())
 }
 
 async fn spawn_agent_client(
@@ -5038,7 +5103,7 @@ async fn claude_login(
 
     let mut child = tokio::process::Command::new(&claude_cmd)
         .arg("setup-token")
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -5046,6 +5111,7 @@ async fn claude_login(
 
     let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (callback_tx, mut callback_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
     if let Some(stdout) = child.stdout.take() {
         let token_tx = token_tx.clone();
@@ -5082,6 +5148,7 @@ async fn claude_login(
     let app_handle = app.clone();
     let token_result = timeout(Duration::from_secs(300), async {
         let mut opened = false;
+        let mut listener_started = false;
         loop {
             if let Ok(Some(status)) = child.try_wait() {
                 if status.success() {
@@ -5091,6 +5158,12 @@ async fn claude_login(
             }
 
             tokio::select! {
+                Some(callback_url) = callback_rx.recv() => {
+                    if let Some(stdin) = child.stdin.as_mut() {
+                        let _ = stdin.write_all(format!("{}\n", callback_url).as_bytes()).await;
+                        let _ = stdin.flush().await;
+                    }
+                }
                 Some(token) = token_rx.recv() => {
                     return Ok(token);
                 }
@@ -5100,6 +5173,14 @@ async fn claude_login(
                         match app_handle.opener().open_url(&url, None::<&str>) {
                             Ok(_) => opened = true,
                             Err(err) => eprintln!("[Claude Login] Failed to open browser: {:?}", err),
+                        }
+                    }
+                    if !listener_started {
+                        if let Some(port) = extract_claude_redirect_port(&url) {
+                            match start_claude_callback_listener(port, callback_tx.clone()).await {
+                                Ok(_) => listener_started = true,
+                                Err(err) => eprintln!("[Claude Login] Callback listener not started: {}", err),
+                            }
                         }
                     }
                 }
