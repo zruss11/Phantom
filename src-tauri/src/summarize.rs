@@ -1,13 +1,21 @@
 //! AI-powered summarization for task titles and status messages.
-//! Uses OAuth tokens from existing Claude/Codex logins.
+//! Uses Claude setup tokens or API keys (plus Codex auth when needed).
 
 use crate::utils::safe_prefix;
 use std::time::Duration;
 
 /// Generate a short title from a task prompt (async with timeout)
-pub async fn summarize_title(prompt: &str, agent_id: &str) -> String {
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), generate_title(prompt, agent_id)).await;
+pub async fn summarize_title(
+    prompt: &str,
+    agent_id: &str,
+    claude_setup_token: Option<&str>,
+    claude_api_key: Option<&str>,
+) -> String {
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        generate_title(prompt, agent_id, claude_setup_token, claude_api_key),
+    )
+    .await;
 
     match result {
         Ok(Ok(title)) => title,
@@ -23,9 +31,17 @@ pub async fn summarize_title(prompt: &str, agent_id: &str) -> String {
 }
 
 /// Generate a status summary from agent response (async with timeout)
-pub async fn summarize_status(response: &str, agent_id: &str) -> String {
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), generate_status(response, agent_id)).await;
+pub async fn summarize_status(
+    response: &str,
+    agent_id: &str,
+    claude_setup_token: Option<&str>,
+    claude_api_key: Option<&str>,
+) -> String {
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        generate_status(response, agent_id, claude_setup_token, claude_api_key),
+    )
+    .await;
 
     match result {
         Ok(Ok(status)) => status,
@@ -40,7 +56,12 @@ pub async fn summarize_status(response: &str, agent_id: &str) -> String {
     }
 }
 
-async fn generate_title(prompt: &str, agent_id: &str) -> Result<String, String> {
+async fn generate_title(
+    prompt: &str,
+    agent_id: &str,
+    claude_setup_token: Option<&str>,
+    claude_api_key: Option<&str>,
+) -> Result<String, String> {
     // Truncate to first 300 chars to keep token usage low (safe for UTF-8)
     let truncated = safe_prefix(prompt, 300);
     let full_prompt = format!(
@@ -52,11 +73,16 @@ async fn generate_title(prompt: &str, agent_id: &str) -> Result<String, String> 
         "codex" => call_codex_api(&full_prompt).await,
         "amp" => call_amp_cli(&full_prompt).await,
         // For claude-code and unknown agents, use Claude API
-        _ => call_claude_api(&full_prompt).await,
+        _ => call_claude_api(&full_prompt, claude_setup_token, claude_api_key).await,
     }
 }
 
-async fn generate_status(response: &str, agent_id: &str) -> Result<String, String> {
+async fn generate_status(
+    response: &str,
+    agent_id: &str,
+    claude_setup_token: Option<&str>,
+    claude_api_key: Option<&str>,
+) -> Result<String, String> {
     // Truncate to first 500 chars (safe for UTF-8)
     let truncated = safe_prefix(response, 500);
     let full_prompt = format!(
@@ -65,17 +91,36 @@ async fn generate_status(response: &str, agent_id: &str) -> Result<String, Strin
     );
 
     match agent_id {
-        "claude-code" => call_claude_api(&full_prompt).await,
+        "claude-code" => call_claude_api(&full_prompt, claude_setup_token, claude_api_key).await,
         "codex" => call_codex_api(&full_prompt).await,
         "amp" => call_amp_cli(&full_prompt).await,
-        _ => call_claude_api(&full_prompt).await,
+        _ => call_claude_api(&full_prompt, claude_setup_token, claude_api_key).await,
     }
 }
 
-/// Call Claude API using OAuth token
-/// IMPORTANT: OAuth requires the anthropic-beta header!
-async fn call_claude_api(prompt: &str) -> Result<String, String> {
-    let token = crate::get_claude_oauth_token().ok_or("Claude OAuth token not found")?;
+/// Call Claude API using a setup token or API key.
+/// IMPORTANT: setup tokens require the anthropic-beta header.
+async fn call_claude_api(
+    prompt: &str,
+    claude_setup_token: Option<&str>,
+    claude_api_key: Option<&str>,
+) -> Result<String, String> {
+    let api_key = claude_api_key.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let setup_token = claude_setup_token.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
 
     let payload = serde_json::json!({
         "model": "claude-haiku-4-5-20251001",
@@ -84,20 +129,30 @@ async fn call_claude_api(prompt: &str) -> Result<String, String> {
     });
 
     let client = reqwest::Client::new();
-    let response = client
+    let mut request = client
         .post("https://api.anthropic.com/v1/messages")
-        .header("Authorization", format!("Bearer {}", token))
         .header("anthropic-version", "2023-06-01")
-        .header("anthropic-beta", "oauth-2025-04-20") // Required for OAuth!
         .header("content-type", "application/json")
-        .json(&payload)
+        .json(&payload);
+
+    if let Some(key) = api_key {
+        request = request.header("x-api-key", key);
+    } else if let Some(token) = setup_token {
+        request = request
+            .header("Authorization", format!("Bearer {}", token))
+            .header("anthropic-beta", "oauth-2025-04-20");
+    } else {
+        return Err("Claude auth not configured".to_string());
+    }
+
+    let response = request
         .send()
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
 
     // Check for auth errors
     if response.status() == 401 {
-        return Err("Claude OAuth token expired or invalid".to_string());
+        return Err("Claude auth token expired or invalid".to_string());
     }
 
     if !response.status().is_success() {

@@ -33,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, Manager, Position, State, WebviewUrl, WebviewWindow,
 };
@@ -1054,7 +1053,7 @@ fn container_auth_mounts(agent_id: &str, settings: &Settings) -> Result<Vec<Cont
                 }
             }
 
-            Ok(mounts)
+            return Ok(mounts);
         }
         "droid" | "factory-droid" => {
             let factory_dir = home.join(".factory");
@@ -1770,6 +1769,78 @@ fn validate_oauth_url(url: &str) -> bool {
         }
     }
     false
+}
+
+fn validate_claude_oauth_url(url: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let allowed_domains = [
+            "claude.ai",
+            "claude.com",
+            "anthropic.com",
+            "platform.claude.com",
+            "console.anthropic.com",
+        ];
+        if let Some(host) = parsed.host_str() {
+            return parsed.scheme() == "https"
+                && allowed_domains
+                    .iter()
+                    .any(|d| host == *d || host.ends_with(&format!(".{}", d)));
+        }
+    }
+    false
+}
+
+fn extract_oauth_urls(line: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    for token in line.split_whitespace() {
+        let candidate = token.trim_matches(|c: char| {
+            matches!(c, '"' | '\'' | '(' | ')' | '<' | '>' | ',' | ';')
+        });
+        if candidate.starts_with("https://") {
+            if url::Url::parse(candidate).is_ok() {
+                urls.push(candidate.to_string());
+            }
+        }
+    }
+    urls
+}
+
+fn extract_claude_setup_token(line: &str) -> Option<String> {
+    let marker = "CLAUDE_CODE_OAUTH_TOKEN=";
+    if let Some(idx) = line.find(marker) {
+        let value = line[idx + marker.len()..].trim();
+        let token = value
+            .trim_matches(|c: char| matches!(c, '"' | '\''))
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim();
+        if !token.is_empty() {
+            return Some(token.to_string());
+        }
+    }
+
+    let trimmed = line.trim();
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let candidates = [
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "claude_code_oauth_token",
+                "access_token",
+                "oauth_token",
+            ];
+            for key in candidates {
+                if let Some(value) = json.get(key).and_then(|v| v.as_str()) {
+                    let token = value.trim();
+                    if !token.is_empty() {
+                        return Some(token.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 async fn spawn_agent_client(
@@ -2841,9 +2912,17 @@ async fn create_agent_session_internal(
         let task_id_clone = task_id.clone();
         let db_clone = state.db.clone();
         let window_opt = app.get_webview_window("main");
+        let claude_setup_token = settings.claude_setup_token.clone();
+        let claude_api_key = settings.anthropic_api_key.clone();
 
         tauri::async_runtime::spawn(async move {
-            let title = summarize::summarize_title(&prompt_clone, &agent_clone).await;
+            let title = summarize::summarize_title(
+                &prompt_clone,
+                &agent_clone,
+                claude_setup_token.as_deref(),
+                claude_api_key.as_deref(),
+            )
+            .await;
             println!("[Harness] Generated title summary: {}", title);
 
             // Update database
@@ -2871,21 +2950,16 @@ async fn create_agent_session_internal(
         let window_opt = app.get_webview_window("main");
         let multi_create = payload.multi_create;
         let db_clone = state.db.clone();
-        let api_key = match payload.agent_id.as_str() {
-            "codex" => settings.openai_api_key.clone(),
-            "claude-code" => settings.anthropic_api_key.clone(),
-            _ => settings
-                .openai_api_key
-                .clone()
-                .or(settings.anthropic_api_key.clone()),
-        };
+        let claude_setup_token = settings.claude_setup_token.clone();
+        let claude_api_key = settings.anthropic_api_key.clone();
 
         tauri::async_runtime::spawn(async move {
             // Generate proper branch name via LLM
             let metadata = namegen::generate_run_metadata_with_timeout(
                 &prompt_clone,
                 &agent_clone,
-                api_key.as_deref(),
+                claude_setup_token.as_deref(),
+                claude_api_key.as_deref(),
                 5,
             )
             .await;
@@ -4939,7 +5013,7 @@ async fn codex_login(
 #[tauri::command]
 async fn claude_login(
     state: State<'_, AppState>,
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
 ) -> Result<ClaudeAuthStatus, String> {
     let settings_handle = state.settings.clone();
 
@@ -4962,23 +5036,100 @@ async fn claude_login(
 
     let claude_cmd = resolve_claude_command();
 
-    // Open Terminal with claude setup-token for interactive login
-    // This allows the user to complete the OAuth flow in a visible terminal
-    let script = format!(
-        r#"tell application "Terminal"
-            do script "{} setup-token"
-        end tell"#,
-        claude_cmd.replace("\"", "\\\"")
-    );
-
-    tokio::process::Command::new("osascript")
-        .args(["-e", &script])
+    let mut child = tokio::process::Command::new(&claude_cmd)
+        .arg("setup-token")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
-        .map_err(|err| format!("Failed to open Terminal: {}", err))?;
+        .map_err(|err| format!("claude setup-token failed to start: {}", err))?;
+
+    let (token_tx, mut token_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (url_tx, mut url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+
+    if let Some(stdout) = child.stdout.take() {
+        let token_tx = token_tx.clone();
+        let url_tx = url_tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(token) = extract_claude_setup_token(&line) {
+                    let _ = token_tx.send(token);
+                }
+                for url in extract_oauth_urls(&line) {
+                    let _ = url_tx.send(url);
+                }
+            }
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let token_tx = token_tx.clone();
+        let url_tx = url_tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(token) = extract_claude_setup_token(&line) {
+                    let _ = token_tx.send(token);
+                }
+                for url in extract_oauth_urls(&line) {
+                    let _ = url_tx.send(url);
+                }
+            }
+        });
+    }
+
+    let app_handle = app.clone();
+    let token_result = timeout(Duration::from_secs(300), async {
+        let mut opened = false;
+        loop {
+            if let Ok(Some(status)) = child.try_wait() {
+                if status.success() {
+                    return Err("Claude login finished without returning a setup token".to_string());
+                }
+                return Err("Claude login cancelled or failed".to_string());
+            }
+
+            tokio::select! {
+                Some(token) = token_rx.recv() => {
+                    return Ok(token);
+                }
+                Some(url) = url_rx.recv() => {
+                    if !opened && validate_claude_oauth_url(&url) {
+                        use tauri_plugin_opener::OpenerExt;
+                        match app_handle.opener().open_url(&url, None::<&str>) {
+                            Ok(_) => opened = true,
+                            Err(err) => eprintln!("[Claude Login] Failed to open browser: {:?}", err),
+                        }
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            }
+        }
+    })
+    .await;
+
+    let token = match token_result {
+        Ok(Ok(token)) => token,
+        Ok(Err(err)) => return Err(err),
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err("Login timed out after 5 minutes".to_string());
+        }
+    };
+
+    {
+        let mut settings = settings_handle.lock().await;
+        settings.claude_setup_token = Some(token);
+        settings.claude_auth_method = Some("setupToken".to_string());
+        persist_settings(&settings)?;
+    }
+
+    let _ = timeout(Duration::from_secs(2), child.wait()).await;
 
     Ok(ClaudeAuthStatus {
-        authenticated: false,
-        method: None,
+        authenticated: true,
+        method: Some("setupToken".to_string()),
         expires_at: None,
         email: None,
     })
@@ -6114,7 +6265,13 @@ async fn summarize_status_for_notifications(
         return fallback.to_string();
     }
 
-    let summary = summarize::summarize_status(full_text, agent_id).await;
+    let summary = summarize::summarize_status(
+        full_text,
+        agent_id,
+        settings.claude_setup_token.as_deref(),
+        settings.anthropic_api_key.as_deref(),
+    )
+    .await;
     if summary.trim().is_empty() {
         fallback.to_string()
     } else {

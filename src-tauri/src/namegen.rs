@@ -2,7 +2,7 @@
 //!
 //! Uses cheap, fast models to generate descriptive branch names and titles
 //! from user prompts. Each agent type uses an appropriate model:
-//! - Claude Code: claude-haiku-4-5-20251001 (OAuth)
+//! - Claude Code: claude-haiku-4-5-20251001 (setup token or API key)
 //! - Codex: gpt-5.1-codex-mini (ChatGPT backend)
 
 use crate::utils::truncate_str;
@@ -51,14 +51,16 @@ Task:
 /// # Arguments
 /// * `prompt` - The user's task prompt
 /// * `agent_id` - The agent type ("claude-code" or "codex")
-/// * `api_key` - The API key for the provider (Anthropic or OpenAI)
+/// * `claude_setup_token` - Claude setup token for OAuth-style auth
+/// * `claude_api_key` - Claude API key for standard auth
 ///
 /// # Returns
 /// A `RunMetadata` with the generated title and sanitized branch name.
 pub async fn generate_run_metadata(
     prompt: &str,
     agent_id: &str,
-    _api_key: Option<&str>,
+    claude_setup_token: Option<&str>,
+    claude_api_key: Option<&str>,
 ) -> Result<RunMetadata, String> {
     // Truncate prompt if too long (keep first 500 chars, safe for UTF-8)
     let truncated_prompt = truncate_str(prompt, 500);
@@ -67,7 +69,9 @@ pub async fn generate_run_metadata(
 
     let response = match agent_id {
         "codex" => generate_with_codex_backend(&full_prompt).await?,
-        "claude-code" => generate_with_claude_oauth(&full_prompt).await?,
+        "claude-code" => {
+            generate_with_claude_auth(&full_prompt, claude_setup_token, claude_api_key).await?
+        }
         _ => {
             // Fallback: generate a simple name from the prompt
             return Ok(generate_fallback(&truncated_prompt));
@@ -91,9 +95,29 @@ pub async fn generate_run_metadata(
     })
 }
 
-/// Generate using Claude OAuth token (same setup as title summarization).
-async fn generate_with_claude_oauth(prompt: &str) -> Result<String, String> {
-    let token = crate::get_claude_oauth_token().ok_or("Claude OAuth token not found")?;
+/// Generate using Claude setup token or API key.
+/// IMPORTANT: setup tokens require the anthropic-beta header.
+async fn generate_with_claude_auth(
+    prompt: &str,
+    claude_setup_token: Option<&str>,
+    claude_api_key: Option<&str>,
+) -> Result<String, String> {
+    let api_key = claude_api_key.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
+    let setup_token = claude_setup_token.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    });
 
     let payload = serde_json::json!({
         "model": "claude-haiku-4-5-20251001",
@@ -102,19 +126,29 @@ async fn generate_with_claude_oauth(prompt: &str) -> Result<String, String> {
     });
 
     let client = reqwest::Client::new();
-    let response = client
+    let mut request = client
         .post("https://api.anthropic.com/v1/messages")
-        .header("Authorization", format!("Bearer {}", token))
         .header("anthropic-version", "2023-06-01")
-        .header("anthropic-beta", "oauth-2025-04-20")
         .header("content-type", "application/json")
-        .json(&payload)
+        .json(&payload);
+
+    if let Some(key) = api_key {
+        request = request.header("x-api-key", key);
+    } else if let Some(token) = setup_token {
+        request = request
+            .header("Authorization", format!("Bearer {}", token))
+            .header("anthropic-beta", "oauth-2025-04-20");
+    } else {
+        return Err("Claude auth not configured".to_string());
+    }
+
+    let response = request
         .send()
         .await
         .map_err(|e| format!("Request failed: {}", e))?;
 
     if response.status() == 401 {
-        return Err("Claude OAuth token expired or invalid".to_string());
+        return Err("Claude auth token expired or invalid".to_string());
     }
 
     if !response.status().is_success() {
@@ -299,12 +333,13 @@ fn generate_fallback(prompt: &str) -> RunMetadata {
 pub async fn generate_run_metadata_with_timeout(
     prompt: &str,
     agent_id: &str,
-    api_key: Option<&str>,
+    claude_setup_token: Option<&str>,
+    claude_api_key: Option<&str>,
     timeout_secs: u64,
 ) -> RunMetadata {
     let result = tokio::time::timeout(
         Duration::from_secs(timeout_secs),
-        generate_run_metadata(prompt, agent_id, api_key),
+        generate_run_metadata(prompt, agent_id, claude_setup_token, claude_api_key),
     )
     .await;
 
