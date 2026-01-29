@@ -227,6 +227,50 @@
   let currentPrInfo = null;
   let currentBranch = null;
   let lastPrCheckError = null;
+  const PR_CACHE_TTL_MS = 10 * 60 * 1000;
+
+  function getPrCacheKey(projectPath, branch) {
+    return `phantom-pr-info-${encodeURIComponent(projectPath)}|${encodeURIComponent(branch)}`;
+  }
+
+  function loadCachedPrInfo(projectPath, branch) {
+    if (!projectPath || !branch) return null;
+    try {
+      const key = getPrCacheKey(projectPath, branch);
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const payload = JSON.parse(raw);
+      if (!payload || !payload.pr) return null;
+      if (payload.updatedAt && Date.now() - payload.updatedAt > PR_CACHE_TTL_MS) {
+        localStorage.removeItem(key);
+        return null;
+      }
+      if (payload.pr.state !== "OPEN") return null;
+      return payload.pr;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveCachedPrInfo(projectPath, branch, prInfo) {
+    if (!projectPath || !branch) return;
+    try {
+      const key = getPrCacheKey(projectPath, branch);
+      if (prInfo && prInfo.state === "OPEN") {
+        localStorage.setItem(
+          key,
+          JSON.stringify({
+            pr: prInfo,
+            updatedAt: Date.now(),
+          }),
+        );
+      } else {
+        localStorage.removeItem(key);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
 
   function updateDiffCounter() {
     const counter = document.getElementById("diffCounter");
@@ -285,13 +329,14 @@
           addSystemMessage(`PR check failed: ${result.error}`);
           lastPrCheckError = result.error;
         }
-        // Silently fall back to showing Create PR button
-        currentPrInfo = null;
+        // Fall back to cached PR info if available
+        currentPrInfo = loadCachedPrInfo(projectPath, branch);
         updatePrButton();
         return;
       }
 
       currentPrInfo = result.pr;
+      saveCachedPrInfo(projectPath, branch, currentPrInfo);
       lastPrCheckError = null;
       updatePrButton();
 
@@ -306,7 +351,7 @@
         addSystemMessage(`PR check failed: ${err}`);
         lastPrCheckError = String(err);
       }
-      currentPrInfo = null;
+      currentPrInfo = loadCachedPrInfo(projectPath, branch);
       updatePrButton();
     }
   }
@@ -2103,6 +2148,13 @@
       indicator.style.display = "inline-flex";
       indicator.setAttribute("title", `Current branch: ${trimmed} (click to copy)`);
       indicator.setAttribute("aria-label", `Copy branch ${trimmed}`);
+
+      // Seed UI with cached PR info before checking the network
+      const cachedPr = loadCachedPrInfo(currentTaskPath, trimmed);
+      if (cachedPr) {
+        currentPrInfo = cachedPr;
+        updatePrButton();
+      }
 
       // Update current branch and check for PR whenever branch indicator is updated
       currentBranch = trimmed;
