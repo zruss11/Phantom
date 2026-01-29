@@ -223,6 +223,11 @@
   let diffAdditions = 0;
   let diffDeletions = 0;
 
+  // Current PR info (for existing PR display)
+  let currentPrInfo = null;
+  let currentBranch = null;
+  let lastPrCheckError = null;
+
   function updateDiffCounter() {
     const counter = document.getElementById("diffCounter");
     const countEl = document.getElementById("diffCount");
@@ -261,6 +266,69 @@
     diffDeletions = 0;
     updateDiffCounter();
     persistDiffStats();
+  }
+
+  // Check for existing PR on the current branch
+  async function checkExistingPr(projectPath, branch) {
+    if (!projectPath || !branch) {
+      console.log("[ChatLog] Cannot check PR: missing path or branch");
+      return;
+    }
+
+    try {
+      console.log("[ChatLog] Checking for existing PR on branch:", branch);
+      const result = await ipcRenderer.invoke("checkExistingPr", projectPath, branch);
+
+      if (result.error) {
+        console.warn("[ChatLog] PR check error:", result.error);
+        if (result.error !== lastPrCheckError) {
+          addSystemMessage(`PR check failed: ${result.error}`);
+          lastPrCheckError = result.error;
+        }
+        // Silently fall back to showing Create PR button
+        currentPrInfo = null;
+        updatePrButton();
+        return;
+      }
+
+      currentPrInfo = result.pr;
+      lastPrCheckError = null;
+      updatePrButton();
+
+      if (currentPrInfo) {
+        console.log("[ChatLog] Found existing PR:", currentPrInfo);
+      } else {
+        console.log("[ChatLog] No existing PR found");
+      }
+    } catch (err) {
+      console.error("[ChatLog] Failed to check existing PR:", err);
+      if (String(err) !== lastPrCheckError) {
+        addSystemMessage(`PR check failed: ${err}`);
+        lastPrCheckError = String(err);
+      }
+      currentPrInfo = null;
+      updatePrButton();
+    }
+  }
+
+  // Update PR button/link based on current PR info
+  function updatePrButton() {
+    const createBtn = $("#createPrButton");
+    const existingLink = $("#existingPrLink");
+    const existingText = $("#existingPrText");
+
+    // Show PR link if we have an open PR
+    if (currentPrInfo && currentPrInfo.state === "OPEN") {
+      existingLink.attr("href", currentPrInfo.url);
+      existingText.text(`PR #${currentPrInfo.number}`);
+      existingLink.attr("title", currentPrInfo.title);
+      existingLink.show();
+      createBtn.hide();
+    } else {
+      // Show Create PR button
+      existingLink.hide();
+      createBtn.show();
+    }
   }
 
   // Parse task ID from URL query params
@@ -1115,6 +1183,11 @@
     // Receive task info
     ipcRenderer.on("TaskInfo", function (e, taskInfo) {
       if (taskInfo && taskInfo.id === currentTaskId) {
+        console.log("[ChatLog] TaskInfo received:", {
+          branch: taskInfo.branch,
+          worktreePath: taskInfo.worktree_path,
+          projectPath: taskInfo.project_path
+        });
         updateHeader(taskInfo);
         // Update slash commands for the task's agent
         if (window.chatSlashCommands && taskInfo.agent) {
@@ -1125,7 +1198,8 @@
         taskStatusState = taskInfo.status_state || "idle";
         // Store resolved path for "Open in..." functionality (worktree_path preferred, project_path fallback)
         currentTaskPath = taskInfo.worktree_path || taskInfo.project_path || null;
-        // Update branch indicator
+        // Update branch indicator (this will trigger PR check via updateBranchIndicator)
+        currentBranch = taskInfo.branch;
         updateBranchIndicator(taskInfo.branch);
         updatePendingUI();
       }
@@ -1135,6 +1209,7 @@
     ipcRenderer.on("BranchUpdate", function (e, taskId, branchName) {
       if (taskId === currentTaskId) {
         console.log("[ChatLog] BranchUpdate:", branchName);
+        // Update branch indicator (this will trigger PR check via updateBranchIndicator)
         updateBranchIndicator(branchName);
       }
     });
@@ -2028,6 +2103,13 @@
       indicator.style.display = "inline-flex";
       indicator.setAttribute("title", `Current branch: ${trimmed} (click to copy)`);
       indicator.setAttribute("aria-label", `Copy branch ${trimmed}`);
+
+      // Update current branch and check for PR whenever branch indicator is updated
+      currentBranch = trimmed;
+      if (currentTaskPath && currentBranch) {
+        console.log("[ChatLog] Branch indicator updated, checking for PR:", currentBranch);
+        checkExistingPr(currentTaskPath, currentBranch);
+      }
     } else {
       indicator.style.display = "none";
       indicator.setAttribute("title", "Current branch (click to copy)");

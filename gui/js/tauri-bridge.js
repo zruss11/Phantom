@@ -429,6 +429,9 @@
         if (channel === 'getPrReadyState') {
           return tauriInvoke('get_pr_ready_state', { projectPath: args[0] || null });
         }
+        if (channel === 'checkExistingPr') {
+          return tauriInvoke('check_existing_pr', { projectPath: args[0] || null, branch: args[1] });
+        }
         if (channel === 'getSettings') {
           return tauriInvoke('get_settings');
         }
