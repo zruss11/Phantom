@@ -487,36 +487,41 @@
         color: #fff;
       }
 
-      /* PR Creation Button */
+      /* PR Creation Button - Minimal unified style */
       .pr-action-btn {
         display: inline-flex;
         align-items: center;
         gap: 6px;
-        background: linear-gradient(135deg, rgba(88, 166, 255, 0.12), rgba(88, 166, 255, 0.06));
-        border: 1px solid rgba(88, 166, 255, 0.25);
-        color: rgba(88, 166, 255, 0.85);
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        color: rgba(255, 255, 255, 0.75);
         border-radius: 6px;
         padding: 5px 10px;
-        margin-right: 4px;
-        font-size: 12px;
-        font-weight: 600;
+        font-size: 11px;
+        font-weight: 500;
         cursor: pointer;
-        transition: all 0.2s ease;
+        transition: all 0.15s ease;
+        letter-spacing: 0.3px;
       }
 
       .pr-action-btn:hover {
-        background: linear-gradient(135deg, rgba(88, 166, 255, 0.2), rgba(88, 166, 255, 0.12));
-        color: #58a6ff;
-        border-color: rgba(88, 166, 255, 0.4);
+        background: rgba(255, 255, 255, 0.1);
+        color: rgba(255, 255, 255, 0.95);
+        border-color: rgba(255, 255, 255, 0.2);
       }
 
       .pr-action-btn:disabled {
-        opacity: 0.5;
+        opacity: 0.4;
         cursor: not-allowed;
       }
 
       .pr-action-btn i {
-        font-size: 13px;
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.5);
+      }
+
+      .pr-action-btn:hover i {
+        color: rgba(255, 255, 255, 0.8);
       }
 
       .chat-container {
