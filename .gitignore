@@ -34,6 +34,7 @@ dist/
 # Development docs and plans (except screenshots for README)
 docs/*
 !docs/screenshots/
+!docs/mcp.md
 spec.md
 
 # GitHub workflows (not needed for open source)

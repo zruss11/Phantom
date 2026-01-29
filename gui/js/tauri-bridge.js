@@ -910,7 +910,7 @@
 
   var bridgeGlobals = window.__PHANTOM_GLOBALS__ || {
     user_id: 'mock-user-123',
-    app_version: '1.0.0',
+    app_version: '1.0.1',
     machine_id: 'mock-device-456',
     clientExpiry: '12/31/2025',
     as_store: {
@@ -970,7 +970,7 @@
   var remote = {
     app: {
       getVersion: function() {
-        return bridgeGlobals.app_version || '1.0.0';
+        return bridgeGlobals.app_version || '1.0.1';
       }
     },
     getGlobal: function(name) {

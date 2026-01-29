@@ -56,6 +56,12 @@ Connect your ChatGPT subscription and Claude Code account with OAuth. Or paste i
 
 ---
 
+## MCP (Local)
+
+Phantom exposes a local MCP server when the app is running. Use it to control tasks from external clients.
+
+See `docs/mcp.md` for setup, endpoints, and available tools.
+
 <p align="center">
   <img src="docs/screenshots/command-center.png" alt="Command Center" width="800">
 </p>
