@@ -567,6 +567,7 @@ function updateCodexAuthUI() {
     // Hide the usage tracker when not authenticated
     const tracker = document.querySelector('[data-usage-tracker="codex"]');
     if (tracker) tracker.hidden = true;
+    updateAgentUsageWarning("codex", null, null);
   }
 }
 
@@ -634,6 +635,10 @@ function updateClaudeAuthUI() {
       btn.disabled = false;
       btn.classList.remove("auth-pending");
     });
+
+  if (!state.authenticated) {
+    updateAgentUsageWarning("claude-code", null, null);
+  }
 }
 
 async function initAuthState() {
@@ -648,6 +653,7 @@ async function initAuthState() {
 // Usage tracker state and polling
 let usagePollingInterval = null;
 const USAGE_POLL_INTERVAL = 300000; // 5 minutes
+const USAGE_WARNING_THRESHOLD = 95;
 
 async function fetchCodexUsage() {
   try {
@@ -693,6 +699,31 @@ function getUsageLevel(percent) {
   return "low";
 }
 
+function updateAgentUsageWarning(agentId, sessionPercent, weeklyPercent) {
+  const card = document.querySelector(`.agent-card[data-agent-id="${agentId}"]`);
+  if (!card) return;
+  if (card.classList.contains("unavailable") || card.classList.contains("coming-soon")) {
+    card.classList.remove("usage-warning");
+    card.removeAttribute("title");
+    return;
+  }
+
+  const percents = [sessionPercent, weeklyPercent].filter(
+    (value) => typeof value === "number" && !Number.isNaN(value),
+  );
+  const shouldWarn = percents.some((value) => value >= USAGE_WARNING_THRESHOLD);
+
+  card.classList.toggle("usage-warning", shouldWarn);
+  if (shouldWarn) {
+    const parts = [];
+    if (typeof sessionPercent === "number") parts.push(`Session ${sessionPercent}%`);
+    if (typeof weeklyPercent === "number") parts.push(`Weekly ${weeklyPercent}%`);
+    card.setAttribute("title", parts.join(" • "));
+  } else {
+    card.removeAttribute("title");
+  }
+}
+
 function updateUsageDisplay(rateLimits) {
   const tracker = document.querySelector('[data-usage-tracker="codex"]');
   if (!tracker) return;
@@ -701,6 +732,7 @@ function updateUsageDisplay(rateLimits) {
   if (!rateLimits) {
     console.warn("[Harness] rateLimits is null/undefined");
     tracker.hidden = true;
+    updateAgentUsageWarning("codex", null, null);
     return;
   }
 
@@ -711,12 +743,14 @@ function updateUsageDisplay(rateLimits) {
       rateLimits.errorMessage,
     );
     tracker.hidden = true;
+    updateAgentUsageWarning("codex", null, null);
     return;
   }
 
   // Update session meter
+  let sessionPercent = null;
   if (rateLimits.primary) {
-    const sessionPercent = Math.round(rateLimits.primary.usedPercent || 0);
+    sessionPercent = Math.round(rateLimits.primary.usedPercent || 0);
     const sessionMeter = document.querySelector('[data-usage-meter="session"]');
     const percentEl = document.querySelector('[data-usage-percent="session"]');
     const fillEl = document.querySelector('[data-usage-fill="session"]');
@@ -734,8 +768,9 @@ function updateUsageDisplay(rateLimits) {
   }
 
   // Update weekly meter
+  let weeklyPercent = null;
   if (rateLimits.secondary) {
-    const weeklyPercent = Math.round(rateLimits.secondary.usedPercent || 0);
+    weeklyPercent = Math.round(rateLimits.secondary.usedPercent || 0);
     const weeklyMeter = document.querySelector('[data-usage-meter="weekly"]');
     const percentEl = document.querySelector('[data-usage-percent="weekly"]');
     const fillEl = document.querySelector('[data-usage-fill="weekly"]');
@@ -752,6 +787,7 @@ function updateUsageDisplay(rateLimits) {
       weeklyMeter.dataset.usageLevel = getUsageLevel(weeklyPercent);
   }
 
+  updateAgentUsageWarning("codex", sessionPercent, weeklyPercent);
   tracker.hidden = false;
 }
 
@@ -798,6 +834,7 @@ function updateClaudeUsageDisplay(rateLimits) {
     console.warn("[Harness] Claude rateLimits is null/undefined");
     tracker.hidden = true;
     if (keychainPrompt) keychainPrompt.hidden = false;
+    updateAgentUsageWarning("claude-code", null, null);
     return;
   }
 
@@ -816,6 +853,7 @@ function updateClaudeUsageDisplay(rateLimits) {
         hint.textContent = rateLimits.errorMessage;
       }
     }
+    updateAgentUsageWarning("claude-code", null, null);
     return;
   }
 
@@ -824,8 +862,9 @@ function updateClaudeUsageDisplay(rateLimits) {
   claudeUsageEnabled = true;
 
   // Update session meter
+  let sessionPercent = null;
   if (rateLimits.primary) {
-    const sessionPercent = Math.round(rateLimits.primary.usedPercent || 0);
+    sessionPercent = Math.round(rateLimits.primary.usedPercent || 0);
     const sessionMeter = document.querySelector('[data-usage-meter-claude="session"]');
     const percentEl = document.querySelector('[data-usage-percent-claude="session"]');
     const fillEl = document.querySelector('[data-usage-fill-claude="session"]');
@@ -843,8 +882,9 @@ function updateClaudeUsageDisplay(rateLimits) {
   }
 
   // Update weekly meter
+  let weeklyPercent = null;
   if (rateLimits.secondary) {
-    const weeklyPercent = Math.round(rateLimits.secondary.usedPercent || 0);
+    weeklyPercent = Math.round(rateLimits.secondary.usedPercent || 0);
     const weeklyMeter = document.querySelector('[data-usage-meter-claude="weekly"]');
     const percentEl = document.querySelector('[data-usage-percent-claude="weekly"]');
     const fillEl = document.querySelector('[data-usage-fill-claude="weekly"]');
@@ -861,6 +901,7 @@ function updateClaudeUsageDisplay(rateLimits) {
       weeklyMeter.dataset.usageLevel = getUsageLevel(weeklyPercent);
   }
 
+  updateAgentUsageWarning("claude-code", sessionPercent, weeklyPercent);
   tracker.hidden = false;
 }
 
@@ -4300,7 +4341,7 @@ init();
 })();
 
 /* ============================================
-   Phantom Command Center - Comparison Analytics
+   Phantom Analytics Center - Comparison Analytics
    ============================================ */
 (function () {
   "use strict";
@@ -4476,7 +4517,7 @@ init();
     });
   });
 
-  console.log("[Phantom Command Center] Comparison module initialized");
+  console.log("[Phantom Analytics Center] Comparison module initialized");
 })();
 
 // Skills Page Module

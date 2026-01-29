@@ -372,6 +372,27 @@ textarea {
   z-index: 1;
 }
 
+/* Usage warning badge for near-limit agents */
+.create-tasks-page .agent-card.usage-warning::after {
+  content: "!";
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(32px);
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(255, 193, 7, 0.18);
+  border: 1px solid rgba(255, 193, 7, 0.45);
+  color: rgba(255, 193, 7, 0.9);
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+  box-shadow: 0 0 8px rgba(255, 193, 7, 0.2);
+  pointer-events: none;
+}
+
 .create-tasks-page .agent-card:hover {
   transform: translateY(-2px);
   border-color: rgba(247, 138, 151, 0.6);
