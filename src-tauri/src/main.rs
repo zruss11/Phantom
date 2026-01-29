@@ -6575,19 +6575,51 @@ async fn start_terminal_session(
     std::thread::spawn(move || {
         let mut reader = reader;
         let mut buf = [0u8; 4096];
+        let mut pending: Vec<u8> = Vec::new();
+        let emit_output = |data: String| {
+            if data.is_empty() {
+                return;
+            }
+            if let Some(window) = app_handle.get_webview_window(&window_label_clone) {
+                let _ = window.emit(
+                    "TerminalOutput",
+                    TerminalOutputPayload {
+                        session_id: session_id_clone.clone(),
+                        data,
+                    },
+                );
+            }
+        };
+
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    if let Some(window) = app_handle.get_webview_window(&window_label_clone) {
-                        let _ = window.emit(
-                            "TerminalOutput",
-                            TerminalOutputPayload {
-                                session_id: session_id_clone.clone(),
-                                data,
-                            },
-                        );
+                    pending.extend_from_slice(&buf[..n]);
+                    loop {
+                        match std::str::from_utf8(&pending) {
+                            Ok(valid) => {
+                                emit_output(valid.to_string());
+                                pending.clear();
+                                break;
+                            }
+                            Err(err) => {
+                                let valid_up_to = err.valid_up_to();
+                                if valid_up_to > 0 {
+                                    let valid = String::from_utf8_lossy(&pending[..valid_up_to]);
+                                    emit_output(valid.to_string());
+                                }
+                                if let Some(err_len) = err.error_len() {
+                                    // Skip invalid bytes and emit a replacement character.
+                                    emit_output("\u{FFFD}".to_string());
+                                    pending.drain(0..(valid_up_to + err_len));
+                                    continue;
+                                }
+                                // Incomplete UTF-8 sequence; keep the remaining bytes for next read.
+                                pending.drain(0..valid_up_to);
+                                break;
+                            }
+                        }
                     }
                 }
                 Err(_) => break,
@@ -6642,7 +6674,11 @@ async fn terminal_write(
     data: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    println!("[Harness] terminal_write called: session_id={} data={:?}", session_id, data);
+    println!(
+        "[Harness] terminal_write called: session_id={} bytes={}",
+        session_id,
+        data.len()
+    );
     let mut sessions = state.terminal_sessions.lock().await;
     let session = sessions
         .get_mut(&session_id)
