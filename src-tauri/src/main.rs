@@ -263,6 +263,7 @@ pub(crate) struct AppState {
     pending_user_inputs: Arc<Mutex<HashMap<String, PendingUserInput>>>,
     pending_discord_tasks: Arc<Mutex<HashMap<String, PendingDiscordTask>>>,
     codex_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
+    claude_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1053,6 +1054,283 @@ fn collect_codex_commands(state: &AppState, project_root: &Path) -> Vec<Availabl
     }
 
     if let Ok(cache) = state.codex_command_cache.lock() {
+        if let Some(cached) = cache.get(&cache_key) {
+            return cached.clone();
+        }
+    }
+
+    commands
+}
+
+fn claude_builtin_commands() -> Vec<AvailableCommand> {
+    let scope = Some("global".to_string());
+    let commands = [
+        ("/help", "Show available commands"),
+        ("/status", "Show session status"),
+        ("/clear", "Clear conversation"),
+        ("/compact", "Clear history, keeping summary"),
+        ("/config", "View/modify configuration"),
+        ("/cost", "Show session costs"),
+        ("/doctor", "Diagnose issues"),
+        ("/init", "Initialize CLAUDE.md"),
+        ("/login", "Sign in to Claude"),
+        ("/logout", "Sign out of Claude"),
+        ("/model", "Switch or view model"),
+        ("/resume", "Resume previous session"),
+        ("/add-dir", "Add directory to context"),
+        ("/context", "Show/modify context window"),
+        ("/memory", "View/edit persistent memory"),
+        ("/permissions", "Manage tool permissions"),
+        ("/bug", "Report a bug"),
+        ("/diff", "Show pending changes"),
+        ("/mcp", "MCP server commands"),
+        ("/review", "Review code changes"),
+        ("/terminal", "Run terminal command"),
+        ("/vim", "Toggle vim mode"),
+        ("/web", "Search the web"),
+    ];
+
+    commands
+        .iter()
+        .map(|(name, description)| AvailableCommand {
+            name: (*name).to_string(),
+            description: (*description).to_string(),
+            scope: scope.clone(),
+        })
+        .collect()
+}
+
+fn parse_claude_command_metadata(contents: &str) -> (Option<String>, Option<String>) {
+    let mut lines = contents.lines();
+    let first = match lines.next() {
+        Some(line) => line,
+        None => return (None, None),
+    };
+
+    if first.trim() != "---" {
+        let description = first_non_empty_line(std::iter::once(first).chain(lines));
+        return (None, description);
+    }
+
+    let mut name: Option<String> = None;
+    let mut description: Option<String> = None;
+    for line in &mut lines {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(rest) = trimmed.strip_prefix("name:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                name = Some(value.to_string());
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix("command:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() && name.is_none() {
+                name = Some(value.to_string());
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix("description:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                description = Some(value.to_string());
+            }
+        }
+    }
+
+    let description = description.or_else(|| first_non_empty_line(lines));
+    (name, description)
+}
+
+fn command_name_from_path(path: &Path, root: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    let mut parts: Vec<String> = Vec::new();
+    for component in relative.components() {
+        if let std::path::Component::Normal(value) = component {
+            let mut part = value.to_string_lossy().to_string();
+            if part.ends_with(".md") {
+                part = part.trim_end_matches(".md").to_string();
+            }
+            if !part.is_empty() {
+                parts.push(part);
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(":"))
+    }
+}
+
+fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), std::io::Error> {
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_markdown_files(&path, files)?;
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+            continue;
+        }
+        files.push(path);
+    }
+
+    Ok(())
+}
+
+fn read_claude_command_files(
+    command_dir: &Path,
+    scope: &str,
+) -> Result<Vec<AvailableCommand>, std::io::Error> {
+    if !command_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::new();
+    collect_markdown_files(command_dir, &mut files)?;
+
+    let mut commands = Vec::new();
+    for path in files {
+        let contents = std::fs::read_to_string(&path).ok();
+        let (frontmatter_name, description) = contents
+            .as_deref()
+            .map(parse_claude_command_metadata)
+            .unwrap_or((None, None));
+        let fallback_name = command_name_from_path(&path, command_dir);
+        let raw_name = frontmatter_name.or(fallback_name).unwrap_or_default();
+        let raw_name = raw_name.trim();
+        if raw_name.is_empty() {
+            continue;
+        }
+        let name = if raw_name.starts_with('/') {
+            raw_name.to_string()
+        } else {
+            format!("/{}", raw_name)
+        };
+
+        commands.push(AvailableCommand {
+            name,
+            description: description.unwrap_or_default(),
+            scope: Some(scope.to_string()),
+        });
+    }
+
+    commands.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(commands)
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudeInstalledPlugins {
+    plugins: HashMap<String, Vec<ClaudePluginInstall>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaudePluginInstall {
+    scope: Option<String>,
+    #[serde(rename = "installPath")]
+    install_path: String,
+}
+
+fn read_claude_plugin_commands(plugins_dir: &Path) -> Result<Vec<AvailableCommand>, std::io::Error> {
+    let installed_path = plugins_dir.join("installed_plugins.json");
+    if !installed_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = std::fs::read_to_string(&installed_path)?;
+    let installed: ClaudeInstalledPlugins = serde_json::from_str(&contents)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+
+    let mut commands = Vec::new();
+    for installs in installed.plugins.values() {
+        for install in installs {
+            let scope = install
+                .scope
+                .clone()
+                .unwrap_or_else(|| "user".to_string());
+            let install_path = PathBuf::from(&install.install_path);
+            let command_dirs = [
+                install_path.join("commands"),
+                install_path.join(".claude").join("commands"),
+            ];
+            for dir in command_dirs {
+                match read_claude_command_files(&dir, &scope) {
+                    Ok(mut plugin_commands) => commands.append(&mut plugin_commands),
+                    Err(err) => eprintln!(
+                        "[Harness] Failed to read Claude plugin commands in {}: {}",
+                        dir.display(),
+                        err
+                    ),
+                }
+            }
+        }
+    }
+
+    commands.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(commands)
+}
+
+fn dedupe_commands(commands: Vec<AvailableCommand>) -> Vec<AvailableCommand> {
+    let mut map: HashMap<String, AvailableCommand> = HashMap::new();
+    for command in commands {
+        map.insert(command.name.clone(), command);
+    }
+    let mut deduped: Vec<AvailableCommand> = map.into_values().collect();
+    deduped.sort_by(|a, b| a.name.cmp(&b.name));
+    deduped
+}
+
+fn collect_claude_commands(state: &AppState, project_root: &Path) -> Vec<AvailableCommand> {
+    let cache_key = project_root.to_string_lossy().to_string();
+    let mut commands = claude_builtin_commands();
+    let mut had_error = false;
+
+    if let Some(home) = dirs::home_dir() {
+        let plugins_dir = home.join(".claude").join("plugins");
+        match read_claude_plugin_commands(&plugins_dir) {
+            Ok(mut plugin_commands) => commands.append(&mut plugin_commands),
+            Err(err) => {
+                eprintln!("[Harness] Failed to read Claude plugins: {}", err);
+                had_error = true;
+            }
+        }
+
+        let user_dir = home.join(".claude").join("commands");
+        match read_claude_command_files(&user_dir, "user") {
+            Ok(mut user_commands) => commands.append(&mut user_commands),
+            Err(err) => {
+                eprintln!("[Harness] Failed to read Claude user commands: {}", err);
+                had_error = true;
+            }
+        }
+    }
+
+    let project_dir = project_root.join(".claude").join("commands");
+    match read_claude_command_files(&project_dir, "project") {
+        Ok(mut project_commands) => commands.append(&mut project_commands),
+        Err(err) => {
+            eprintln!("[Harness] Failed to read Claude project commands: {}", err);
+            had_error = true;
+        }
+    }
+
+    let commands = dedupe_commands(commands);
+
+    if !had_error {
+        if let Ok(mut cache) = state.claude_command_cache.lock() {
+            cache.insert(cache_key, commands.clone());
+        }
+        return commands;
+    }
+
+    if let Ok(cache) = state.claude_command_cache.lock() {
         if let Some(cached) = cache.get(&cache_key) {
             return cached.clone();
         }
@@ -2330,6 +2608,16 @@ async fn get_codex_commands(
 }
 
 #[tauri::command]
+async fn get_claude_commands(
+    project_path: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<Vec<AvailableCommand>, String> {
+    let source_path = resolve_project_path(&project_path)?;
+    let repo_root = resolve_repo_root(&source_path).await.unwrap_or(source_path);
+    Ok(collect_claude_commands(state.inner(), &repo_root))
+}
+
+#[tauri::command]
 async fn pick_project_path(app: tauri::AppHandle) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
 
@@ -2769,7 +3057,7 @@ async fn create_agent_session_internal(
         }
     }
 
-    if payload.agent_id == "codex" {
+    if payload.agent_id == "codex" || payload.agent_id == "claude-code" {
         let command_root = if let Some(ref worktree_path) = worktree_path {
             resolve_repo_root(worktree_path)
                 .await
@@ -2779,7 +3067,11 @@ async fn create_agent_session_internal(
                 .await
                 .unwrap_or_else(|| source_path.clone())
         };
-        let commands = collect_codex_commands(state, &command_root);
+        let commands = if payload.agent_id == "codex" {
+            collect_codex_commands(state, &command_root)
+        } else {
+            collect_claude_commands(state, &command_root)
+        };
         emit_available_commands(&app, &task_id, &payload.agent_id, &commands);
     }
 
@@ -3199,9 +3491,13 @@ async fn start_task_internal(
         let mut sessions = state.sessions.lock().await;
         sessions.insert(task_id.clone(), handle_ref.clone());
 
-        if task.agent_id == "codex" {
+        if task.agent_id == "codex" || task.agent_id == "claude-code" {
             let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
-            let commands = collect_codex_commands(state, &command_root);
+            let commands = if task.agent_id == "codex" {
+                collect_codex_commands(state, &command_root)
+            } else {
+                collect_claude_commands(state, &command_root)
+            };
             emit_available_commands(&app, &task_id, &task.agent_id, &commands);
         }
         handle_ref
@@ -3610,7 +3906,7 @@ async fn start_task_internal(
                     }),
                     StreamingUpdate::AvailableCommands { commands } => {
                         // Emit available commands to all windows for slash command autocomplete
-                        if agent_id_for_stream == "codex" {
+                        if agent_id_for_stream == "codex" || agent_id_for_stream == "claude-code" {
                             continue;
                         }
                         emit_available_commands(
@@ -4309,7 +4605,7 @@ fn parse_skill_frontmatter(content: &str) -> Option<AgentSkill> {
 }
 
 /// Scan a directory for SKILL.md files
-fn scan_skills_directory(dir: &Path, source: &str, enabled: bool) -> Vec<AgentSkill> {
+fn scan_skills_directory(dir: &Path, source: &str, enabled: bool, can_toggle: bool) -> Vec<AgentSkill> {
     let mut skills = Vec::new();
 
     if !dir.exists() {
@@ -4328,7 +4624,7 @@ fn scan_skills_directory(dir: &Path, source: &str, enabled: bool) -> Vec<AgentSk
                             skill.source = source.to_string();
                             skill.enabled = enabled;
                             skill.path = path.to_string_lossy().to_string();
-                            skill.can_toggle = source == "personal"; // Project skills are read-only
+                            skill.can_toggle = can_toggle;
                             skills.push(skill);
                         }
                     }
@@ -4369,7 +4665,40 @@ fn scan_disabled_skills_directory(agent_id: &str) -> Vec<AgentSkill> {
     };
 
     // Disabled skills have enabled=false, and they're all personal (can_toggle=true)
-    scan_skills_directory(&disabled_dir, "personal", false)
+    scan_skills_directory(&disabled_dir, "personal", false, true)
+}
+
+fn read_claude_plugin_skills(plugins_dir: &Path) -> Result<Vec<AgentSkill>, std::io::Error> {
+    let installed_path = plugins_dir.join("installed_plugins.json");
+    if !installed_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let contents = std::fs::read_to_string(&installed_path)?;
+    let installed: ClaudeInstalledPlugins = serde_json::from_str(&contents)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+
+    let mut skills = Vec::new();
+    for installs in installed.plugins.values() {
+        for install in installs {
+            let scope = install
+                .scope
+                .as_deref()
+                .unwrap_or("user")
+                .to_string();
+            let source = if scope == "project" { "project" } else { "personal" };
+            let install_path = PathBuf::from(&install.install_path);
+            let skill_dirs = [
+                install_path.join("skills"),
+                install_path.join(".claude").join("skills"),
+            ];
+            for dir in skill_dirs {
+                skills.extend(scan_skills_directory(&dir, source, true, false));
+            }
+        }
+    }
+
+    Ok(skills)
 }
 
 #[tauri::command]
@@ -4389,10 +4718,12 @@ async fn get_agent_skills(
                 &home.join(".claude").join("skills"),
                 "personal",
                 true,
+                true,
             ));
             all_skills.extend(scan_skills_directory(
                 &home.join(".factory").join("skills"),
                 "personal",
+                true,
                 true,
             ));
 
@@ -4403,12 +4734,19 @@ async fn get_agent_skills(
                     &proj.join(".claude").join("skills"),
                     "project",
                     true,
+                    false,
                 ));
                 all_skills.extend(scan_skills_directory(
                     &proj.join(".factory").join("skills"),
                     "project",
                     true,
+                    false,
                 ));
+            }
+
+            match read_claude_plugin_skills(&home.join(".claude").join("plugins")) {
+                Ok(mut plugin_skills) => all_skills.append(&mut plugin_skills),
+                Err(err) => eprintln!("[Harness] Failed to read Claude plugin skills: {}", err),
             }
 
             // Disabled skills
@@ -4421,6 +4759,7 @@ async fn get_agent_skills(
                 &home.join(".codex").join("skills"),
                 "personal",
                 true,
+                true,
             ));
 
             // Project: .codex/skills/
@@ -4430,6 +4769,7 @@ async fn get_agent_skills(
                     &proj.join(".codex").join("skills"),
                     "project",
                     true,
+                    false,
                 ));
             }
 
@@ -6648,9 +6988,13 @@ pub(crate) async fn send_chat_message_internal(
         let mut sessions = state.sessions.lock().await;
         sessions.insert(task_id.clone(), handle_ref.clone());
 
-        if task.agent_id == "codex" {
+        if task.agent_id == "codex" || task.agent_id == "claude-code" {
             let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
-            let commands = collect_codex_commands(state, &command_root);
+            let commands = if task.agent_id == "codex" {
+                collect_codex_commands(state, &command_root)
+            } else {
+                collect_claude_commands(state, &command_root)
+            };
             emit_available_commands(&app, &task_id, &task.agent_id, &commands);
         }
         handle_ref
@@ -6859,7 +7203,7 @@ pub(crate) async fn send_chat_message_internal(
                     }),
                     StreamingUpdate::AvailableCommands { commands } => {
                         // Emit available commands to all windows for slash command autocomplete
-                        if agent_id_for_stream == "codex" {
+                        if agent_id_for_stream == "codex" || agent_id_for_stream == "claude-code" {
                             continue;
                         }
                         emit_available_commands(
@@ -7717,6 +8061,7 @@ fn main() {
                 pending_user_inputs: Arc::new(Mutex::new(HashMap::new())),
                 pending_discord_tasks: Arc::new(Mutex::new(HashMap::new())),
                 codex_command_cache: Arc::new(StdMutex::new(HashMap::new())),
+                claude_command_cache: Arc::new(StdMutex::new(HashMap::new())),
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -7726,6 +8071,7 @@ fn main() {
             refresh_agent_models,
             get_enriched_models,
             get_codex_commands,
+            get_claude_commands,
             // Mode commands
             get_agent_modes,
             get_cached_modes,

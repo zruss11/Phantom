@@ -519,6 +519,9 @@
         if (channel === 'getCodexCommands') {
           return tauriInvoke('get_codex_commands', { projectPath: args[0] || null });
         }
+        if (channel === 'getClaudeCommands') {
+          return tauriInvoke('get_claude_commands', { projectPath: args[0] || null });
+        }
           // Mode commands
         if (channel === 'getAgentModes') {
           return tauriInvoke('get_agent_modes', { agentId: args[0] });
@@ -584,6 +587,9 @@
             ]);
             break;
           case 'getCodexCommands':
+            resolve([]);
+            break;
+          case 'getClaudeCommands':
             resolve([]);
             break;
           case 'toggleSkill':

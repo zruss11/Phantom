@@ -2302,6 +2302,7 @@ init();
     }
 
     refreshCodexCommands();
+    refreshClaudeCommands();
   }
 
   function getSelectedAgents() {
@@ -3168,6 +3169,7 @@ init();
     addRecentProjectPath(getProjectPath());
     renderProjectAllowlist();
     refreshCodexCommands();
+    refreshClaudeCommands();
   });
 
   $("#pickProjectPath").on("click", async () => {
@@ -3180,6 +3182,7 @@ init();
         addRecentProjectPath(picked);
         renderProjectAllowlist();
         refreshCodexCommands();
+        refreshClaudeCommands();
       }
     } catch (err) {
       console.log("[Harness] Project picker unavailable");
@@ -3303,7 +3306,25 @@ init();
     }
   }
 
+  async function refreshClaudeCommands() {
+    if (!ipcRenderer || !window.promptSlashCommands) return;
+
+    var agentId = primaryAgentId || activeAgentId || window.activeAgentId;
+    if (agentId !== "claude-code") return;
+
+    var projectPath = typeof getProjectPath === "function" ? getProjectPath() : null;
+    try {
+      var commands = await ipcRenderer.invoke("getClaudeCommands", projectPath);
+      if (Array.isArray(commands)) {
+        window.promptSlashCommands.updateCommands(commands, "claude-code");
+      }
+    } catch (err) {
+      console.log("[Harness] Failed to load Claude commands", err);
+    }
+  }
+
   refreshCodexCommands();
+  refreshClaudeCommands();
 
   // Auto-focus the prompt textarea on initial page load (Notion-style UX)
   // Navigation focus is handled in gui.js
