@@ -1392,10 +1392,10 @@ async function DeleteTask(id) {
   try {
     const result = await ipcRenderer.invoke('checkTaskUncommittedChanges', id);
 
-    if (result && result.has_changes) {
+    if (result && result.hasChanges) {
       pendingDeleteTaskId = id;
       const pathEl = document.getElementById('deleteTaskWorktreePath');
-      if (pathEl) pathEl.textContent = result.worktree_path || '';
+      if (pathEl) pathEl.textContent = result.worktreePath || '';
       $('#deleteTaskWarningModal').modal('show');
     } else {
       performTaskDeletion(id);

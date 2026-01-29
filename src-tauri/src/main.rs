@@ -5243,6 +5243,7 @@ fn load_tasks(state: State<'_, AppState>) -> Result<Vec<db::TaskRecord>, String>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UncommittedChangesResult {
     has_changes: bool,
     worktree_path: Option<String>,
