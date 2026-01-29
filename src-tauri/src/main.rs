@@ -1015,6 +1015,9 @@ fn container_auth_mounts(agent_id: &str, settings: &Settings) -> Result<Vec<Cont
                 Some("oauth") | Some("cli")
             ) {
                 let claude_dir = home.join(".claude");
+                if let Err(err) = ensure_claude_credentials_file() {
+                    return Err(err);
+                }
                 if claude_dir.exists() {
                     mounts.push(make_mount(
                         claude_dir,
@@ -1754,6 +1757,37 @@ fn validate_oauth_url(url: &str) -> bool {
         }
     }
     false
+}
+
+fn ensure_claude_credentials_file() -> Result<(), String> {
+    let home = dirs::home_dir().ok_or_else(|| "home dir unavailable".to_string())?;
+    let claude_dir = home.join(".claude");
+    let credentials_path = claude_dir.join(".credentials.json");
+    if credentials_path.exists() {
+        return Ok(());
+    }
+    let Some(tokens) = fetch_claude_oauth_tokens() else {
+        return Ok(());
+    };
+
+    std::fs::create_dir_all(&claude_dir).map_err(|e| format!("create claude dir: {}", e))?;
+    let payload = serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": tokens.access_token,
+            "refreshToken": tokens.refresh_token,
+            "expiresAt": tokens.expires_at,
+        }
+    });
+    let serialized =
+        serde_json::to_string_pretty(&payload).map_err(|e| format!("serialize oauth: {}", e))?;
+    std::fs::write(&credentials_path, serialized)
+        .map_err(|e| format!("write claude credentials: {}", e))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&credentials_path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 async fn spawn_agent_client(
