@@ -3,6 +3,7 @@
 //! This module provides utilities for creating and managing git worktrees,
 //! enabling agents to work in isolated branches without affecting the main working tree.
 
+use crate::utils::resolve_gh_binary;
 use rand::seq::SliceRandom;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -882,7 +883,8 @@ pub async fn create_pull_request(
     run_git_command(worktree_path, &["push", "-u", "origin", branch]).await?;
 
     // Create PR using gh CLI with --fill to auto-generate title/body from commits
-    let output = Command::new("gh")
+    let gh_path = resolve_gh_binary()?;
+    let output = Command::new(&gh_path)
         .args(["pr", "create", "--fill", "--head", branch])
         .current_dir(worktree_path)
         .output()

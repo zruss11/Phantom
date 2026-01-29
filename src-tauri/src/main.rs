@@ -5,13 +5,14 @@ mod debug_http;
 mod discord_bot;
 mod local_usage;
 mod logger;
+mod mcp_server;
 mod namegen;
 mod summarize;
 mod utils;
 mod webhook;
 mod worktree;
 
-use utils::truncate_str;
+use utils::{resolve_gh_binary, truncate_str};
 
 use chrono::TimeZone;
 use phantom_harness_backend::cli::{
@@ -25,6 +26,7 @@ use phantom_harness_backend::{
     get_codex_modes as backend_get_codex_modes, get_factory_custom_models, AgentLaunchConfig,
     CancellationToken, EnrichedModelOption, ModeOption, ModelOption,
 };
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -44,6 +46,7 @@ use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
 use debug_http::start_debug_http;
+use mcp_server::{start_mcp_server, McpConfig};
 
 /// Model pricing (per million tokens): (model_pattern, input_rate, output_rate)
 /// Rates are in USD per 1M tokens
@@ -271,10 +274,10 @@ fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvail
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    config: AgentsConfig,
+    pub(crate) config: AgentsConfig,
     sessions: Arc<Mutex<HashMap<String, SharedSessionHandle>>>,
-    settings: Arc<Mutex<Settings>>,
-    db: Arc<StdMutex<rusqlite::Connection>>,
+    pub(crate) settings: Arc<Mutex<Settings>>,
+    pub(crate) db: Arc<StdMutex<rusqlite::Connection>>,
     notification_windows: Arc<StdMutex<Vec<String>>>,
     agent_availability: Arc<StdMutex<HashMap<String, AgentAvailability>>>,
     // Prevent accidental duplicate starts (e.g., user rapid-clicking Start)
@@ -287,20 +290,20 @@ pub(crate) struct AppState {
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct AgentsConfig {
+pub(crate) struct AgentsConfig {
     #[allow(dead_code)]
     version: Option<u32>,
     #[allow(dead_code)]
     max_parallel: Option<u32>,
     #[serde(default)]
-    agents: Vec<AgentConfig>,
+    pub(crate) agents: Vec<AgentConfig>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-struct AgentConfig {
-    id: String,
+pub(crate) struct AgentConfig {
+    pub(crate) id: String,
     #[allow(dead_code)]
-    display_name: Option<String>,
+    pub(crate) display_name: Option<String>,
     command: String,
     #[serde(default)]
     args: Vec<String>,
@@ -308,19 +311,19 @@ struct AgentConfig {
     required_env: Vec<String>,
     #[serde(default)]
     #[allow(dead_code)]
-    supports_plan: Option<bool>,
+    pub(crate) supports_plan: Option<bool>,
     #[serde(default)]
     default_plan_model: Option<String>,
     #[serde(default)]
     default_exec_model: Option<String>,
     #[serde(default)]
-    model_source: Option<String>,
+    pub(crate) model_source: Option<String>,
     #[serde(default)]
-    models: Vec<String>,
+    pub(crate) models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct AttachmentRef {
+pub(crate) struct AttachmentRef {
     id: String,
     #[serde(rename = "relativePath")]
     relative_path: String,
@@ -338,38 +341,38 @@ struct CodeReviewContext {
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateAgentPayload {
+pub(crate) struct CreateAgentPayload {
     #[serde(rename = "agentId")]
-    agent_id: String,
-    prompt: String,
+    pub(crate) agent_id: String,
+    pub(crate) prompt: String,
     #[serde(rename = "projectPath")]
-    project_path: Option<String>,
+    pub(crate) project_path: Option<String>,
     /// Base branch for worktree creation (optional)
     #[serde(rename = "baseBranch", default)]
-    base_branch: Option<String>,
+    pub(crate) base_branch: Option<String>,
     #[serde(rename = "planMode")]
-    plan_mode: bool,
-    thinking: bool,
+    pub(crate) plan_mode: bool,
+    pub(crate) thinking: bool,
     #[serde(rename = "useWorktree")]
-    use_worktree: bool,
+    pub(crate) use_worktree: bool,
     #[serde(rename = "permissionMode")]
-    permission_mode: String,
+    pub(crate) permission_mode: String,
     #[serde(rename = "execModel")]
-    exec_model: String,
+    pub(crate) exec_model: String,
     /// Reasoning effort level for Codex models (low, medium, high)
     #[serde(rename = "reasoningEffort", default)]
-    reasoning_effort: Option<String>,
+    pub(crate) reasoning_effort: Option<String>,
     /// Agent mode for agents that expose modes over ACP
     #[serde(rename = "agentMode", default)]
-    agent_mode: Option<String>,
+    pub(crate) agent_mode: Option<String>,
     /// Codex mode (default, plan, pair-programming, execute)
     #[serde(rename = "codexMode", default)]
-    codex_mode: Option<String>,
+    pub(crate) codex_mode: Option<String>,
     /// True when creating multiple agent sessions in one action
     #[serde(rename = "multiCreate", default)]
-    multi_create: bool,
+    pub(crate) multi_create: bool,
     #[serde(default)]
-    attachments: Vec<AttachmentRef>,
+    pub(crate) attachments: Vec<AttachmentRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -405,22 +408,29 @@ struct Settings {
     ai_summaries_enabled: Option<bool>,
     // Task creation settings (sticky between restarts)
     #[serde(rename = "taskProjectPath")]
-    task_project_path: Option<String>,
+    pub(crate) task_project_path: Option<String>,
     #[serde(rename = "taskProjectAllowlist", default)]
-    task_project_allowlist: Option<Vec<String>>,
+    pub(crate) task_project_allowlist: Option<Vec<String>>,
     #[serde(rename = "taskPlanMode")]
-    task_plan_mode: Option<bool>,
+    pub(crate) task_plan_mode: Option<bool>,
     #[serde(rename = "taskThinking")]
-    task_thinking: Option<bool>,
+    pub(crate) task_thinking: Option<bool>,
     #[serde(rename = "taskUseWorktree")]
-    task_use_worktree: Option<bool>,
+    pub(crate) task_use_worktree: Option<bool>,
     #[serde(rename = "taskBaseBranch")]
-    task_base_branch: Option<String>,
+    pub(crate) task_base_branch: Option<String>,
     #[serde(rename = "taskLastAgent")]
-    task_last_agent: Option<String>,
+    pub(crate) task_last_agent: Option<String>,
     // Per-agent task selections stored as JSON object
     #[serde(rename = "taskAgentModels", default)]
     task_agent_models: Option<std::collections::HashMap<String, AgentModelPrefs>>,
+    // MCP server settings
+    #[serde(rename = "mcpEnabled")]
+    pub(crate) mcp_enabled: Option<bool>,
+    #[serde(rename = "mcpPort")]
+    pub(crate) mcp_port: Option<u16>,
+    #[serde(rename = "mcpToken")]
+    pub(crate) mcp_token: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -695,6 +705,43 @@ fn settings_path() -> Result<PathBuf, String> {
     Ok(dir.join("settings.json"))
 }
 
+const DEFAULT_MCP_PORT: u16 = 43778;
+
+fn generate_mcp_token() -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    let mut bytes = [0u8; 32];
+    let mut rng = rand::rngs::OsRng;
+    rng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn ensure_mcp_settings(settings: &mut Settings) -> bool {
+    let mut changed = false;
+    if settings.mcp_enabled.is_none() {
+        settings.mcp_enabled = Some(true);
+        changed = true;
+    }
+    if settings
+        .mcp_token
+        .as_ref()
+        .map(|token| token.trim().is_empty())
+        .unwrap_or(true)
+    {
+        settings.mcp_token = Some(generate_mcp_token());
+        changed = true;
+    }
+    if settings.mcp_port.is_none() {
+        settings.mcp_port = Some(DEFAULT_MCP_PORT);
+        changed = true;
+    }
+    changed
+}
+
+fn mcp_enabled(settings: &Settings) -> bool {
+    settings.mcp_enabled.unwrap_or(true)
+}
+
 fn db_path() -> Result<PathBuf, String> {
     let base = dirs::config_dir().ok_or_else(|| "config dir unavailable".to_string())?;
     let dir = base.join("phantom-harness");
@@ -721,7 +768,7 @@ fn load_settings_from_disk() -> Settings {
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
-fn persist_settings(settings: &Settings) -> Result<(), String> {
+pub(crate) fn persist_settings(settings: &Settings) -> Result<(), String> {
     let path = settings_path()?;
     let payload = serde_json::to_string_pretty(settings)
         .map_err(|err| format!("serialize settings: {}", err))?;
@@ -891,6 +938,29 @@ fn resolve_project_path(project_path: &Option<String>) -> Result<PathBuf, String
     }
 }
 
+fn normalize_allowlist_path(path: &str) -> PathBuf {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return PathBuf::new();
+    }
+    std::fs::canonicalize(trimmed).unwrap_or_else(|_| PathBuf::from(trimmed))
+}
+
+pub(crate) fn project_path_allowed(allowlist: &[String], project_path: &str) -> bool {
+    let project_path = normalize_allowlist_path(project_path);
+    allowlist.iter().any(|entry| {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            return false;
+        }
+        let allowed_path = normalize_allowlist_path(entry);
+        if allowed_path.as_os_str().is_empty() {
+            return false;
+        }
+        project_path.starts_with(&allowed_path)
+    })
+}
+
 fn resolve_task_cwd(task: &db::TaskRecord) -> Result<PathBuf, String> {
     if let Some(path) = task.worktree_path.as_ref() {
         let trimmed = path.trim();
@@ -907,7 +977,7 @@ fn resolve_task_cwd(task: &db::TaskRecord) -> Result<PathBuf, String> {
     std::env::current_dir().map_err(|err| format!("cwd error: {}", err))
 }
 
-async fn resolve_repo_root(path: &Path) -> Option<PathBuf> {
+pub(crate) async fn resolve_repo_root(path: &Path) -> Option<PathBuf> {
     let repo_path = path.to_path_buf();
     match worktree::run_git_command(&repo_path, &["rev-parse", "--show-toplevel"]).await {
         Ok(output) if !output.trim().is_empty() => Some(PathBuf::from(output.trim())),
@@ -1397,7 +1467,8 @@ fn parse_github_repo(remote_url: &str) -> Option<(String, String)> {
 }
 
 async fn run_gh_command(repo_root: &Path, args: &[&str]) -> Result<String, String> {
-    let output = TokioCommand::new("gh")
+    let gh_path = resolve_gh_binary()?;
+    let output = TokioCommand::new(&gh_path)
         .args(args)
         .current_dir(repo_root)
         .output()
@@ -1642,7 +1713,8 @@ async fn check_existing_pr(
     };
 
     async fn run_pr_list(repo_root: &Path, head: &str) -> Result<Option<ExistingPr>, String> {
-        let output = TokioCommand::new("gh")
+        let gh_path = resolve_gh_binary()?;
+        let output = TokioCommand::new(&gh_path)
             .args(&[
                 "pr",
                 "list",
@@ -2646,11 +2718,11 @@ async fn pick_project_path(app: tauri::AppHandle) -> Option<String> {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct CreateAgentResult {
-    task_id: String,
-    session_id: String,
+pub(crate) struct CreateAgentResult {
+    pub(crate) task_id: String,
+    pub(crate) session_id: String,
     #[serde(rename = "worktreePath")]
-    worktree_path: Option<String>,
+    pub(crate) worktree_path: Option<String>,
 }
 
 #[tauri::command]
@@ -2664,7 +2736,7 @@ async fn create_agent_session(
     create_agent_session_internal(app, payload, state.inner(), emit_to_main).await
 }
 
-async fn create_agent_session_internal(
+pub(crate) async fn create_agent_session_internal(
     app: AppHandle,
     payload: CreateAgentPayload,
     state: &AppState,
@@ -3116,29 +3188,6 @@ pub(crate) async fn create_task_from_discord(
     project_path: String,
     model: String,
 ) -> Result<String, String> {
-    fn normalize_allowlist_path(path: &str) -> PathBuf {
-        let trimmed = path.trim();
-        if trimmed.is_empty() {
-            return PathBuf::new();
-        }
-        std::fs::canonicalize(trimmed).unwrap_or_else(|_| PathBuf::from(trimmed))
-    }
-
-    fn project_path_allowed(allowlist: &[String], project_path: &str) -> bool {
-        let project_path = normalize_allowlist_path(project_path);
-        allowlist.iter().any(|entry| {
-            let entry = entry.trim();
-            if entry.is_empty() {
-                return false;
-            }
-            let allowed_path = normalize_allowlist_path(entry);
-            if allowed_path.as_os_str().is_empty() {
-                return false;
-            }
-            project_path.starts_with(&allowed_path)
-        })
-    }
-
     let settings = state.settings.lock().await.clone();
     let agent_models = settings.task_agent_models.clone().unwrap_or_default();
     let prefs = agent_models.get(&agent_id).cloned().unwrap_or_default();
@@ -3301,7 +3350,7 @@ async fn start_task(
     .await
 }
 
-async fn start_task_internal(
+pub(crate) async fn start_task_internal(
     task_id: String,
     state: &AppState,
     app: AppHandle,
@@ -4314,6 +4363,14 @@ async fn stop_task(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    stop_task_internal(task_id, state.inner(), app).await
+}
+
+pub(crate) async fn stop_task_internal(
+    task_id: String,
+    state: &AppState,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     println!("[Harness] stop_task: task_id={}", task_id);
 
     let handle_ref = {
@@ -4367,6 +4424,14 @@ async fn stop_task(
 async fn soft_stop_task(
     task_id: String,
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    soft_stop_task_internal(task_id, state.inner(), app).await
+}
+
+pub(crate) async fn soft_stop_task_internal(
+    task_id: String,
+    state: &AppState,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     println!("[Harness] soft_stop_task: task_id={}", task_id);
@@ -4471,6 +4536,7 @@ async fn save_settings(
     {
         next.claude_auth_method = Some("api".to_string());
     }
+    ensure_mcp_settings(&mut next);
 
     persist_settings(&next)?;
     {
@@ -6036,6 +6102,14 @@ async fn delete_task(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
+    delete_task_internal(task_id, state.inner(), app).await
+}
+
+pub(crate) async fn delete_task_internal(
+    task_id: String,
+    state: &AppState,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     let safe_task_id = task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
     let chat_window_label = format!("chat-{}", safe_task_id);
     if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
@@ -6230,6 +6304,13 @@ async fn get_task_history(
     task_id: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
+    get_task_history_internal(&task_id, state.inner()).await
+}
+
+pub(crate) async fn get_task_history_internal(
+    task_id: &str,
+    state: &AppState,
+) -> Result<serde_json::Value, String> {
     println!("[Harness] get_task_history: task_id={}", task_id);
 
     // Load messages from database (persisted across restarts)
@@ -6239,7 +6320,7 @@ async fn get_task_history(
             .map_err(|e| e.to_string())?
             .into_iter()
             .find(|t| t.id == task_id);
-        let messages = db::get_messages(&conn, &task_id).map_err(|e| e.to_string())?;
+        let messages = db::get_messages(&conn, task_id).map_err(|e| e.to_string())?;
         (task, messages)
     };
 
@@ -6290,7 +6371,7 @@ async fn get_task_history(
                     if !trimmed.is_empty() {
                         resolved_branch = Some(trimmed.clone());
                         if let Ok(conn) = state.db.lock() {
-                            let _ = db::update_task_branch(&conn, &task_id, &trimmed);
+                            let _ = db::update_task_branch(&conn, task_id, &trimmed);
                         }
                     }
                 }
@@ -8053,6 +8134,24 @@ fn main() {
                 });
             }
 
+            {
+                let app_handle = app.handle().clone();
+                let state = app.state::<AppState>().inner().clone();
+                let settings = state.settings.blocking_lock().clone();
+                if mcp_enabled(&settings) {
+                    if let Some(token) = settings.mcp_token.clone() {
+                        let port = settings.mcp_port.unwrap_or(DEFAULT_MCP_PORT);
+                        let token = token.trim().to_string();
+                        let config = McpConfig { port, token };
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(err) = start_mcp_server(app_handle, state, config).await {
+                                eprintln!("[Harness] MCP server failed: {err}");
+                            }
+                        });
+                    }
+                }
+            }
+
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -8074,7 +8173,13 @@ fn main() {
             }
         })
         .manage({
-            let settings = load_settings_from_disk();
+            let mut settings = load_settings_from_disk();
+            let changed = ensure_mcp_settings(&mut settings);
+            if changed {
+                if let Err(err) = persist_settings(&settings) {
+                    eprintln!("[Harness] Failed to persist MCP settings: {err}");
+                }
+            }
             AppState {
                 config,
                 sessions: Arc::new(Mutex::new(HashMap::new())),

@@ -1,5 +1,93 @@
 //! Common utility functions for string manipulation and safe operations.
 
+use std::env;
+use std::path::PathBuf;
+
+/// Find a binary in the current PATH environment variable.
+fn find_in_path(binary: &str) -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Resolve the full path to the `gh` CLI binary.
+///
+/// In packaged macOS apps, the PATH is minimal (/usr/bin:/bin:/usr/sbin:/sbin),
+/// so we check well-known installation locations as fallbacks.
+pub fn resolve_gh_binary() -> Result<PathBuf, String> {
+    // First try PATH
+    if let Some(path) = find_in_path("gh") {
+        return Ok(path);
+    }
+
+    // Fallback to common installation locations
+    let candidates: &[&str] = if cfg!(windows) {
+        &[
+            "C:\\Program Files\\GitHub CLI\\gh.exe",
+            "C:\\Program Files (x86)\\GitHub CLI\\gh.exe",
+        ]
+    } else {
+        &[
+            "/opt/homebrew/bin/gh",  // Apple Silicon Homebrew
+            "/usr/local/bin/gh",      // Intel Homebrew / manual install
+            "/usr/bin/gh",            // System package manager
+            "/opt/local/bin/gh",      // MacPorts
+            "/run/current-system/sw/bin/gh", // NixOS
+        ]
+    };
+
+    for candidate in candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    Err(format!(
+        "GitHub CLI (gh) not found. Install it via `brew install gh` or ensure it is on PATH. Tried: {}",
+        candidates.join(", ")
+    ))
+}
+
+/// Resolve the full path to the `git` binary.
+pub fn resolve_git_binary() -> Result<PathBuf, String> {
+    if let Some(path) = find_in_path("git") {
+        return Ok(path);
+    }
+
+    let candidates: &[&str] = if cfg!(windows) {
+        &[
+            "C:\\Program Files\\Git\\bin\\git.exe",
+            "C:\\Program Files (x86)\\Git\\bin\\git.exe",
+        ]
+    } else {
+        &[
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+            "/usr/bin/git",
+            "/opt/local/bin/git",
+            "/run/current-system/sw/bin/git",
+        ]
+    };
+
+    for candidate in candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+
+    Err(format!(
+        "Git not found. Install Git or ensure it is on PATH. Tried: {}",
+        candidates.join(", ")
+    ))
+}
+
 /// Safely truncate a string to at most `max_chars` characters.
 ///
 /// Unlike byte slicing (`&s[..n]`), this respects UTF-8 character boundaries
