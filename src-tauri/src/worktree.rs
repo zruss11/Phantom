@@ -558,9 +558,12 @@ pub async fn apply_uncommitted_changes(
         return Ok(());
     }
 
-    let mut child = Command::new("git")
+    let git_path = resolve_git_binary()?;
+    let mut child = Command::new(&git_path)
         .args(["apply", "--3way", "--whitespace=nowarn", "-"])
         .current_dir(&worktree)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -572,12 +575,19 @@ pub async fn apply_uncommitted_changes(
             .write_all(&patch)
             .await
             .map_err(|e| format!("Failed to write git apply input: {}", e))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|e| format!("Failed to close git apply stdin: {}", e))?;
     }
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("Failed to run git apply: {}", e))?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS),
+        child.wait_with_output(),
+    )
+    .await
+    .map_err(|_| "Git apply timed out".to_string())?
+    .map_err(|e| format!("Failed to run git apply: {}", e))?;
 
     if output.status.success() {
         return Ok(());

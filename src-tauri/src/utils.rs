@@ -56,11 +56,7 @@ pub fn resolve_gh_binary() -> Result<PathBuf, String> {
 
 /// Resolve the full path to the `git` binary.
 pub fn resolve_git_binary() -> Result<PathBuf, String> {
-    if let Some(path) = find_in_path("git") {
-        return Ok(path);
-    }
-
-    let candidates: &[&str] = if cfg!(windows) {
+    let candidates_primary: &[&str] = if cfg!(windows) {
         &[
             "C:\\Program Files\\Git\\bin\\git.exe",
             "C:\\Program Files (x86)\\Git\\bin\\git.exe",
@@ -69,22 +65,32 @@ pub fn resolve_git_binary() -> Result<PathBuf, String> {
         &[
             "/opt/homebrew/bin/git",
             "/usr/local/bin/git",
-            "/usr/bin/git",
             "/opt/local/bin/git",
             "/run/current-system/sw/bin/git",
         ]
     };
 
-    for candidate in candidates {
+    for candidate in candidates_primary {
         let path = PathBuf::from(candidate);
         if path.exists() {
             return Ok(path);
         }
     }
 
+    if let Some(path) = find_in_path("git") {
+        return Ok(path);
+    }
+
+    if !cfg!(windows) {
+        let system_git = PathBuf::from("/usr/bin/git");
+        if system_git.exists() {
+            return Ok(system_git);
+        }
+    }
+
     Err(format!(
         "Git not found. Install Git or ensure it is on PATH. Tried: {}",
-        candidates.join(", ")
+        candidates_primary.join(", ")
     ))
 }
 

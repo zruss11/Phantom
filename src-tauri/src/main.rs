@@ -2818,7 +2818,14 @@ pub(crate) async fn create_agent_session_internal(
                 &base_ref,
             )
             .await?;
-            worktree::apply_uncommitted_changes(sync_source, &created_path).await?;
+            if let Err(err) = worktree::apply_uncommitted_changes(sync_source, &created_path).await
+            {
+                eprintln!(
+                    "[worktree] Apply uncommitted changes failed, falling back to full sync: {}",
+                    err
+                );
+                worktree::sync_workspace_from_source(sync_source, &created_path).await?;
+            }
 
             // Store info for deferred branch rename
             deferred_branch_rename =
