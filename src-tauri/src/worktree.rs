@@ -141,14 +141,10 @@ async fn run_git_diff_bytes(repo_path: &PathBuf, args: &[&str]) -> Result<Vec<u8
 }
 
 pub async fn diff_stats(repo_path: &PathBuf) -> Result<(u64, u64, u64), String> {
-    // Use numstat for staged + unstaged changes. This is reliable and handles renames,
-    // and it avoids trying to “calculate diffs” manually.
+    // Use a single numstat against the repo base to avoid double-counting partially staged files.
     // Note: git diff may return exit code 1 when there are differences.
-    async fn numstat(repo_path: &PathBuf, cached: bool) -> Result<String, String> {
-        let mut args = vec!["diff", "--numstat", "--no-color"];
-        if cached {
-            args.push("--cached");
-        }
+    async fn numstat_against(repo_path: &PathBuf, base: &str) -> Result<String, String> {
+        let args = ["diff", "--numstat", "--no-color", base];
         let out = run_git_diff_bytes(repo_path, &args).await?;
         Ok(String::from_utf8_lossy(&out).to_string())
     }
@@ -186,12 +182,20 @@ pub async fn diff_stats(repo_path: &PathBuf) -> Result<(u64, u64, u64), String> 
         (additions, deletions, files)
     }
 
-    let unstaged = numstat(repo_path, false).await.unwrap_or_default();
-    let staged = numstat(repo_path, true).await.unwrap_or_default();
-    let (a1, d1, f1) = parse_numstat(&unstaged);
-    let (a2, d2, f2) = parse_numstat(&staged);
+    let base = if run_git_command(repo_path, &["rev-parse", "--verify", "HEAD"]).await.is_ok() {
+        "HEAD".to_string()
+    } else {
+        git_empty_tree_hash(repo_path).await.unwrap_or_default()
+    };
 
-    Ok((a1 + a2, d1 + d2, f1 + f2))
+    if base.is_empty() {
+        return Ok((0, 0, 0));
+    }
+
+    let combined = numstat_against(repo_path, &base).await.unwrap_or_default();
+    let (additions, deletions, files) = parse_numstat(&combined);
+
+    Ok((additions, deletions, files))
 }
 
 async fn run_git_command_raw(
@@ -214,6 +218,73 @@ async fn run_git_command_raw(
             )
         })?
         .map_err(|e| format!("Failed to execute git: {}", e))
+}
+
+async fn run_git_command_raw_with_input(
+    repo_path: &PathBuf,
+    args: &[&str],
+    input: &[u8],
+) -> Result<std::process::Output, String> {
+    let mut cmd = Command::new("git");
+    cmd.args(args)
+        .current_dir(repo_path)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to execute git: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input)
+            .await
+            .map_err(|e| format!("Failed to write to git stdin: {}", e))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|e| format!("Failed to close git stdin: {}", e))?;
+    }
+
+    tokio::time::timeout(Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS), child.wait_with_output())
+        .await
+        .map_err(|_| {
+            format!(
+                "Git command timed out after {}s: git {}",
+                GIT_COMMAND_TIMEOUT_SECS,
+                args.join(" ")
+            )
+        })?
+        .map_err(|e| format!("Failed to execute git: {}", e))
+}
+
+async fn git_empty_tree_hash(repo_path: &PathBuf) -> Result<String, String> {
+    let output = run_git_command_raw_with_input(
+        repo_path,
+        &["hash-object", "-t", "tree", "--stdin"],
+        b"",
+    )
+    .await?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        if detail.is_empty() {
+            Err("Git command failed.".to_string())
+        } else {
+            Err(detail.to_string())
+        }
+    }
 }
 
 /// Check if a branch exists locally.
