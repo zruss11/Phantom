@@ -41,6 +41,8 @@ struct CodexAppServerClient {
     server_req_rx: TokioMutex<mpsc::UnboundedReceiver<Value>>,
     pending: std::sync::Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Value>>>>,
     next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// Ring buffer of recent stderr lines for error diagnostics
+    stderr_buffer: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// Minimal JSON-RPC transport for ACP-based agents (e.g. Claude Code ACP).
@@ -202,11 +204,21 @@ impl CodexAppServerClient {
         let stdout = child.stdout.take().context("missing stdout")?;
         let stderr = child.stderr.take().context("missing stderr")?;
 
-        // drain stderr so the process can't block.
+        // Capture stderr in a ring buffer for error diagnostics while also draining it.
+        let stderr_buffer: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stderr_buffer_clone = stderr_buffer.clone();
         tokio::spawn(async move {
             let mut r = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = r.next_line().await {
                 eprintln!("[CodexAppServer][stderr] {}", line);
+                // Keep last 50 lines of stderr for error context
+                if let Ok(mut buf) = stderr_buffer_clone.lock() {
+                    buf.push(line);
+                    if buf.len() > 50 {
+                        buf.remove(0);
+                    }
+                }
             }
         });
 
@@ -260,7 +272,16 @@ impl CodexAppServerClient {
             server_req_rx: TokioMutex::new(server_req_rx),
             pending,
             next_id,
+            stderr_buffer,
         })
+    }
+
+    /// Get recent stderr lines for error diagnostics
+    fn get_recent_stderr(&self) -> String {
+        self.stderr_buffer
+            .lock()
+            .map(|buf| buf.join("\n"))
+            .unwrap_or_default()
     }
 
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
@@ -480,10 +501,30 @@ impl CodexAppServerClient {
                     return Ok((full, captured_usage));
                 }
                 req = server_req_rx.recv() => {
-                    req.context("codex app-server closed")?
+                    match req {
+                        Some(v) => v,
+                        None => {
+                            let stderr = self.get_recent_stderr();
+                            if stderr.is_empty() {
+                                return Err(anyhow::anyhow!("codex app-server closed"));
+                            } else {
+                                return Err(anyhow::anyhow!("codex app-server closed: {}", stderr));
+                            }
+                        }
+                    }
                 }
                 notif = notif_rx.recv() => {
-                    notif.context("codex app-server closed")?
+                    match notif {
+                        Some(v) => v,
+                        None => {
+                            let stderr = self.get_recent_stderr();
+                            if stderr.is_empty() {
+                                return Err(anyhow::anyhow!("codex app-server closed"));
+                            } else {
+                                return Err(anyhow::anyhow!("codex app-server closed: {}", stderr));
+                            }
+                        }
+                    }
                 }
             };
 

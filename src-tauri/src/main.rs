@@ -107,10 +107,30 @@ fn is_recoverable_exit(error: &str) -> bool {
         || error.contains("terminated by signal 15")
 }
 
+/// Check if an error is related to authentication/authorization failure
+/// These errors require the user to re-authenticate
+fn is_auth_error(error: &str) -> bool {
+    let error_lower = error.to_lowercase();
+    error_lower.contains("token_expired")
+        || error_lower.contains("refresh_token_reused")
+        || error_lower.contains("401")
+        || error_lower.contains("unauthorized")
+        || error_lower.contains("authentication token is expired")
+        || error_lower.contains("please log out and sign in again")
+        || error_lower.contains("please try signing in again")
+        || error_lower.contains("failed to refresh token")
+        || error_lower.contains("access token could not be refreshed")
+}
+
 /// Format an Agent error for display to the user
-/// Returns (formatted_message, error_type) where error_type is "terminated" or "error"
+/// Returns (formatted_message, error_type) where error_type is "terminated", "auth_expired", or "error"
 fn format_agent_error(error: &str) -> (String, &'static str) {
-    if is_recoverable_exit(error) {
+    if is_auth_error(error) {
+        (
+            "Authentication expired. Please run 'codex login' in your terminal or sign in again from Settings.".to_string(),
+            "auth_expired"
+        )
+    } else if is_recoverable_exit(error) {
         (
             "Agent session was terminated. This may happen due to timeout, permission denial, or system interruption.".to_string(),
             "terminated"
