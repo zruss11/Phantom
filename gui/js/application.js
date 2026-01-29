@@ -718,7 +718,7 @@ function updateAgentUsageWarning(agentId, sessionPercent, weeklyPercent) {
     const parts = [];
     if (typeof sessionPercent === "number") parts.push(`Session ${sessionPercent}%`);
     if (typeof weeklyPercent === "number") parts.push(`Weekly ${weeklyPercent}%`);
-    card.setAttribute("title", parts.join(" • "));
+    card.setAttribute("title", parts.join(" \u2022 "));
   } else {
     card.removeAttribute("title");
   }
@@ -1135,6 +1135,8 @@ ipcRenderer.on("AddTask", (e, ID, Task) => {
     branch: branch,
     totalTokens: totalTokens,
     contextWindow: contextWindow,
+    diffAdditions: 0,
+    diffDeletions: 0,
   };
 
   // Calculate context ring state from persisted data
@@ -1390,10 +1392,10 @@ async function DeleteTask(id) {
   try {
     const result = await ipcRenderer.invoke('checkTaskUncommittedChanges', id);
 
-    if (result && result.has_changes) {
+    if (result && result.hasChanges) {
       pendingDeleteTaskId = id;
       const pathEl = document.getElementById('deleteTaskWorktreePath');
-      if (pathEl) pathEl.textContent = result.worktree_path || '';
+      if (pathEl) pathEl.textContent = result.worktreePath || '';
       $('#deleteTaskWarningModal').modal('show');
     } else {
       performTaskDeletion(id);
@@ -1504,7 +1506,7 @@ function sortTasks(column) {
         return 0;
     }
 
-    // Numeric comparison for id and cost
+    // Numeric comparison for id, cost
     if (column === "id" || column === "cost") {
       return currentSortState.direction === "asc" ? valA - valB : valB - valA;
     }

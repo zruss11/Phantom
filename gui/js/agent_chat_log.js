@@ -222,6 +222,56 @@
   // Diff line counter (tracks additions and deletions)
   let diffAdditions = 0;
   let diffDeletions = 0;
+  let diffStatsMode = "local";
+
+  // Current PR info (for existing PR display)
+  let currentPrInfo = null;
+  let currentBranch = null;
+  let lastPrCheckError = null;
+  const PR_CACHE_TTL_MS = 10 * 60 * 1000;
+
+  function getPrCacheKey(projectPath, branch) {
+    return `phantom-pr-info-${encodeURIComponent(projectPath)}|${encodeURIComponent(branch)}`;
+  }
+
+  function loadCachedPrInfo(projectPath, branch) {
+    if (!projectPath || !branch) return null;
+    try {
+      const key = getPrCacheKey(projectPath, branch);
+      const raw = localStorage.getItem(key);
+      if (!raw) return null;
+      const payload = JSON.parse(raw);
+      if (!payload || !payload.pr) return null;
+      if (payload.updatedAt && Date.now() - payload.updatedAt > PR_CACHE_TTL_MS) {
+        localStorage.removeItem(key);
+        return null;
+      }
+      if (payload.pr.state !== "OPEN") return null;
+      return payload.pr;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function saveCachedPrInfo(projectPath, branch, prInfo) {
+    if (!projectPath || !branch) return;
+    try {
+      const key = getPrCacheKey(projectPath, branch);
+      if (prInfo && prInfo.state === "OPEN") {
+        localStorage.setItem(
+          key,
+          JSON.stringify({
+            pr: prInfo,
+            updatedAt: Date.now(),
+          }),
+        );
+      } else {
+        localStorage.removeItem(key);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
 
   function updateDiffCounter() {
     const counter = document.getElementById("diffCounter");
@@ -233,16 +283,134 @@
     }
   }
 
+  function setDiffStats(additions, deletions, mode) {
+    diffAdditions = additions || 0;
+    diffDeletions = deletions || 0;
+    if (mode) {
+      diffStatsMode = mode;
+    }
+    updateDiffCounter();
+    persistDiffStats();
+  }
+
+  function loadPersistedDiffStats() {
+    if (!currentTaskId) return false;
+    try {
+      const raw = localStorage.getItem(`phantom-task-diff-stats-${currentTaskId}`);
+      if (!raw) return false;
+      const payload = JSON.parse(raw);
+      if (!payload) return false;
+      setDiffStats(payload.additions || 0, payload.deletions || 0, "local");
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function persistDiffStats() {
+    if (!currentTaskId) return;
+    try {
+      localStorage.setItem(
+        `phantom-task-diff-stats-${currentTaskId}`,
+        JSON.stringify({
+          additions: diffAdditions,
+          deletions: diffDeletions,
+          updatedAt: Date.now(),
+        }),
+      );
+    } catch (e) {
+      // ignore
+    }
+  }
+
   function addDiffLines(additions, deletions) {
+    if (diffStatsMode === "repo") return;
     diffAdditions += additions;
     diffDeletions += deletions || 0;
     updateDiffCounter();
+    persistDiffStats();
   }
 
   function resetDiffCount() {
-    diffAdditions = 0;
-    diffDeletions = 0;
-    updateDiffCounter();
+    setDiffStats(0, 0, "local");
+  }
+
+  async function refreshDiffStats() {
+    if (!currentTaskId) return;
+    if (!ipcRenderer || !ipcRenderer.invoke) return;
+    try {
+      const stats = await ipcRenderer.invoke("getWorktreeDiffStats", currentTaskId);
+      if (!stats || typeof stats.additions !== "number" || typeof stats.deletions !== "number") {
+        return;
+      }
+      setDiffStats(stats.additions, stats.deletions, "repo");
+    } catch (err) {
+      console.warn("[ChatLog] Failed to refresh diff stats:", err);
+    }
+  }
+
+  // Check for existing PR on the current branch
+  async function checkExistingPr(projectPath, branch) {
+    if (!projectPath || !branch) {
+      console.log("[ChatLog] Cannot check PR: missing path or branch");
+      return;
+    }
+
+    try {
+      console.log("[ChatLog] Checking for existing PR on branch:", branch);
+      const result = await ipcRenderer.invoke("checkExistingPr", projectPath, branch);
+
+      if (result.error) {
+        console.warn("[ChatLog] PR check error:", result.error);
+        if (result.error !== lastPrCheckError) {
+          addSystemMessage(`PR check failed: ${result.error}`);
+          lastPrCheckError = result.error;
+        }
+        // Fall back to cached PR info if available
+        currentPrInfo = loadCachedPrInfo(projectPath, branch);
+        updatePrButton();
+        return;
+      }
+
+      currentPrInfo = result.pr;
+      saveCachedPrInfo(projectPath, branch, currentPrInfo);
+      lastPrCheckError = null;
+      updatePrButton();
+
+      if (currentPrInfo) {
+        console.log("[ChatLog] Found existing PR:", currentPrInfo);
+      } else {
+        console.log("[ChatLog] No existing PR found");
+      }
+    } catch (err) {
+      console.error("[ChatLog] Failed to check existing PR:", err);
+      if (String(err) !== lastPrCheckError) {
+        addSystemMessage(`PR check failed: ${err}`);
+        lastPrCheckError = String(err);
+      }
+      currentPrInfo = loadCachedPrInfo(projectPath, branch);
+      updatePrButton();
+    }
+  }
+
+  // Update PR button/link based on current PR info
+  function updatePrButton() {
+    const createBtn = $("#createPrButton");
+    const existingLink = $("#existingPrLink");
+    const existingText = $("#existingPrText");
+
+    // Show PR link if we have an open PR
+    if (currentPrInfo && currentPrInfo.state === "OPEN") {
+      existingLink.attr("href", currentPrInfo.url);
+      existingText.text(`PR #${currentPrInfo.number}`);
+      existingLink.attr("title", currentPrInfo.title);
+      existingLink.show();
+      createBtn.hide();
+    } else {
+      // Show Create PR button
+      existingLink.hide();
+      createBtn.show();
+    }
   }
 
   // Parse task ID from URL query params
@@ -260,6 +428,7 @@
 
     if (currentTaskId) {
       $("#taskId .task-id-value").text(currentTaskId);
+      loadPersistedDiffStats();
     }
 
     // Request task info from main process
@@ -1097,6 +1266,11 @@
     // Receive task info
     ipcRenderer.on("TaskInfo", function (e, taskInfo) {
       if (taskInfo && taskInfo.id === currentTaskId) {
+        console.log("[ChatLog] TaskInfo received:", {
+          branch: taskInfo.branch,
+          worktreePath: taskInfo.worktree_path,
+          projectPath: taskInfo.project_path
+        });
         updateHeader(taskInfo);
         // Update slash commands for the task's agent
         if (window.chatSlashCommands && taskInfo.agent) {
@@ -1107,9 +1281,11 @@
         taskStatusState = taskInfo.status_state || "idle";
         // Store resolved path for "Open in..." functionality (worktree_path preferred, project_path fallback)
         currentTaskPath = taskInfo.worktree_path || taskInfo.project_path || null;
-        // Update branch indicator
+        // Update branch indicator (this will trigger PR check via updateBranchIndicator)
+        currentBranch = taskInfo.branch;
         updateBranchIndicator(taskInfo.branch);
         updatePendingUI();
+        refreshDiffStats();
       }
     });
 
@@ -1117,6 +1293,7 @@
     ipcRenderer.on("BranchUpdate", function (e, taskId, branchName) {
       if (taskId === currentTaskId) {
         console.log("[ChatLog] BranchUpdate:", branchName);
+        // Update branch indicator (this will trigger PR check via updateBranchIndicator)
         updateBranchIndicator(branchName);
       }
     });
@@ -2010,6 +2187,20 @@
       indicator.style.display = "inline-flex";
       indicator.setAttribute("title", `Current branch: ${trimmed} (click to copy)`);
       indicator.setAttribute("aria-label", `Copy branch ${trimmed}`);
+
+      // Seed UI with cached PR info before checking the network
+      const cachedPr = loadCachedPrInfo(currentTaskPath, trimmed);
+      if (cachedPr) {
+        currentPrInfo = cachedPr;
+        updatePrButton();
+      }
+
+      // Update current branch and check for PR whenever branch indicator is updated
+      currentBranch = trimmed;
+      if (currentTaskPath && currentBranch) {
+        console.log("[ChatLog] Branch indicator updated, checking for PR:", currentBranch);
+        checkExistingPr(currentTaskPath, currentBranch);
+      }
     } else {
       indicator.style.display = "none";
       indicator.setAttribute("title", "Current branch (click to copy)");
@@ -4129,82 +4320,96 @@
     container.appendChild(output);
   }
 
+  async function computeDiffStats(diffText) {
+    try {
+      const diffs = await loadDiffsModule();
+      const { parsePatchFiles } = diffs;
+      const patches = parsePatchFiles(diffText);
+      const files = patches.flatMap((patch) => patch.files || []);
+      if (!files.length) throw new Error('No diff files parsed');
+      let additions = 0;
+      let deletions = 0;
+      files.forEach((fileDiff) => {
+        const stats = getDiffFileStats(fileDiff);
+        additions += stats.additions;
+        deletions += stats.deletions;
+      });
+      return { additions, deletions, files: files.length };
+    } catch (err) {
+      // Fallback: legacy line-based counting
+      const parsed = parseUnifiedDiff(diffText || '');
+      let additions = 0;
+      let deletions = 0;
+      parsed.forEach((line) => {
+        if (line.type === 'add') additions += 1;
+        if (line.type === 'del') deletions += 1;
+      });
+      return { additions, deletions, files: countDiffFiles(diffText || '') || 0 };
+    }
+  }
+
   function renderDiffBlock(diffText, title) {
-    const parsed = parseUnifiedDiff(diffText);
-    let additions = 0;
-    let deletions = 0;
-    parsed.forEach((line) => {
-      if (line.type === "add") additions += 1;
-      if (line.type === "del") deletions += 1;
-    });
-
-    // Update header diff counter
-    addDiffLines(additions, deletions);
-
-    const card = document.createElement("div");
-    card.className = "diff-card";
+    const card = document.createElement('div');
+    card.className = 'diff-card';
+    card.dataset.diffStyle = localStorage.getItem('phantom-diff-style') || 'unified';
 
     // Header
-    const header = document.createElement("div");
-    header.className = "diff-card-header";
+    const header = document.createElement('div');
+    header.className = 'diff-card-header';
 
-    const titleWrap = document.createElement("div");
-    titleWrap.className = "diff-title";
+    const titleWrap = document.createElement('div');
+    titleWrap.className = 'diff-title';
 
-    const chip = document.createElement("span");
-    chip.className = "diff-chip";
-    chip.textContent = "DIFF";
+    const chip = document.createElement('span');
+    chip.className = 'diff-chip';
+    chip.textContent = 'DIFF';
 
-    const titleText = document.createElement("span");
-    titleText.className = "diff-title-text";
+    const titleText = document.createElement('span');
+    titleText.className = 'diff-title-text';
     titleText.textContent = extractDiffTitle(diffText, title);
 
     titleWrap.appendChild(chip);
     titleWrap.appendChild(titleText);
 
-    const summary = document.createElement("div");
-    summary.className = "diff-summary";
-    summary.innerHTML = `
-      <span class="diff-add">+${additions}</span>
-      <span class="diff-del">-${deletions}</span>
-    `;
+    const summary = document.createElement('div');
+    summary.className = 'diff-summary';
+    const addSpan = document.createElement('span');
+    addSpan.className = 'diff-add';
+    addSpan.textContent = '+0';
+    const delSpan = document.createElement('span');
+    delSpan.className = 'diff-del';
+    delSpan.textContent = '-0';
+    summary.appendChild(addSpan);
+    summary.appendChild(delSpan);
 
     header.appendChild(titleWrap);
     header.appendChild(summary);
 
-    // Diff output (unified view only)
-    const output = document.createElement("div");
-    output.className = "diff-output";
-
-    parsed.forEach((line) => {
-      const row = document.createElement("div");
-      row.className = `diff-line diff-line-${line.type}`;
-
-      const gutter = document.createElement("div");
-      gutter.className = "diff-gutter";
-
-      const oldLineNum = document.createElement("span");
-      oldLineNum.className = "diff-line-number";
-      oldLineNum.textContent = line.oldLine !== null ? line.oldLine : "";
-
-      const newLineNum = document.createElement("span");
-      newLineNum.className = "diff-line-number";
-      newLineNum.textContent = line.newLine !== null ? line.newLine : "";
-
-      gutter.appendChild(oldLineNum);
-      gutter.appendChild(newLineNum);
-
-      const content = document.createElement("div");
-      content.className = "diff-line-content";
-      content.textContent = line.text;
-
-      row.appendChild(gutter);
-      row.appendChild(content);
-      output.appendChild(row);
+    // Controls
+    const toggle = buildDiffToggle(card.dataset.diffStyle);
+    toggle.addEventListener('click', (e) => {
+      const btn = e.target && e.target.closest ? e.target.closest('.diff-toggle-btn') : null;
+      if (!btn) return;
+      const style = btn.dataset.style || 'unified';
+      localStorage.setItem('phantom-diff-style', style);
+      setDiffStyle(card, style);
     });
 
+    // Body
+    const body = document.createElement('div');
+    body.className = 'diff-body';
+
     card.appendChild(header);
-    card.appendChild(output);
+    card.appendChild(toggle);
+    card.appendChild(body);
+
+    // Render + compute stats async
+    renderDiffsWithLibrary(card, diffText);
+    computeDiffStats(diffText).then((stats) => {
+      addSpan.textContent = `+${stats.additions}`;
+      delSpan.textContent = `-${stats.deletions}`;
+      addDiffLines(stats.additions, stats.deletions);
+    });
 
     return card;
   }

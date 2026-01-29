@@ -429,6 +429,9 @@
         if (channel === 'getPrReadyState') {
           return tauriInvoke('get_pr_ready_state', { projectPath: args[0] || null });
         }
+        if (channel === 'checkExistingPr') {
+          return tauriInvoke('check_existing_pr', { projectPath: args[0] || null, branch: args[1] });
+        }
         if (channel === 'getSettings') {
           return tauriInvoke('get_settings');
         }
@@ -490,6 +493,9 @@
         }
         if (channel === 'checkTaskUncommittedChanges') {
           return tauriInvoke('check_task_uncommitted_changes', { taskId: args[0] });
+        }
+        if (channel === 'getWorktreeDiffStats') {
+          return tauriInvoke('get_task_diff_stats', { taskId: args[0] });
         }
         if (channel === 'getCachedModels') {
           return tauriInvoke('get_cached_models', { agentId: args[0] });

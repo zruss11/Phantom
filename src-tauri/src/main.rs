@@ -518,6 +518,24 @@ struct PrReadyState {
     error: Option<String>,
 }
 
+/// Information about an existing pull request
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ExistingPr {
+    number: u32,
+    url: String,
+    title: String,
+    state: String, // "OPEN", "CLOSED", "MERGED"
+}
+
+/// Result of checking for an existing PR
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PrCheckResult {
+    pr: Option<ExistingPr>,
+    error: Option<String>,
+}
+
 /// Extract email from a JWT access token (base64 decode the payload)
 fn extract_email_from_jwt(token: &str) -> Option<String> {
     // JWT format: header.payload.signature
@@ -1062,9 +1080,10 @@ async fn get_pr_ready_state(project_path: Option<String>) -> Result<PrReadyState
         };
 
     // Check for upstream tracking branch
-    let has_upstream = worktree::run_git_command(&repo_root, &["rev-parse", "--abbrev-ref", "@{u}"])
-        .await
-        .is_ok();
+    let has_upstream =
+        worktree::run_git_command(&repo_root, &["rev-parse", "--abbrev-ref", "@{u}"])
+            .await
+            .is_ok();
 
     // Get ahead/behind counts if upstream exists
     let (ahead_count, behind_count) = if has_upstream {
@@ -1122,6 +1141,100 @@ async fn find_pr_template(repo_root: &std::path::Path) -> Option<String> {
         }
     }
     None
+}
+
+/// Check if a branch has an existing pull request
+#[tauri::command]
+async fn check_existing_pr(
+    project_path: Option<String>,
+    branch: String,
+) -> Result<PrCheckResult, String> {
+    let cwd = resolve_project_path(&project_path)?;
+    let repo_root = match resolve_repo_root(&cwd).await {
+        Some(root) => root,
+        None => {
+            return Ok(PrCheckResult {
+                pr: None,
+                error: Some("Not a git repository".to_string()),
+            });
+        }
+    };
+
+    async fn run_pr_list(repo_root: &Path, head: &str) -> Result<Option<ExistingPr>, String> {
+        let output = TokioCommand::new("gh")
+            .args(&[
+                "pr",
+                "list",
+                "--head",
+                head,
+                "--json",
+                "number,url,title,state",
+                "--limit",
+                "1",
+            ])
+            .current_dir(repo_root)
+            .output()
+            .await
+            .map_err(|e| format!("gh not available: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("gh command failed: {}", stderr));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let prs = serde_json::from_str::<Vec<serde_json::Value>>(&stdout)
+            .map_err(|e| format!("Failed to parse gh output: {}", e))?;
+
+        if let Some(pr) = prs.first() {
+            let number = pr["number"].as_u64().unwrap_or(0) as u32;
+            let url = pr["url"].as_str().unwrap_or("").to_string();
+            let title = pr["title"].as_str().unwrap_or("").to_string();
+            let state = pr["state"].as_str().unwrap_or("UNKNOWN").to_string();
+
+            Ok(Some(ExistingPr {
+                number,
+                url,
+                title,
+                state,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    let mut pr = match run_pr_list(&repo_root, &branch).await {
+        Ok(pr) => pr,
+        Err(error) => {
+            return Ok(PrCheckResult {
+                pr: None,
+                error: Some(error),
+            })
+        }
+    };
+
+    if pr.is_none() {
+        let origin_url = worktree::run_git_command(&repo_root, &["remote", "get-url", "origin"])
+            .await
+            .ok();
+
+        if let Some(url) = origin_url {
+            if let Some((owner, _repo)) = parse_github_repo(&url) {
+                let head = format!("{}:{}", owner, branch);
+                pr = match run_pr_list(&repo_root, &head).await {
+                    Ok(found) => found,
+                    Err(error) => {
+                        return Ok(PrCheckResult {
+                            pr: None,
+                            error: Some(error),
+                        })
+                    }
+                };
+            }
+        }
+    }
+
+    Ok(PrCheckResult { pr, error: None })
 }
 
 /// Format tool call into a human-readable status message for the task list
@@ -2274,15 +2387,22 @@ async fn create_agent_session_internal(
     sessions.insert(task_id.clone(), Arc::new(Mutex::new(handle)));
 
     // Persist task to database (including Agent session ID for context restoration)
+    let initial_branch = if let Some(path) = worktree_path.as_ref() {
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string())
+    } else if let Some(repo_root) = resolve_repo_root(&source_path).await {
+        worktree::current_branch(&repo_root)
+            .await
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+    } else {
+        None
+    };
+
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().timestamp();
-        // Initial branch is the folder name (animal name) - will be updated after async rename
-        let initial_branch = worktree_path
-            .as_ref()
-            .and_then(|path| path.file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
         let task = db::TaskRecord {
             id: task_id.clone(),
             agent_id: payload.agent_id.clone(),
@@ -3074,7 +3194,9 @@ async fn start_task_internal(
                             ("Waiting for input...".to_string(), "#4ade80")
                         }
                         StreamingUpdate::PlanUpdate { .. } => ("Plan updated".to_string(), "white"),
-                        StreamingUpdate::PlanContent { .. } => ("Plan content".to_string(), "white"),
+                        StreamingUpdate::PlanContent { .. } => {
+                            ("Plan content".to_string(), "white")
+                        }
                         StreamingUpdate::AvailableCommands { .. } => {
                             // Handled separately, won't reach here due to should_emit_status check
                             continue;
@@ -5243,6 +5365,7 @@ fn load_tasks(state: State<'_, AppState>) -> Result<Vec<db::TaskRecord>, String>
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct UncommittedChangesResult {
     has_changes: bool,
     worktree_path: Option<String>,
@@ -5262,19 +5385,65 @@ async fn check_task_uncommitted_changes(
 
     // If no task or no worktree, no changes to worry about
     let Some(task) = task_snapshot else {
-        return Ok(UncommittedChangesResult { has_changes: false, worktree_path: None });
+        return Ok(UncommittedChangesResult {
+            has_changes: false,
+            worktree_path: None,
+        });
     };
     let Some(path) = task.worktree_path else {
-        return Ok(UncommittedChangesResult { has_changes: false, worktree_path: None });
+        return Ok(UncommittedChangesResult {
+            has_changes: false,
+            worktree_path: None,
+        });
     };
 
     let worktree_path = PathBuf::from(&path);
     if !worktree_path.exists() {
-        return Ok(UncommittedChangesResult { has_changes: false, worktree_path: Some(path) });
+        return Ok(UncommittedChangesResult {
+            has_changes: false,
+            worktree_path: Some(path),
+        });
     }
 
     let has_changes = worktree::has_uncommitted_changes(&worktree_path).await?;
-    Ok(UncommittedChangesResult { has_changes, worktree_path: Some(path) })
+    Ok(UncommittedChangesResult {
+        has_changes,
+        worktree_path: Some(path),
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DiffStats {
+    additions: u64,
+    deletions: u64,
+    files: u64,
+}
+
+#[tauri::command]
+async fn get_task_diff_stats(
+    task_id: String,
+    state: State<'_, AppState>,
+) -> Result<DiffStats, String> {
+    let task = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
+        tasks.into_iter().find(|t| t.id == task_id)
+    };
+
+    let task = task.ok_or_else(|| "Task not found".to_string())?;
+    let repo_path = task
+        .worktree_path
+        .or(task.project_path)
+        .ok_or_else(|| "Task has no path".to_string())?;
+
+    let repo = std::path::PathBuf::from(repo_path);
+    let repo_root = resolve_repo_root(&repo).await.unwrap_or(repo);
+    let (additions, deletions, files) = worktree::diff_stats(&repo_root).await?;
+    Ok(DiffStats {
+        additions,
+        deletions,
+        files,
+    })
 }
 
 #[tauri::command]
@@ -5392,9 +5561,7 @@ async fn detect_base_branch(path: &PathBuf) -> String {
 }
 
 #[tauri::command]
-async fn gather_code_review_context(
-    project_path: String,
-) -> Result<CodeReviewContext, String> {
+async fn gather_code_review_context(project_path: String) -> Result<CodeReviewContext, String> {
     let path = std::path::PathBuf::from(&project_path);
     if !path.exists() {
         return Err(format!("Project path does not exist: {}", project_path));
@@ -5482,13 +5649,15 @@ async fn get_task_history(
     println!("[Harness] get_task_history: task_id={}", task_id);
 
     // Load messages from database (persisted across restarts)
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-
-    // Get task info
-    let task = db::list_tasks(&conn)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|t| t.id == task_id);
+    let (task, mut messages) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let task = db::list_tasks(&conn)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .find(|t| t.id == task_id);
+        let messages = db::get_messages(&conn, &task_id).map_err(|e| e.to_string())?;
+        (task, messages)
+    };
 
     // Extract task fields for pending prompt detection and paths
     let (
@@ -5523,8 +5692,27 @@ async fn get_task_history(
         ),
     };
 
-    // Load messages from DB
-    let mut messages = db::get_messages(&conn, &task_id).map_err(|e| e.to_string())?;
+    let mut resolved_branch = branch.clone();
+    let branch_missing = resolved_branch
+        .as_deref()
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true);
+    if branch_missing {
+        let fallback_path = worktree_path.clone().or_else(|| project_path.clone());
+        if let Some(path) = fallback_path {
+            if let Some(repo_root) = resolve_repo_root(Path::new(&path)).await {
+                if let Ok(current_branch) = worktree::current_branch(&repo_root).await {
+                    let trimmed = current_branch.trim().to_string();
+                    if !trimmed.is_empty() {
+                        resolved_branch = Some(trimmed.clone());
+                        if let Ok(conn) = state.db.lock() {
+                            let _ = db::update_task_branch(&conn, &task_id, &trimmed);
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     println!(
         "[Harness] get_task_history: loaded {} messages from DB, status_state={}",
@@ -5572,7 +5760,7 @@ async fn get_task_history(
         "title_summary": title_summary,
         "worktree_path": worktree_path,
         "project_path": project_path,
-        "branch": branch
+        "branch": resolved_branch
     }))
 }
 
@@ -6045,6 +6233,9 @@ async fn open_chat_window(
         window_label, agent_name, task_id
     );
 
+    let devtools_enabled = cfg!(debug_assertions)
+        || std::env::var("PHANTOM_CHAT_DEVTOOLS").ok().as_deref() == Some("1");
+
     tauri::WebviewWindowBuilder::new(&app, &window_label, window_url)
         .title(format!("{} Chat - {}", agent_name, task_id))
         .inner_size(650.0, 750.0)
@@ -6052,7 +6243,7 @@ async fn open_chat_window(
         .transparent(true)
         .resizable(true)
         .center()
-        .devtools(false)
+        .devtools(devtools_enabled)
         .build()
         .map_err(|e| format!("Failed to create chat window: {}", e))?;
 
@@ -6366,7 +6557,9 @@ pub(crate) async fn send_chat_message_internal(
                             ("Waiting for input...".to_string(), "#4ade80")
                         }
                         StreamingUpdate::PlanUpdate { .. } => ("Plan updated".to_string(), "white"),
-                        StreamingUpdate::PlanContent { .. } => ("Plan content".to_string(), "white"),
+                        StreamingUpdate::PlanContent { .. } => {
+                            ("Plan content".to_string(), "white")
+                        }
                         StreamingUpdate::AvailableCommands { .. } => continue,
                     };
                     let _ = main_window.emit(
@@ -7206,8 +7399,18 @@ fn main() {
                         } else if shortcut_str.contains("Alt+I")
                             || shortcut_str.contains("Option+I")
                         {
-                            if let Some(window) = app.get_webview_window("main") {
-                                window.open_devtools();
+                            let mut opened = false;
+                            for (_, window) in app.webview_windows() {
+                                if window.is_focused().unwrap_or(false) {
+                                    window.open_devtools();
+                                    opened = true;
+                                    break;
+                                }
+                            }
+                            if !opened {
+                                if let Some(window) = app.get_webview_window("main") {
+                                    window.open_devtools();
+                                }
                             }
                         }
                     }
@@ -7301,6 +7504,7 @@ fn main() {
             pick_project_path,
             get_repo_branches,
             get_pr_ready_state,
+            check_existing_pr,
             create_agent_session,
             start_task,
             stop_task,
@@ -7326,6 +7530,7 @@ fn main() {
             claude_rate_limits,
             load_tasks,
             check_task_uncommitted_changes,
+            get_task_diff_stats,
             delete_task,
             get_task_history,
             open_task_directory,
