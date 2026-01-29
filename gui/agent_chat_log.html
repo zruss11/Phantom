@@ -132,22 +132,26 @@
       }
 
       .diff-counter {
-        display: flex;
+        display: inline-flex;
         align-items: center;
-        gap: 6px;
-        padding: 6px 12px;
-        background: rgba(247, 138, 151, 0.15);
-        border: 1px solid rgba(247, 138, 151, 0.3);
-        border-radius: 16px;
-        color: #f78a97;
-        font-size: 12px;
-        font-weight: 600;
+        gap: 4px;
+        padding: 4px 10px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 6px;
+        font-family: "SF Mono", "Roboto Mono", monospace;
+        font-size: 11px;
+        font-weight: 500;
+        color: rgba(255, 255, 255, 0.7);
         margin-right: 8px;
-        -webkit-app-region: no-drag;
+        transition:
+          background 0.2s ease,
+          border-color 0.2s ease;
       }
 
-      .diff-counter i {
-        font-size: 11px;
+      .diff-counter:hover {
+        background: rgba(255, 255, 255, 0.08);
+        border-color: rgba(255, 255, 255, 0.15);
       }
 
       .diff-counter-add {
@@ -3116,10 +3120,6 @@
           <!-- Populated by JS -->
         </div>
       </div>
-      <div class="diff-counter" id="diffCounter" style="display: none;">
-        <i class="fal fa-code-compare"></i>
-        <span id="diffCount">0</span>
-      </div>
       <div class="chat-header-actions">
         <button
           id="minimizeWindow"
@@ -3143,6 +3143,9 @@
         <span id="statusText">Ready</span>
       </div>
       <div class="status-bar-right">
+        <span class="diff-counter" id="diffCounter" style="display: none;" title="Lines added / deleted">
+          <span id="diffCount">+0 / -0</span>
+        </span>
         <span
           class="branch-indicator"
           id="branchIndicator"
