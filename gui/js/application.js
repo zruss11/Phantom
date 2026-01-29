@@ -315,7 +315,17 @@ async function saveSettingsFromUi() {
   let discordChannelId = $("#discordChannelId").val();
   let retryDelay = $("#retryDelay").val();
   let errorDelay = $("#errorDelay").val();
+  let mcpPortRaw = $("#mcpPort").val();
+  let mcpTokenRaw = $("#mcpToken").val();
   let taskProjectAllowlist = getProjectAllowlist();
+  let parsedMcpPort = parseInt(mcpPortRaw, 10);
+  if (Number.isNaN(parsedMcpPort)) {
+    parsedMcpPort = currentSettings.mcpPort;
+  }
+  let nextMcpToken = (mcpTokenRaw || "").toString().trim();
+  if (!nextMcpToken && currentSettings.mcpToken) {
+    nextMcpToken = currentSettings.mcpToken;
+  }
   let pl = Object.assign(
     {},
     currentSettings,
@@ -330,6 +340,9 @@ async function saveSettingsFromUi() {
       agentNotificationStack: $("#agentNotificationStack").is(":checked"),
       aiSummariesEnabled: $("#aiSummariesEnabled").is(":checked"),
       taskProjectAllowlist: taskProjectAllowlist,
+      mcpEnabled: $("#mcpEnabled").is(":checked"),
+      mcpPort: parsedMcpPort,
+      mcpToken: nextMcpToken,
     },
     collectAuthInputs(),
   );
@@ -344,8 +357,8 @@ async function saveSettingsFromUi() {
 }
 
 // Auto-save settings on any change (inputs and toggles)
-$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay").on("change", saveSettingsFromUi);
-$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #aiSummariesEnabled").on("change", saveSettingsFromUi);
+$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken").on("change", saveSettingsFromUi);
+$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
 
 $(document).on("click", ".project-allowlist-star", function () {
   const path = $(this).data("path");
@@ -1812,6 +1825,17 @@ async function getSettings() {
   if (settingsPayload.ignoreDeclines !== undefined) {
     $("#ignoreDeclines").prop("checked", !!settingsPayload.ignoreDeclines);
   }
+  if (settingsPayload.mcpEnabled !== undefined) {
+    $("#mcpEnabled").prop("checked", !!settingsPayload.mcpEnabled);
+  } else {
+    $("#mcpEnabled").prop("checked", true);
+  }
+  if (settingsPayload.mcpPort !== undefined) {
+    $("#mcpPort").val(settingsPayload.mcpPort);
+  }
+  if (settingsPayload.mcpToken !== undefined) {
+    $("#mcpToken").val(settingsPayload.mcpToken || "");
+  }
   if (settingsPayload.agentNotificationsEnabled !== undefined) {
     $("#agentNotificationsEnabled").prop(
       "checked",
@@ -1879,6 +1903,48 @@ async function getSettings() {
   // Initialize settings page toggle buttons
   initSettingsToggles();
 }
+
+function copyToClipboard(text) {
+  if (!text) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => sendNotification("Copied to clipboard", "green"),
+      () => sendNotification("Copy failed", "red"),
+    );
+    return;
+  }
+  const temp = document.createElement("input");
+  temp.value = text;
+  document.body.appendChild(temp);
+  temp.select();
+  try {
+    document.execCommand("copy");
+    sendNotification("Copied to clipboard", "green");
+  } catch (err) {
+    console.warn("[Harness] clipboard copy failed", err);
+    sendNotification("Copy failed", "red");
+  }
+  document.body.removeChild(temp);
+}
+
+$("#mcpTokenCopy").on("click", function (event) {
+  event.preventDefault();
+  const token = ($("#mcpToken").val() || "").toString().trim();
+  copyToClipboard(token);
+});
+
+$("#mcpTokenReveal").on("click", function (event) {
+  event.preventDefault();
+  const input = document.getElementById("mcpToken");
+  if (!input) return;
+  if (input.type === "password") {
+    input.type = "text";
+    this.textContent = "Hide";
+  } else {
+    input.type = "password";
+    this.textContent = "Show";
+  }
+});
 
 // Initialize and sync settings page toggle buttons with their checkboxes
 function initSettingsToggles() {

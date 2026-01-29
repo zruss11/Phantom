@@ -1258,6 +1258,57 @@
                 </div>
               </div>
 
+              <!-- MCP Server Card -->
+              <div class="card settings-card">
+                <div class="card-body">
+                  <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h5 class="settings-card-title mb-0">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px; opacity: 0.7;">
+                        <path d="M4 7h16M4 12h16M4 17h16"></path>
+                        <circle cx="8" cy="7" r="2"></circle>
+                        <circle cx="8" cy="12" r="2"></circle>
+                        <circle cx="8" cy="17" r="2"></circle>
+                      </svg>
+                      MCP Server
+                    </h5>
+                    <div class="toggle-buttons" data-toggle="mcp-enabled">
+                      <button class="toggle-button" type="button" data-value="false">Off</button>
+                      <button class="toggle-button" type="button" data-value="true">On</button>
+                      <input type="checkbox" id="mcpEnabled" />
+                    </div>
+                  </div>
+                  <div class="form-group mb-3">
+                    <label class="settings-label">Local MCP Port</label>
+                    <input
+                      type="number"
+                      class="form-control"
+                      id="mcpPort"
+                      min="1"
+                      max="65535"
+                      placeholder="43778"
+                    />
+                    <small class="text-muted d-block mt-2">
+                      Phantom must be open for local MCP access. Changes apply on next launch.
+                    </small>
+                  </div>
+                  <div class="form-group mb-2">
+                    <label class="settings-label">MCP Token</label>
+                    <div class="input-group">
+                      <input
+                        type="password"
+                        class="form-control"
+                        id="mcpToken"
+                        placeholder="Token"
+                      />
+                      <div class="input-group-append">
+                        <button class="btn btn-outline-secondary btn-sm" id="mcpTokenReveal">Show</button>
+                        <button class="btn btn-outline-secondary btn-sm" id="mcpTokenCopy">Copy</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <!-- Keyboard Shortcuts Card (Full Width) -->
               <div class="card settings-card" style="grid-column: span 2;">
                 <div class="card-body">
