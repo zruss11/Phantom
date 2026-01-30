@@ -56,6 +56,12 @@ pub fn resolve_gh_binary() -> Result<PathBuf, String> {
 
 /// Resolve the full path to the `git` binary.
 pub fn resolve_git_binary() -> Result<PathBuf, String> {
+    fn is_xcode_git(path: &std::path::Path) -> bool {
+        let path_str = path.to_string_lossy();
+        path_str.contains("Xcode.app/Contents/Developer/usr/bin/git")
+            || path_str.contains("Xcode-beta.app/Contents/Developer/usr/bin/git")
+    }
+
     let candidates_primary: &[&str] = if cfg!(windows) {
         &[
             "C:\\Program Files\\Git\\bin\\git.exe",
@@ -67,6 +73,7 @@ pub fn resolve_git_binary() -> Result<PathBuf, String> {
             "/usr/local/bin/git",
             "/opt/local/bin/git",
             "/run/current-system/sw/bin/git",
+            "/Library/Developer/CommandLineTools/usr/bin/git",
         ]
     };
 
@@ -78,7 +85,9 @@ pub fn resolve_git_binary() -> Result<PathBuf, String> {
     }
 
     if let Some(path) = find_in_path("git") {
-        return Ok(path);
+        if !is_xcode_git(&path) {
+            return Ok(path);
+        }
     }
 
     if !cfg!(windows) {
