@@ -2860,6 +2860,8 @@
     $("#stopButton").hide().prop("disabled", false);
     $("#sendButton").show().prop("disabled", false);
     finalizeStreamingMessage();
+    flushAccumulatedReasoning();
+    finalizeToolBundle();
   }
 
   // Get icon HTML for a tool name
@@ -2872,6 +2874,19 @@
     return GHOST_SVG;
   }
 
+  function isToolCallType(type) {
+    return type === "tool_call" || type === "tool_call_message" || type === "tool_use";
+  }
+
+  function isToolReturnType(type) {
+    return (
+      type === "tool_return" ||
+      type === "tool_return_message" ||
+      type === "tool_result" ||
+      type === "tool_output"
+    );
+  }
+
   // Add a message with bundling support for tool calls
   // Routes tool_call messages through the bundle system, non-tool messages finalize any pending bundle
   function addMessageWithBundling(message, shouldScroll = true) {
@@ -2880,7 +2895,7 @@
     const type = message.type || message.message_type || "system";
 
     // Route tool calls through the bundle system
-    if (type === "tool_call" || type === "tool_call_message") {
+    if (isToolCallType(type)) {
       const toolName = message.tool_call
         ? message.tool_call.name
         : message.name || "Tool";
@@ -2913,7 +2928,7 @@
     }
 
     // Route tool returns through the bundle system
-    if (type === "tool_return" || type === "tool_return_message") {
+    if (isToolReturnType(type)) {
       const rawReturn = message.tool_return || message.result || message.content || "";
       if (mergeBundleToolResult(rawReturn)) {
         if (shouldScroll && autoScroll) {
@@ -2939,7 +2954,7 @@
     }
 
     // Non-tool messages finalize any pending bundle first
-    if (type !== "tool_return" && type !== "tool_return_message") {
+    if (!isToolReturnType(type)) {
       finalizeToolBundle();
     }
 
@@ -3010,7 +3025,7 @@
     }
 
     // Handle tool_return specially - try to merge into pending tool call first
-    if (type === "tool_return" || type === "tool_return_message") {
+    if (isToolReturnType(type)) {
       const rawReturn = message.tool_return || message.result || message.content || "";
       const pendingToolCall = container.find(".tool-call.pending").last();
 
@@ -3262,7 +3277,8 @@
         break;
 
       case "tool_call":
-      case "tool_call_message": {
+      case "tool_call_message":
+      case "tool_use": {
         const toolName = message.tool_call
           ? message.tool_call.name
           : message.name || "Tool";
@@ -3457,6 +3473,8 @@
 
       case "tool_return":
       case "tool_return_message":
+      case "tool_result":
+      case "tool_output":
         // Tool returns are now merged into tool calls via mergeToolResult()
         // This case only handles standalone tool returns (e.g., from history loading)
         const rawReturn =
