@@ -551,6 +551,125 @@
         color: rgba(152, 251, 152, 1);
       }
 
+      /* PR Dropdown Container */
+      .pr-dropdown-container {
+        position: relative;
+        display: inline-flex;
+      }
+
+      .pr-dropdown-container .pr-action-btn {
+        border-radius: 6px 0 0 6px;
+        border-right: none;
+      }
+
+      .pr-dropdown-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-left: 1px solid rgba(255, 255, 255, 0.08);
+        color: rgba(255, 255, 255, 0.75);
+        border-radius: 0 6px 6px 0;
+        padding: 5px 6px;
+        font-size: 10px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .pr-dropdown-toggle:hover {
+        background: rgba(255, 255, 255, 0.1);
+        color: rgba(255, 255, 255, 0.95);
+        border-color: rgba(255, 255, 255, 0.2);
+        border-left-color: rgba(255, 255, 255, 0.12);
+      }
+
+      .pr-dropdown-toggle:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .pr-dropdown-toggle i {
+        transition: transform 0.15s ease;
+      }
+
+      .pr-dropdown-container.open .pr-dropdown-toggle i {
+        transform: rotate(180deg);
+      }
+
+      /* PR Dropdown Menu */
+      .pr-dropdown-menu {
+        display: none;
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        min-width: 180px;
+        background: linear-gradient(180deg, rgba(36, 26, 32, 0.98), rgba(24, 16, 22, 0.98));
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 8px;
+        padding: 4px;
+        box-shadow:
+          0 8px 24px rgba(0, 0, 0, 0.4),
+          0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+        backdrop-filter: blur(12px);
+        z-index: 150;
+      }
+
+      .pr-dropdown-container.open .pr-dropdown-menu {
+        display: block;
+        animation: prDropdownSlide 0.15s ease-out;
+      }
+
+      @keyframes prDropdownSlide {
+        from {
+          opacity: 0;
+          transform: translateY(-4px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .pr-dropdown-item {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        width: 100%;
+        padding: 8px 10px;
+        background: transparent;
+        border: none;
+        border-radius: 6px;
+        color: rgba(255, 255, 255, 0.8);
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.12s ease;
+        text-align: left;
+      }
+
+      .pr-dropdown-item:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: rgba(255, 255, 255, 1);
+      }
+
+      .pr-dropdown-item i {
+        width: 16px;
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.5);
+        text-align: center;
+      }
+
+      .pr-dropdown-item:hover i {
+        color: rgba(255, 255, 255, 0.8);
+      }
+
+      .pr-dropdown-divider {
+        height: 1px;
+        background: rgba(255, 255, 255, 0.08);
+        margin: 4px 6px;
+      }
+
       .chat-container {
         flex: 1;
         overflow-y: auto;
@@ -3302,15 +3421,38 @@
           <i class="fab fa-github"></i>
           <span id="existingPrText">PR #0</span>
         </a>
-        <!-- Create PR Button (shown by default) -->
-        <button
-          id="createPrButton"
-          class="pr-action-btn"
-          title="Create Pull Request"
-        >
-          <i class="fab fa-github"></i>
-          <span>Create PR</span>
-        </button>
+        <!-- Create PR Button with Dropdown -->
+        <div class="pr-dropdown-container" id="prDropdownContainer">
+          <button
+            id="createPrButton"
+            class="pr-action-btn"
+            title="Create Draft Pull Request"
+          >
+            <i class="fab fa-github"></i>
+            <span>Create PR</span>
+          </button>
+          <button
+            class="pr-dropdown-toggle"
+            id="prDropdownToggle"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded="false"
+            title="PR options"
+          >
+            <i class="fas fa-chevron-down"></i>
+          </button>
+          <div class="pr-dropdown-menu" id="prDropdownMenu">
+            <button class="pr-dropdown-item" id="createDraftPr">
+              <i class="fas fa-file-alt"></i>
+              <span>Create Draft PR</span>
+            </button>
+            <div class="pr-dropdown-divider"></div>
+            <button class="pr-dropdown-item" id="createPrManually">
+              <i class="fas fa-external-link-alt"></i>
+              <span>Create PR Manually</span>
+            </button>
+          </div>
+        </div>
         <span class="session-cost" id="sessionCost"></span>
         <span class="elapsed-time" id="elapsedTime"></span>
       </div>

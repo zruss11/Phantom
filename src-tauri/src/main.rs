@@ -1818,6 +1818,50 @@ async fn check_existing_pr(
     Ok(PrCheckResult { pr, error: None })
 }
 
+/// Get GitHub PR creation URL for a branch
+#[tauri::command]
+async fn get_github_pr_url(
+    project_path: Option<String>,
+    current_branch: String,
+    base_branch: Option<String>,
+) -> Result<Option<String>, String> {
+    let cwd = resolve_project_path(&project_path)?;
+    let repo_root = match resolve_repo_root(&cwd).await {
+        Some(root) => root,
+        None => return Ok(None),
+    };
+
+    // Get the remote URL
+    let origin_url = worktree::run_git_command(&repo_root, &["remote", "get-url", "origin"])
+        .await
+        .map_err(|e| format!("Failed to get remote URL: {}", e))?;
+
+    // Parse the GitHub owner/repo from the remote URL
+    let (owner, repo) = match parse_github_repo(&origin_url) {
+        Some((o, r)) => (o, r),
+        None => return Ok(None),
+    };
+
+    // Build the compare URL for PR creation
+    let base = base_branch.unwrap_or_else(|| "main".to_string());
+    let url = format!(
+        "https://github.com/{}/{}/compare/{}...{}?expand=1",
+        owner, repo, base, current_branch
+    );
+
+    Ok(Some(url))
+}
+
+/// Open an external URL in the default browser
+#[tauri::command]
+async fn open_external_url(app_handle: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app_handle
+        .opener()
+        .open_url(&url, None::<&str>)
+        .map_err(|e| format!("Failed to open URL: {}", e))
+}
+
 /// Format tool call into a human-readable status message for the task list
 fn format_tool_status(name: &str, arguments: &str) -> String {
     let tool_name = if name.is_empty() { "tool" } else { name };
@@ -8566,6 +8610,8 @@ fn main() {
             get_repo_branches,
             get_pr_ready_state,
             check_existing_pr,
+            get_github_pr_url,
+            open_external_url,
             create_agent_session,
             start_task,
             stop_task,
