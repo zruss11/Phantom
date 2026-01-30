@@ -594,6 +594,9 @@
         if (channel === 'save_attachment') {
           return tauriInvoke('save_attachment', { payload: args[0] });
         }
+        if (channel === 'getAttachmentBase64') {
+          return tauriInvoke('get_attachment_base64', { relativePath: args[0] });
+        }
       }
 
       return new Promise(function(resolve) {
