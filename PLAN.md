@@ -285,7 +285,7 @@ ipcRenderer.invoke("getAgentAvailability").then((avail) => {
 ## File Changes Summary
 
 | File | Changes |
-|------|---------|
+| ------ | --------- |
 | `src-tauri/src/main.rs` | Add `summaries_agent` to Settings struct, update 3 call sites |
 | `src-tauri/src/summarize.rs` | Add `_with_override` variants, add `resolve_summaries_agent` helper |
 | `src-tauri/src/namegen.rs` | Add `_with_override` variants, add Amp support, add `resolve_summaries_agent` |

@@ -221,6 +221,7 @@ async function refreshBaseBranchOptions() {
 // webFrame.setVisualZoomLevelLimits(1, 1)
 // webFrame.setLayoutZoomLevelLimits(0, 0);
 let currentSettings = {};
+let settingsLoaded = false;
 let recentProjectPaths = [];
 
 function collectAuthInputs() {
@@ -464,6 +465,8 @@ async function fetchAgentAvailability() {
 
 // Auto-default summaries agent to Amp if not configured and Amp is available
 function autoDefaultSummariesAgentToAmp() {
+  // Guard against race condition: don't run until settings are fully loaded
+  if (!settingsLoaded) return;
   const currentValue = $("#summariesAgent").val();
   // Only auto-default if currently set to "auto" (i.e., user hasn't explicitly chosen)
   if (currentValue === "auto" && !currentSettings.summariesAgent) {
@@ -1933,9 +1936,13 @@ async function getSettings() {
 
   // Restore task creation settings
   restoreTaskSettings(settingsPayload);
-  
+
   // Initialize settings page toggle buttons
   initSettingsToggles();
+
+  // Mark settings as loaded and trigger auto-default for summaries agent
+  settingsLoaded = true;
+  autoDefaultSummariesAgentToAmp();
 }
 
 function copyToClipboard(text) {

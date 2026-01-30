@@ -4577,6 +4577,27 @@ async fn save_settings(
     {
         next.claude_auth_method = Some("api".to_string());
     }
+
+    // Validate and normalize summaries_agent setting
+    // "auto" means use the task agent, which is represented as None internally
+    const VALID_SUMMARIES_AGENTS: &[&str] = &["amp", "codex", "claude-code"];
+    if let Some(ref agent) = next.summaries_agent {
+        let normalized = agent.trim().to_lowercase();
+        if normalized == "auto" || normalized.is_empty() {
+            // Normalize "auto" to None (use task agent)
+            next.summaries_agent = None;
+        } else if !VALID_SUMMARIES_AGENTS.contains(&normalized.as_str()) {
+            return Err(format!(
+                "Invalid summaries_agent '{}'. Valid values are: auto, {}",
+                agent,
+                VALID_SUMMARIES_AGENTS.join(", ")
+            ));
+        } else {
+            // Store the normalized (lowercase) value
+            next.summaries_agent = Some(normalized);
+        }
+    }
+
     ensure_mcp_settings(&mut next);
 
     persist_settings(&next)?;
