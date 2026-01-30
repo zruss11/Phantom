@@ -4360,6 +4360,7 @@ pub(crate) async fn start_task_internal(
         // Emit GenerationStopped to chat window
         if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
             let _ = chat_window.emit("GenerationStopped", &task_id);
+            let _ = chat_window.emit("ChatLogStatus", (&task_id, "Ready", "idle"));
         }
 
         // Update DB status to Ready (session still alive)
@@ -8025,6 +8026,7 @@ pub(crate) async fn send_chat_message_internal(
 
         if let Some(window) = app.get_webview_window(&window_label) {
             let _ = window.emit("GenerationStopped", &task_id);
+            let _ = window.emit("ChatLogStatus", (&task_id, "Ready", "idle"));
         }
         if let Some(main_window) = app.get_webview_window("main") {
             let _ = main_window.emit("StatusUpdate", (&task_id, "Ready", "#04d885", "idle"));
