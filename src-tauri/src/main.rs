@@ -5678,33 +5678,51 @@ async fn codex_accounts_list(state: State<'_, AppState>) -> Result<Vec<CodexAcco
     codex_accounts_list_internal(state.inner()).await
 }
 
-/// Register a Codex home directory as an account reference.
-/// The `codex_home` parameter must be provided by the caller - we do NOT create
-/// directories under app storage. The path is stored as a read-only reference.
+/// Create a new Codex account with a unique home directory.
+/// If `codex_home` is provided, use that path; otherwise generate a unique path
+/// like `~/.codex-2`, `~/.codex-3`, etc. The directory is created if it doesn't exist.
 #[tauri::command]
 async fn codex_account_create(
     state: State<'_, AppState>,
     label: Option<String>,
-    codex_home: String,
+    codex_home: Option<String>,
 ) -> Result<CodexAccountSummary, String> {
-    let codex_home_path = PathBuf::from(&codex_home);
+    let codex_home_path = match codex_home {
+        Some(path) => PathBuf::from(path),
+        None => {
+            // Generate a unique path like ~/.codex-2, ~/.codex-3, etc.
+            let home = dirs::home_dir().ok_or("home dir unavailable")?;
+            let mut suffix = 2;
+            loop {
+                let candidate = home.join(format!(".codex-{}", suffix));
+                if !candidate.exists() {
+                    break candidate;
+                }
+                suffix += 1;
+                if suffix > 100 {
+                    return Err("Could not find available Codex home path".to_string());
+                }
+            }
+        }
+    };
 
-    // Validate the path exists - caller is responsible for creating it
+    // Create the directory if it doesn't exist
     if !codex_home_path.exists() {
-        return Err(format!(
-            "Codex home path does not exist: {}. Please create it first or select an existing path.",
-            codex_home
-        ));
+        std::fs::create_dir_all(&codex_home_path).map_err(|e| {
+            format!("Failed to create Codex home directory {}: {}", codex_home_path.display(), e)
+        })?;
     }
+
+    let codex_home_str = codex_home_path.to_string_lossy().to_string();
 
     // Check if this path is already registered
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let existing = db::list_codex_accounts(&conn).map_err(|e| e.to_string())?;
-        if existing.iter().any(|a| a.codex_home == codex_home) {
+        if existing.iter().any(|a| a.codex_home == codex_home_str) {
             return Err(format!(
                 "This Codex home is already registered: {}",
-                codex_home
+                codex_home_str
             ));
         }
     }
@@ -5714,7 +5732,7 @@ async fn codex_account_create(
     let record = db::CodexAccountRecord {
         id: account_id.clone(),
         label,
-        codex_home,
+        codex_home: codex_home_str,
         email: None,
         plan_type: None,
         created_at: now,

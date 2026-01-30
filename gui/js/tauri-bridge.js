@@ -483,10 +483,10 @@
           return tauriInvoke('codex_accounts_list');
         }
         if (channel === 'createCodexAccount') {
-          // args[0] = label (optional), args[1] = codex_home (required path)
+          // args[0] = label (optional), args[1] = codex_home (optional, generates ~/.codex-N if not provided)
           return tauriInvoke('codex_account_create', {
             label: args[0] || null,
-            codexHome: args[1]
+            codexHome: args[1] || null
           });
         }
         if (channel === 'importCodexAccount') {
