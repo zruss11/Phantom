@@ -1630,6 +1630,7 @@
   let streamingType = null;
   let streamingItemId = null; // Track by itemId for Codex app-server
   let lastFinalizedContent = ""; // Track last finalized content to prevent duplicates
+  let renderedToolCalls = new Set(); // Track rendered tool calls to prevent duplicates from ChatLogUpdate
 
   // Tool call bundle state - groups consecutive tool calls into collapsible bundle
   let toolCallBundle = {
@@ -1804,6 +1805,9 @@
       case "tool_call":
         // Finalize any existing streaming message first
         finalizeStreamingMessage();
+        // Track this tool call to prevent duplicates from ChatLogUpdate
+        const streamToolKey = `${update.name || ""}:${update.arguments || ""}`;
+        renderedToolCalls.add(streamToolKey);
         // Add the tool call to the current bundle
         addToToolBundle({
           name: update.name,
@@ -2645,6 +2649,13 @@
       const toolArgs = message.tool_call
         ? message.tool_call.arguments
         : message.arguments || "";
+
+      // Skip duplicate tool calls (already rendered via streaming)
+      const toolKey = `${toolName}:${toolArgs}`;
+      if (renderedToolCalls.has(toolKey)) {
+        console.log("[ChatLog] Skipping duplicate tool call:", toolName);
+        return;
+      }
 
       // Skip bundling for AskUserQuestion (interactive UI)
       if (toolName.toLowerCase() === "askuserquestion") {
@@ -3571,6 +3582,9 @@
     container.empty();
     container.append('<div class="chat-empty">No messages yet</div>');
     resetDiffCount();
+    // Clear tool call tracking to prevent cross-task deduplication issues
+    renderedToolCalls.clear();
+    lastFinalizedContent = "";
   }
 
   // Scroll to bottom of chat
