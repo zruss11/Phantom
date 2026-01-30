@@ -243,6 +243,7 @@
     List: "fa-list",
     NotebookEdit: "fa-book",
     AskUserQuestion: "fa-question-circle",
+    Thinking: "fa-lightbulb",
     default: null, // null means use GHOST_SVG
   };
 
@@ -1646,7 +1647,8 @@
         messages.forEach(function (msg) {
           addMessageWithBundling(msg, false);
         });
-        // Finalize any remaining bundle after batch load
+        // Finalize any remaining reasoning and bundle after batch load
+        flushAccumulatedReasoning();
         finalizeToolBundle();
         scrollToBottom();
       }
@@ -1665,6 +1667,8 @@
       if (taskId === currentTaskId) {
         if (statusState === "completed" || statusState === "idle") {
           finalizeStreamingMessage();
+          flushAccumulatedReasoning();
+          finalizeToolBundle();
         }
         updateStatus(status, statusState);
       }
@@ -1762,6 +1766,7 @@
   let streamingItemId = null; // Track by itemId for Codex app-server
   let lastFinalizedContent = ""; // Track last finalized content to prevent duplicates
   let renderedToolCalls = new Map(); // toolKey -> count of streamed tool calls awaiting ChatLogUpdate
+  let accumulatedReasoning = ""; // Accumulate streaming reasoning to add to bundle
 
   function markToolCallRendered(toolKey) {
     if (!toolKey) return;
@@ -1870,6 +1875,66 @@
     if (autoScroll) scrollToBottom();
   }
 
+  // Add thinking/reasoning to the current tool bundle (shows as a "Thinking" item)
+  function addThinkingToBundle(content) {
+    if (!content || typeof content !== 'string' || content.trim().length === 0) {
+      return;
+    }
+
+    if (!toolCallBundle.element) {
+      createToolBundle();
+      toolCallBundle.iconNames = new Set();
+    }
+
+    const call = {
+      name: "Thinking",
+      arguments: "",
+      result: content.trim(),
+      status: "complete",
+      isThinking: true
+    };
+    toolCallBundle.calls.push(call);
+
+    // Update the bundle summary
+    const bundleEl = $(toolCallBundle.element);
+    const count = toolCallBundle.calls.length;
+    bundleEl.find(".tool-bundle-label").text(count + " Tool Call" + (count !== 1 ? "s" : ""));
+
+    // Add thinking icon to the icon strip (only if unique)
+    const iconHtml = getToolIconHtml("Thinking");
+    if (!toolCallBundle.iconNames.has("Thinking")) {
+      toolCallBundle.iconNames.add("Thinking");
+      const iconWrapper = document.createElement("span");
+      iconWrapper.className = "tool-bundle-icon";
+      iconWrapper.innerHTML = iconHtml;
+      bundleEl.find(".tool-bundle-icons").append(iconWrapper);
+    }
+
+    // Add item to the details section (already complete, no arguments shown)
+    const truncatedContent = truncateText(content.trim(), 1000);
+    const itemHtml = `
+      <div class="tool-bundle-item complete thinking-item" data-index="${count - 1}">
+        <div class="tool-bundle-item-header">
+          <span class="tool-bundle-item-icon">${iconHtml}</span>
+          <span class="tool-bundle-item-name">Thinking</span>
+          <span class="tool-bundle-item-status"><i class="fal fa-check"></i></span>
+          <i class="fal fa-chevron-down tool-bundle-item-toggle"></i>
+        </div>
+        <div class="tool-item-details hidden">
+          <div class="tool-result-section">
+            <div class="tool-section-header" data-section="result">
+              <span class="tool-section-label">THOUGHT</span>
+            </div>
+            <div class="tool-section-content">${escapeHtml(truncatedContent)}</div>
+          </div>
+        </div>
+      </div>
+    `;
+    bundleEl.find(".tool-bundle-details").append(itemHtml);
+
+    if (autoScroll) scrollToBottom();
+  }
+
   // Merge a tool result into the bundle's last pending call
   function mergeBundleToolResult(rawContent) {
     if (!toolCallBundle.element || toolCallBundle.calls.length === 0) {
@@ -1932,6 +1997,14 @@
     toolCallBundle.iconNames = new Set();
   }
 
+  // Flush any accumulated reasoning content to the tool bundle
+  function flushAccumulatedReasoning() {
+    if (accumulatedReasoning && accumulatedReasoning.trim().length > 0) {
+      addThinkingToBundle(accumulatedReasoning);
+      accumulatedReasoning = "";
+    }
+  }
+
   // Handle a streaming update from the agent
   function handleStreamingUpdate(update) {
     const messageType = update.message_type;
@@ -1940,6 +2013,8 @@
     // Handle different streaming message types
     switch (messageType) {
       case "text_chunk":
+        // Flush any accumulated reasoning to the bundle before assistant response
+        flushAccumulatedReasoning();
         // Finalize any pending tool bundle before assistant response
         finalizeToolBundle();
         appendToStreamingMessage("assistant", content, update.item_id);
@@ -1947,13 +2022,16 @@
         break;
 
       case "reasoning_chunk":
-        appendToStreamingMessage("reasoning", content);
+        // Accumulate reasoning content to add to bundle later (not as separate DOM element)
+        accumulatedReasoning = mergeStreamingText(accumulatedReasoning, content);
         updateStatus("Thinking...", "running");
         break;
 
       case "tool_call": {
         // Finalize any existing streaming message first
         finalizeStreamingMessage();
+        // Flush accumulated reasoning to bundle before tool call
+        flushAccumulatedReasoning();
         // Track this tool call to prevent duplicates from ChatLogUpdate
         const streamToolKey = getToolCallKey(update.name, update.arguments);
         markToolCallRendered(streamToolKey);
@@ -1980,6 +2058,7 @@
       case "permission_request":
         // Finalize any existing streaming message first
         finalizeStreamingMessage();
+        flushAccumulatedReasoning();
         // Add the permission request card
         addMessage({
           type: "permission_request",
@@ -1994,6 +2073,7 @@
 
       case "user_input_request":
         finalizeStreamingMessage();
+        flushAccumulatedReasoning();
         addMessage({
           type: "user_input_request",
           request_id: update.request_id,
@@ -2004,12 +2084,14 @@
 
       case "plan_update":
         finalizeStreamingMessage();
+        flushAccumulatedReasoning();
         upsertPlanPanel(update);
         updateStatus("Plan updated", "running");
         break;
 
       case "plan_content":
         finalizeStreamingMessage();
+        flushAccumulatedReasoning();
         addMessage({
           type: "plan_content",
           file_path: update.file_path,
@@ -2840,6 +2922,20 @@
         return;
       }
       // Fall through to addMessage if no bundle to merge into
+    }
+
+    // Route reasoning/thinking messages through the bundle system
+    if (type === "reasoning" || type === "reasoning_message") {
+      const reasoningContent = message.reasoning || message.content || "";
+      if (reasoningContent && reasoningContent.trim().length > 0) {
+        addThinkingToBundle(reasoningContent);
+        if (shouldScroll && autoScroll) {
+          scrollToBottom();
+        }
+        return;
+      }
+      // Skip empty reasoning messages
+      return;
     }
 
     // Non-tool messages finalize any pending bundle first
