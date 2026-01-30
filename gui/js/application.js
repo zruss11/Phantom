@@ -446,6 +446,8 @@ document.querySelectorAll("[data-auth-save]").forEach((button) => {
 // Simplified auth state management (per research insights)
 let codexAuthState = { authenticated: false, method: null };
 let claudeAuthState = { authenticated: false, method: null, email: null };
+let codexAccounts = [];
+let activeCodexAccountId = null;
 
 // Agent availability tracking
 let agentAvailability = {};
@@ -590,9 +592,39 @@ document.addEventListener("click", (e) => {
   }
 });
 
+async function loadCodexAccounts() {
+  try {
+    const accounts = await ipcRenderer.invoke("getCodexAccounts");
+    codexAccounts = accounts || [];
+    const active = codexAccounts.find((a) => a.isActive) || codexAccounts[0] || null;
+    activeCodexAccountId = active ? active.id : null;
+    codexAuthState = active
+      ? {
+          authenticated: !!active.authenticated,
+          method: "chatgpt",
+          email: active.email || null,
+        }
+      : { authenticated: false, method: null };
+    renderCodexAccounts();
+    updateCodexAuthUI();
+    return codexAccounts;
+  } catch (err) {
+    console.warn("[Harness] loadCodexAccounts failed", err);
+    codexAccounts = [];
+    activeCodexAccountId = null;
+    codexAuthState = { authenticated: false, method: null };
+    renderCodexAccounts();
+    updateCodexAuthUI();
+    return [];
+  }
+}
+
 async function checkCodexAuth() {
   try {
-    const status = await ipcRenderer.invoke("checkCodexAuth");
+    const status = await ipcRenderer.invoke(
+      "checkCodexAuth",
+      activeCodexAccountId,
+    );
     codexAuthState = status || { authenticated: false, method: null };
     updateCodexAuthUI();
     return codexAuthState;
@@ -600,6 +632,68 @@ async function checkCodexAuth() {
     console.warn("[Harness] checkCodexAuth failed", err);
     return { authenticated: false, method: null };
   }
+}
+
+function renderCodexAccounts() {
+  const container = document.getElementById("codexAccountsList");
+  if (!container) return;
+  container.innerHTML = "";
+
+  if (!codexAccounts.length) {
+    const empty = document.createElement("div");
+    empty.className = "text-muted small";
+    empty.textContent = "No Codex accounts yet.";
+    container.appendChild(empty);
+    return;
+  }
+
+  codexAccounts.forEach((account) => {
+    const row = document.createElement("div");
+    row.className =
+      "codex-account-row" + (account.isActive ? " active" : "");
+
+    const meta = document.createElement("div");
+    meta.className = "codex-account-meta";
+    const label = document.createElement("div");
+    label.className = "codex-account-label";
+    label.textContent = account.label || "Codex Account";
+    const sub = document.createElement("div");
+    sub.className = "codex-account-sub";
+    const plan = account.planType ? ` · ${account.planType}` : "";
+    const status = account.authenticated ? "Connected" : "Not connected";
+    sub.textContent = `${status}${plan}`;
+    meta.appendChild(label);
+    meta.appendChild(sub);
+
+    const actions = document.createElement("div");
+    actions.className = "codex-account-actions";
+
+    const activateBtn = document.createElement("button");
+    activateBtn.className = "btn btn-xs btn-outline-secondary";
+    activateBtn.textContent = account.isActive ? "Active" : "Activate";
+    activateBtn.disabled = account.isActive;
+    activateBtn.dataset.codexAccountAction = "activate";
+    activateBtn.dataset.accountId = account.id;
+
+    const loginBtn = document.createElement("button");
+    loginBtn.className = "btn btn-xs btn-brand";
+    loginBtn.textContent = account.authenticated ? "Relogin" : "Login";
+    loginBtn.dataset.codexAccountAction = "login";
+    loginBtn.dataset.accountId = account.id;
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.className = "btn btn-xs btn-outline-danger";
+    deleteBtn.textContent = "Remove";
+    deleteBtn.dataset.codexAccountAction = "delete";
+    deleteBtn.dataset.accountId = account.id;
+
+    actions.appendChild(activateBtn);
+    actions.appendChild(loginBtn);
+    actions.appendChild(deleteBtn);
+    row.appendChild(meta);
+    row.appendChild(actions);
+    container.appendChild(row);
+  });
 }
 
 function updateCodexAuthUI() {
@@ -740,7 +834,7 @@ function updateClaudeAuthUI() {
 }
 
 async function initAuthState() {
-  await checkCodexAuth();
+  await loadCodexAccounts();
   await checkClaudeAuth();
   // Try to enable Claude usage tracking on page load (non-blocking)
   tryEnableClaudeUsage();
@@ -756,7 +850,10 @@ const USAGE_WARNING_THRESHOLD = 95;
 async function fetchCodexUsage() {
   try {
     console.log("[Harness] Fetching codex usage...");
-    const rateLimits = await ipcRenderer.invoke("codexRateLimits");
+    const rateLimits = await ipcRenderer.invoke(
+      "codexRateLimits",
+      activeCodexAccountId,
+    );
     console.log("[Harness] Got rate limits:", rateLimits);
     updateUsageDisplay(rateLimits);
   } catch (err) {
@@ -1036,7 +1133,7 @@ document.querySelectorAll("[data-auth-action]").forEach((button) => {
           // Logout
           await ipcRenderer.invoke("codexLogout");
           codexAuthState = { authenticated: false, method: null };
-          updateCodexAuthUI();
+          await loadCodexAccounts();
           sendNotification("Signed out of Codex", "green");
         } else {
           // Login - show progress state
@@ -1044,9 +1141,19 @@ document.querySelectorAll("[data-auth-action]").forEach((button) => {
           button.disabled = true;
           button.classList.add("auth-pending");
 
-          const status = await ipcRenderer.invoke("codexLogin");
+          if (!activeCodexAccountId) {
+            const created = await ipcRenderer.invoke("createCodexAccount");
+            if (created && created.id) {
+              await ipcRenderer.invoke("setActiveCodexAccount", created.id);
+              activeCodexAccountId = created.id;
+            }
+          }
+
+          const status = activeCodexAccountId
+            ? await ipcRenderer.invoke("loginCodexAccount", activeCodexAccountId)
+            : await ipcRenderer.invoke("codexLogin");
           codexAuthState = status || { authenticated: false, method: null };
-          updateCodexAuthUI();
+          await loadCodexAccounts();
 
           if (codexAuthState.authenticated) {
             sendNotification("Signed in to Codex", "green");
@@ -1116,6 +1223,73 @@ document.querySelectorAll("[data-auth-action]").forEach((button) => {
       sendNotification("Auth action failed: " + (err.message || err), "red");
     }
   });
+});
+
+document.querySelectorAll("[data-codex-account-add]").forEach((button) => {
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    try {
+      const account = await ipcRenderer.invoke("createCodexAccount");
+      if (account && account.id) {
+        await ipcRenderer.invoke("setActiveCodexAccount", account.id);
+        activeCodexAccountId = account.id;
+        sendNotification("Codex account added", "green");
+        await loadCodexAccounts();
+      }
+    } catch (err) {
+      console.warn("[Harness] createCodexAccount failed", err);
+      sendNotification("Failed to add Codex account", "red");
+    }
+  });
+});
+
+document.querySelectorAll("[data-codex-account-import]").forEach((button) => {
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    try {
+      const account = await ipcRenderer.invoke("importCodexAccount");
+      if (account && account.id) {
+        await ipcRenderer.invoke("setActiveCodexAccount", account.id);
+        activeCodexAccountId = account.id;
+        sendNotification("Codex account imported", "green");
+        await loadCodexAccounts();
+      }
+    } catch (err) {
+      console.warn("[Harness] importCodexAccount failed", err);
+      sendNotification("Failed to import Codex account", "red");
+    }
+  });
+});
+
+document.addEventListener("click", async (event) => {
+  const btn = event.target.closest("[data-codex-account-action]");
+  if (!btn) return;
+  event.preventDefault();
+  const action = btn.dataset.codexAccountAction;
+  const accountId = btn.dataset.accountId;
+  if (!accountId) return;
+
+  try {
+    if (action === "activate") {
+      await ipcRenderer.invoke("setActiveCodexAccount", accountId);
+      activeCodexAccountId = accountId;
+      await loadCodexAccounts();
+      sendNotification("Codex account activated", "green");
+    }
+    if (action === "login") {
+      await ipcRenderer.invoke("loginCodexAccount", accountId);
+      await loadCodexAccounts();
+      sendNotification("Codex account updated", "green");
+    }
+    if (action === "delete") {
+      await ipcRenderer.invoke("deleteCodexAccount", accountId, true);
+      await loadCodexAccounts();
+      sendNotification("Codex account removed", "yellow");
+    }
+  } catch (err) {
+    console.warn("[Harness] codex account action failed", err);
+    sendNotification("Codex account action failed", "red");
+  }
 });
 
 function getSizes(s, e, sizeArray) {

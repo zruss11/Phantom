@@ -426,6 +426,8 @@ struct Settings {
     anthropic_api_key: Option<String>,
     #[serde(rename = "codexAuthMethod")]
     codex_auth_method: Option<String>,
+    #[serde(rename = "activeCodexAccountId")]
+    active_codex_account_id: Option<String>,
     #[serde(rename = "claudeAuthMethod")]
     claude_auth_method: Option<String>,
     #[serde(rename = "agentNotificationsEnabled")]
@@ -534,6 +536,12 @@ struct CodexAuthStatus {
     email: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct CodexAccountMeta {
+    email: Option<String>,
+    plan_type: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ClaudeAuthStatus {
     authenticated: bool,
@@ -560,6 +568,18 @@ struct RateLimits {
     not_available: Option<bool>,
     #[serde(rename = "errorMessage")]
     error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexAccountSummary {
+    id: String,
+    label: String,
+    codex_home: String,
+    email: Option<String>,
+    plan_type: Option<String>,
+    authenticated: bool,
+    is_active: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -674,6 +694,109 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
     Ok(output)
 }
 
+fn decode_jwt_payload_value(token: &str) -> Option<serde_json::Value> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = parts[1];
+    let padded = match payload.len() % 4 {
+        2 => format!("{}==", payload),
+        3 => format!("{}=", payload),
+        _ => payload.to_string(),
+    };
+    let standard = padded.replace('-', "+").replace('_', "/");
+    let decoded = base64_decode(&standard).ok()?;
+    let json_str = String::from_utf8(decoded).ok()?;
+    serde_json::from_str(&json_str).ok()
+}
+
+fn normalize_string(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|value| value.as_str())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn read_codex_account_meta(codex_home: &Path) -> Option<CodexAccountMeta> {
+    let auth_path = codex_home.join("auth.json");
+    let data = std::fs::read(auth_path).ok()?;
+    let auth_value: serde_json::Value = serde_json::from_slice(&data).ok()?;
+    let tokens = auth_value.get("tokens")?;
+    let id_token = tokens
+        .get("idToken")
+        .or_else(|| tokens.get("id_token"))
+        .and_then(|value| value.as_str())?;
+    let payload = decode_jwt_payload_value(id_token)?;
+
+    let auth_dict = payload
+        .get("https://api.openai.com/auth")
+        .and_then(|value| value.as_object());
+    let profile_dict = payload
+        .get("https://api.openai.com/profile")
+        .and_then(|value| value.as_object());
+    let plan = normalize_string(
+        auth_dict
+            .and_then(|dict| dict.get("chatgpt_plan_type"))
+            .or_else(|| payload.get("chatgpt_plan_type")),
+    );
+    let email = normalize_string(
+        payload
+            .get("email")
+            .or_else(|| profile_dict.and_then(|dict| dict.get("email"))),
+    );
+
+    if email.is_none() && plan.is_none() {
+        return None;
+    }
+
+    Some(CodexAccountMeta {
+        email,
+        plan_type: plan,
+    })
+}
+
+fn read_codex_auth_status_from_home(codex_home: &Path) -> Result<CodexAuthStatus, String> {
+    let auth_path = codex_home.join("auth.json");
+
+    if !auth_path.exists() {
+        return Ok(CodexAuthStatus {
+            authenticated: false,
+            method: None,
+            expires_at: None,
+            email: None,
+        });
+    }
+
+    let content =
+        std::fs::read_to_string(&auth_path).map_err(|e| format!("read auth.json: {}", e))?;
+
+    if content.len() > 1_000_000 {
+        return Err("auth.json exceeds size limit".to_string());
+    }
+
+    let auth: serde_json::Value =
+        serde_json::from_str(&content).map_err(|_| "Invalid auth.json format")?;
+
+    let access_token = auth
+        .get("tokens")
+        .and_then(|t| t.get("access_token"))
+        .and_then(|v| v.as_str());
+
+    let has_token = access_token.map(|s| !s.is_empty()).unwrap_or(false);
+    let email = access_token.and_then(extract_email_from_jwt);
+
+    Ok(CodexAuthStatus {
+        authenticated: has_token,
+        method: Some("chatgpt".to_string()),
+        expires_at: auth
+            .get("last_refresh")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        email,
+    })
+}
+
 fn load_agents_config(config_path: &Path) -> anyhow::Result<AgentsConfig> {
     let raw = std::fs::read_to_string(config_path)?;
     let config: AgentsConfig = toml::from_str(&raw)?;
@@ -738,6 +861,17 @@ fn settings_path() -> Result<PathBuf, String> {
     let dir = base.join("phantom-harness");
     std::fs::create_dir_all(&dir).map_err(|err| format!("settings dir: {}", err))?;
     Ok(dir.join("settings.json"))
+}
+
+fn codex_accounts_root() -> Result<PathBuf, String> {
+    let base = dirs::config_dir().ok_or_else(|| "config dir unavailable".to_string())?;
+    let dir = base.join("phantom-harness").join("codex-accounts");
+    std::fs::create_dir_all(&dir).map_err(|err| format!("codex accounts dir: {}", err))?;
+    Ok(dir)
+}
+
+fn default_codex_home() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".codex"))
 }
 
 const DEFAULT_MCP_PORT: u16 = 43778;
@@ -867,7 +1001,11 @@ fn find_agent<'a>(config: &'a AgentsConfig, agent_id: &str) -> Option<&'a AgentC
     config.agents.iter().find(|agent| agent.id == agent_id)
 }
 
-fn auth_env_for(agent_id: &str, settings: &Settings) -> Vec<(String, String)> {
+fn auth_env_for(
+    agent_id: &str,
+    settings: &Settings,
+    codex_home: Option<&Path>,
+) -> Vec<(String, String)> {
     let mut env = Vec::new();
     if let Some(value) = settings.openai_api_key.as_ref() {
         env.push(("OPENAI_API_KEY".to_string(), value.clone()));
@@ -875,13 +1013,33 @@ fn auth_env_for(agent_id: &str, settings: &Settings) -> Vec<(String, String)> {
     if let Some(value) = settings.anthropic_api_key.as_ref() {
         env.push(("ANTHROPIC_API_KEY".to_string(), value.clone()));
     }
+    if agent_id == "codex" {
+        if let Some(home) = codex_home {
+            env.push((
+                "CODEX_HOME".to_string(),
+                home.to_string_lossy().to_string(),
+            ));
+        }
+    }
     if agent_id != "codex" {
         env.retain(|(key, _)| key != "OPENAI_API_KEY");
+        env.retain(|(key, _)| key != "CODEX_HOME");
     }
     if agent_id != "claude-code" {
         env.retain(|(key, _)| key != "ANTHROPIC_API_KEY");
     }
     env
+}
+
+fn resolve_codex_account_home(
+    conn: &rusqlite::Connection,
+    account_id: Option<&str>,
+) -> Option<PathBuf> {
+    let account_id = account_id?;
+    match db::get_codex_account(conn, account_id) {
+        Ok(Some(account)) => Some(PathBuf::from(account.codex_home)),
+        _ => None,
+    }
 }
 
 fn default_path_entries() -> Vec<String> {
@@ -2093,6 +2251,7 @@ async fn reconnect_session_with_context(
     cwd: &Path,
     env: &[(String, String)],
     db: &Arc<StdMutex<rusqlite::Connection>>,
+    force_history_injection: bool,
 ) -> Result<(Arc<AgentProcessClient>, String, bool), String> {
     let cwd_str = cwd.to_string_lossy().to_string();
     let args = substitute_args(&agent.args, &cwd_str);
@@ -2105,7 +2264,7 @@ async fn reconnect_session_with_context(
         .map_err(|err| format!("initialize failed: {}", err))?;
 
     // Check if we have a stored Agent session ID and the agent supports session/load
-    if client.supports_load_session() {
+    if client.supports_load_session() && !force_history_injection {
         if let Some(ref stored_session_id) = task.agent_session_id {
             if stored_session_id.starts_with("local-") {
                 println!(
@@ -2357,7 +2516,11 @@ async fn refresh_agent_modes(
         let cwd = std::env::current_dir().map_err(|err| format!("cwd error: {}", err))?;
         let cwd_str = cwd.to_string_lossy().to_string();
         let settings = state.settings.lock().await.clone();
-        let overrides = auth_env_for(&agent_id, &settings);
+        let codex_home = {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            resolve_codex_account_home(&conn, settings.active_codex_account_id.as_deref())
+        };
+        let overrides = auth_env_for(&agent_id, &settings, codex_home.as_deref());
         let allow_missing = settings.codex_auth_method.as_deref() == Some("chatgpt");
         let env = build_env(&agent.required_env, &overrides, allow_missing)
             .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
@@ -2398,7 +2561,7 @@ async fn refresh_agent_modes(
     let cwd = std::env::current_dir().map_err(|err| format!("cwd error: {}", err))?;
     let cwd_str = cwd.to_string_lossy().to_string();
     let settings = state.settings.lock().await.clone();
-    let overrides = auth_env_for(&agent_id, &settings);
+    let overrides = auth_env_for(&agent_id, &settings, None);
     let allow_missing = false;
 
     // Build env - fail if auth is not configured
@@ -2574,7 +2737,11 @@ async fn refresh_agent_models(
             agent_id
         );
         let settings = state.settings.lock().await.clone();
-        let overrides = auth_env_for(&agent_id, &settings);
+        let codex_home = {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            resolve_codex_account_home(&conn, settings.active_codex_account_id.as_deref())
+        };
+        let overrides = auth_env_for(&agent_id, &settings, codex_home.as_deref());
         let allow_missing =
             agent_id == "codex" && settings.codex_auth_method.as_deref() == Some("chatgpt");
         let env = build_env(&agent.required_env, &overrides, allow_missing)
@@ -2613,7 +2780,11 @@ async fn refresh_agent_models(
 
     // Fallback: fetch models from agent's session/new response (ACP protocol)
     let settings = state.settings.lock().await.clone();
-    let overrides = auth_env_for(&agent_id, &settings);
+    let codex_home = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        resolve_codex_account_home(&conn, settings.active_codex_account_id.as_deref())
+    };
+    let overrides = auth_env_for(&agent_id, &settings, codex_home.as_deref());
     let allow_missing = (agent_id == "codex"
         && settings.codex_auth_method.as_deref() == Some("chatgpt"))
         || (agent_id == "claude-code"
@@ -2742,7 +2913,11 @@ async fn get_enriched_models(
     let cwd = std::env::current_dir().map_err(|err| format!("cwd error: {}", err))?;
     let cwd_str = cwd.to_string_lossy().to_string();
     let settings = state.settings.lock().await.clone();
-    let overrides = auth_env_for(&agent_id, &settings);
+    let codex_home = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        resolve_codex_account_home(&conn, settings.active_codex_account_id.as_deref())
+    };
+    let overrides = auth_env_for(&agent_id, &settings, codex_home.as_deref());
     let allow_missing =
         agent_id == "codex" && settings.codex_auth_method.as_deref() == Some("chatgpt");
     let env = build_env(&agent.required_env, &overrides, allow_missing)
@@ -2902,7 +3077,31 @@ pub(crate) async fn create_agent_session_internal(
     }
 
     let cwd_str = cwd.to_string_lossy().to_string();
-    let overrides = auth_env_for(&payload.agent_id, &settings);
+    let codex_account_id = if payload.agent_id == "codex" {
+        let mut active_id = settings.active_codex_account_id.clone();
+        if active_id.is_none() {
+            if let Ok(conn) = state.db.lock() {
+                if let Ok(accounts) = db::list_codex_accounts(&conn) {
+                    active_id = accounts.first().map(|account| account.id.clone());
+                }
+            }
+            if let Some(ref next_id) = active_id {
+                let mut settings_guard = state.settings.lock().await;
+                settings_guard.active_codex_account_id = Some(next_id.clone());
+                let _ = persist_settings(&settings_guard);
+            }
+        }
+        active_id
+    } else {
+        None
+    };
+    let codex_home = if payload.agent_id == "codex" {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        resolve_codex_account_home(&conn, codex_account_id.as_deref())
+    } else {
+        None
+    };
+    let overrides = auth_env_for(&payload.agent_id, &settings, codex_home.as_deref());
     let allow_missing = (payload.agent_id == "codex"
         && settings.codex_auth_method.as_deref() == Some("chatgpt"))
         || (payload.agent_id == "claude-code"
@@ -3064,6 +3263,7 @@ pub(crate) async fn create_agent_session_internal(
         let task = db::TaskRecord {
             id: task_id.clone(),
             agent_id: payload.agent_id.clone(),
+            codex_account_id: codex_account_id.clone(),
             model: selected.clone(),
             prompt: Some(payload.prompt.clone()),
             project_path: payload.project_path.clone(),
@@ -3546,7 +3746,18 @@ pub(crate) async fn start_task_internal(
 
         // Build environment
         let settings = state.settings.lock().await.clone();
-        let overrides = auth_env_for(&task.agent_id, &settings);
+        let codex_home = if task.agent_id == "codex" {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            resolve_codex_account_home(
+                &conn,
+                task.codex_account_id
+                    .as_deref()
+                    .or(settings.active_codex_account_id.as_deref()),
+            )
+        } else {
+            None
+        };
+        let overrides = auth_env_for(&task.agent_id, &settings, codex_home.as_deref());
         let allow_missing = (task.agent_id == "codex"
             && settings.codex_auth_method.as_deref() == Some("chatgpt"))
             || (task.agent_id == "claude-code"
@@ -3573,7 +3784,7 @@ pub(crate) async fn start_task_internal(
         emit_status("Reconnecting...", "yellow", "running")?;
 
         let (client, session_id, used_session_load) =
-            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
+            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false).await {
                 Ok(result) => result,
                 Err(e) => {
                     let error_msg = format!("Failed to reconnect: {}", e);
@@ -3690,6 +3901,7 @@ pub(crate) async fn start_task_internal(
             handle.cancel_token.clone(),
         )
     };
+    let mut prompt = prompt;
 
     // Load images from attachments
     let images: Vec<ImageContent> = {
@@ -4140,6 +4352,7 @@ pub(crate) async fn start_task_internal(
     let mut attempt = 0;
     let mut client = client;
     let mut session_id = session_id;
+    let mut auto_switch_attempted = false;
 
     let response = loop {
         attempt += 1;
@@ -4178,6 +4391,124 @@ pub(crate) async fn start_task_internal(
                     "[Harness] session/prompt error (attempt {}): {}",
                     attempt, error_str
                 );
+
+                if agent_id == "codex"
+                    && !auto_switch_attempted
+                    && is_codex_rate_limit_error(&error_str)
+                {
+                    auto_switch_attempted = true;
+                    let task = {
+                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                        db::list_tasks(&conn)
+                            .map_err(|e| e.to_string())?
+                            .into_iter()
+                            .find(|t| t.id == task_id)
+                    };
+
+                    if let Some(task) = task {
+                        let active_account_id =
+                            state.settings.lock().await.active_codex_account_id.clone();
+                        let current_account_id = task
+                            .codex_account_id
+                            .as_deref()
+                            .or(active_account_id.as_deref());
+                        if let Some(next_account) =
+                            pick_best_codex_account(state, current_account_id).await?
+                        {
+                            let codex_home = PathBuf::from(&next_account.codex_home);
+                            {
+                                let mut settings = state.settings.lock().await;
+                                settings.active_codex_account_id =
+                                    Some(next_account.id.clone());
+                                persist_settings(&settings)?;
+                            }
+                            set_process_codex_home(Some(&codex_home));
+                            {
+                                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                let _ = db::update_task_codex_account_id(
+                                    &conn,
+                                    &task_id,
+                                    &next_account.id,
+                                );
+                            }
+
+                            let agent = match find_agent(&state.config, &task.agent_id) {
+                                Some(a) => a,
+                                None => {
+                                    let (formatted_error, _) = format_agent_error(&error_str);
+                                    return Err(format!("session/prompt failed: {}", formatted_error));
+                                }
+                            };
+                            let cwd = resolve_task_cwd(&task)?;
+                            let settings = state.settings.lock().await.clone();
+                            let overrides =
+                                auth_env_for(&task.agent_id, &settings, Some(&codex_home));
+                            let allow_missing =
+                                settings.codex_auth_method.as_deref() == Some("chatgpt");
+                            let env = match build_env(&agent.required_env, &overrides, allow_missing)
+                            {
+                                Ok(e) => e,
+                                Err(e) => {
+                                    return Err(format!(
+                                        "Reconnection failed - auth error: {}",
+                                        e
+                                    ));
+                                }
+                            };
+
+                            let (new_client, new_session_id, _used_session_load) =
+                                reconnect_session_with_context(
+                                    agent,
+                                    &task,
+                                    &cwd,
+                                    &env,
+                                    &state.db,
+                                    true,
+                                )
+                                .await?;
+
+                            {
+                                let mut handle = handle_ref.lock().await;
+                                handle.client = new_client.clone();
+                                handle.session_id = new_session_id.clone();
+                            }
+
+                            let history_opt = {
+                                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                let mut messages = db::get_message_records(&conn, &task.id)
+                                    .map_err(|e| e.to_string())?;
+                                if let Some(last) = messages.last() {
+                                    if last.message_type == "user_message"
+                                        && last.content.as_deref() == Some(prompt.as_str())
+                                    {
+                                        messages.pop();
+                                    }
+                                }
+                                if !messages.is_empty() {
+                                    let (history, _) =
+                                        db::compact_history(&messages, task.prompt.as_deref(), 100_000);
+                                    Some(history)
+                                } else {
+                                    None
+                                }
+                            };
+                            if let Some(history) = history_opt {
+                                if !prompt.contains("[User's new message]") {
+                                    prompt = format_message_with_history(&history, &prompt);
+                                }
+                            }
+
+                            client = new_client;
+                            session_id = new_session_id;
+                            let _ = emit_status(
+                                "Rate limit reached, switched account. Retrying...",
+                                "#FFA500",
+                                "running",
+                            );
+                            continue;
+                        }
+                    }
+                }
 
                 // Check if this is a recoverable exit (SIGTERM/exit code 143)
                 if is_recoverable_exit(&error_str) && attempt < MAX_RECONNECT_ATTEMPTS {
@@ -4218,7 +4549,18 @@ pub(crate) async fn start_task_internal(
 
                     // Build environment
                     let settings = state.settings.lock().await.clone();
-                    let overrides = auth_env_for(&task.agent_id, &settings);
+                    let codex_home = if task.agent_id == "codex" {
+                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                        resolve_codex_account_home(
+                            &conn,
+                            task.codex_account_id
+                                .as_deref()
+                                .or(settings.active_codex_account_id.as_deref()),
+                        )
+                    } else {
+                        None
+                    };
+                    let overrides = auth_env_for(&task.agent_id, &settings, codex_home.as_deref());
                     let allow_missing = (task.agent_id == "codex"
                         && settings.codex_auth_method.as_deref() == Some("chatgpt"))
                         || (task.agent_id == "claude-code"
@@ -4235,7 +4577,7 @@ pub(crate) async fn start_task_internal(
                     };
 
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await
+                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false).await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(
@@ -5164,18 +5506,298 @@ async fn restart_all_agents(
     Ok(restarted_task_ids)
 }
 
+fn codex_account_label(account: &db::CodexAccountRecord) -> String {
+    if let Some(label) = account.label.as_ref().filter(|l| !l.trim().is_empty()) {
+        return label.trim().to_string();
+    }
+    if let Some(email) = account.email.as_ref().filter(|e| !e.trim().is_empty()) {
+        return email.trim().to_string();
+    }
+    format!("Codex Account {}", account.id.split('-').next().unwrap_or("unknown"))
+}
+
+fn is_codex_rate_limit_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("429")
+        || lower.contains("too many requests")
+        || lower.contains("quota")
+        || lower.contains("usage limit")
+}
+
+fn remaining_usage_percent(rate_limits: &RateLimits) -> Option<f64> {
+    if let Some(primary) = rate_limits.primary.as_ref() {
+        return Some(100.0 - primary.used_percent);
+    }
+    if let Some(secondary) = rate_limits.secondary.as_ref() {
+        return Some(100.0 - secondary.used_percent);
+    }
+    None
+}
+
+async fn pick_best_codex_account(
+    state: &AppState,
+    exclude_id: Option<&str>,
+) -> Result<Option<db::CodexAccountRecord>, String> {
+    let accounts = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::list_codex_accounts(&conn).map_err(|e| e.to_string())?
+    };
+
+    let mut best: Option<(db::CodexAccountRecord, f64)> = None;
+    for account in accounts {
+        if Some(account.id.as_str()) == exclude_id {
+            continue;
+        }
+        let codex_home = PathBuf::from(&account.codex_home);
+        let auth = read_codex_auth_status_from_home(&codex_home).unwrap_or(CodexAuthStatus {
+            authenticated: false,
+            method: None,
+            expires_at: None,
+            email: None,
+        });
+        if !auth.authenticated {
+            continue;
+        }
+        let limits = match codex_rate_limits_for_home(&codex_home).await {
+            Ok(limits) => limits,
+            Err(_) => continue,
+        };
+        let remaining = remaining_usage_percent(&limits).unwrap_or(0.0);
+        if let Some((_, best_remaining)) = best.as_ref() {
+            if remaining > *best_remaining {
+                best = Some((account, remaining));
+            }
+        } else {
+            best = Some((account, remaining));
+        }
+    }
+    Ok(best.map(|(account, _)| account))
+}
+
+fn set_process_codex_home(codex_home: Option<&Path>) {
+    if let Some(home) = codex_home {
+        std::env::set_var("CODEX_HOME", home);
+    } else {
+        std::env::remove_var("CODEX_HOME");
+    }
+}
+
+fn emit_codex_accounts_updated(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.emit("CodexAccountsUpdated", ());
+    }
+}
+
+fn select_active_codex_account_id(
+    settings: &mut Settings,
+    accounts: &[db::CodexAccountRecord],
+) -> Option<String> {
+    if let Some(active) = settings.active_codex_account_id.as_ref() {
+        if accounts.iter().any(|account| account.id == *active) {
+            return Some(active.clone());
+        }
+    }
+    let next = accounts.first().map(|account| account.id.clone());
+    settings.active_codex_account_id = next.clone();
+    next
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.exists() {
+        return Err("Source directory does not exist".to_string());
+    }
+    std::fs::create_dir_all(dst).map_err(|e| format!("create dir: {}", e))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("read dir: {}", e))? {
+        let entry = entry.map_err(|e| format!("read entry: {}", e))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("file type: {}", e))?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_all(&src_path, &dst_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("copy file: {}", e))?;
+        }
+    }
+    Ok(())
+}
+
+async fn codex_accounts_list_internal(
+    state: &AppState,
+) -> Result<Vec<CodexAccountSummary>, String> {
+    let mut accounts = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::list_codex_accounts(&conn).map_err(|e| e.to_string())?
+    };
+
+    let mut settings = state.settings.lock().await;
+    let active_id = select_active_codex_account_id(&mut settings, &accounts);
+    if settings.active_codex_account_id.is_some() {
+        persist_settings(&settings)?;
+    }
+
+    let mut summaries = Vec::with_capacity(accounts.len());
+    for account in accounts.iter_mut() {
+        let codex_home = PathBuf::from(&account.codex_home);
+        let auth_status = read_codex_auth_status_from_home(&codex_home).unwrap_or(CodexAuthStatus {
+            authenticated: false,
+            method: None,
+            expires_at: None,
+            email: None,
+        });
+        if let Some(meta) = read_codex_account_meta(&codex_home) {
+            if meta.email != account.email || meta.plan_type != account.plan_type {
+                let label = if account.label.is_none() {
+                    meta.email.as_deref()
+                } else {
+                    None
+                };
+                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                let _ = db::update_codex_account_meta(
+                    &conn,
+                    &account.id,
+                    meta.email.as_deref(),
+                    meta.plan_type.as_deref(),
+                    label,
+                );
+                account.email = meta.email;
+                account.plan_type = meta.plan_type;
+            }
+        }
+        summaries.push(CodexAccountSummary {
+            id: account.id.clone(),
+            label: codex_account_label(account),
+            codex_home: account.codex_home.clone(),
+            email: account.email.clone(),
+            plan_type: account.plan_type.clone(),
+            authenticated: auth_status.authenticated,
+            is_active: active_id.as_deref() == Some(account.id.as_str()),
+        });
+    }
+
+    if let Some(active) = active_id.as_ref() {
+        let active_home = {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            resolve_codex_account_home(&conn, Some(active.as_str()))
+        };
+        set_process_codex_home(active_home.as_deref());
+    }
+
+    Ok(summaries)
+}
+
 #[tauri::command]
-async fn codex_login(
+async fn codex_accounts_list(state: State<'_, AppState>) -> Result<Vec<CodexAccountSummary>, String> {
+    codex_accounts_list_internal(state.inner()).await
+}
+
+#[tauri::command]
+async fn codex_account_create(
     state: State<'_, AppState>,
+    label: Option<String>,
+) -> Result<CodexAccountSummary, String> {
+    let account_id = uuid::Uuid::new_v4().to_string();
+    let root = codex_accounts_root()?;
+    let codex_home = root.join(&account_id);
+    std::fs::create_dir_all(&codex_home)
+        .map_err(|e| format!("create codex home: {}", e))?;
+
+    let now = chrono::Utc::now().timestamp();
+    let record = db::CodexAccountRecord {
+        id: account_id.clone(),
+        label,
+        codex_home: codex_home.to_string_lossy().to_string(),
+        email: None,
+        plan_type: None,
+        created_at: now,
+        updated_at: now,
+    };
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::insert_codex_account(&conn, &record).map_err(|e| e.to_string())?;
+    }
+
+    let mut settings = state.settings.lock().await;
+    if settings.active_codex_account_id.is_none() {
+        settings.active_codex_account_id = Some(account_id.clone());
+        persist_settings(&settings)?;
+        set_process_codex_home(Some(&codex_home));
+    }
+
+    Ok(CodexAccountSummary {
+        id: record.id.clone(),
+        label: codex_account_label(&record),
+        codex_home: record.codex_home.clone(),
+        email: None,
+        plan_type: None,
+        authenticated: false,
+        is_active: settings.active_codex_account_id.as_deref() == Some(record.id.as_str()),
+    })
+}
+
+#[tauri::command]
+async fn codex_account_import(
+    state: State<'_, AppState>,
+    label: Option<String>,
+) -> Result<CodexAccountSummary, String> {
+    let source = default_codex_home().ok_or("home dir unavailable")?;
+    if !source.exists() {
+        return Err("~/.codex not found".to_string());
+    }
+    let account_id = uuid::Uuid::new_v4().to_string();
+    let root = codex_accounts_root()?;
+    let codex_home = root.join(&account_id);
+    copy_dir_all(&source, &codex_home)?;
+
+    let now = chrono::Utc::now().timestamp();
+    let record = db::CodexAccountRecord {
+        id: account_id.clone(),
+        label,
+        codex_home: codex_home.to_string_lossy().to_string(),
+        email: None,
+        plan_type: None,
+        created_at: now,
+        updated_at: now,
+    };
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::insert_codex_account(&conn, &record).map_err(|e| e.to_string())?;
+    }
+
+    let mut settings = state.settings.lock().await;
+    if settings.active_codex_account_id.is_none() {
+        settings.active_codex_account_id = Some(account_id.clone());
+        persist_settings(&settings)?;
+        set_process_codex_home(Some(&codex_home));
+    }
+
+    Ok(CodexAccountSummary {
+        id: record.id.clone(),
+        label: codex_account_label(&record),
+        codex_home: record.codex_home.clone(),
+        email: None,
+        plan_type: None,
+        authenticated: false,
+        is_active: settings.active_codex_account_id.as_deref() == Some(record.id.as_str()),
+    })
+}
+
+async fn run_codex_login_for_home(
+    codex_home: &Path,
+    state: &AppState,
     app: tauri::AppHandle,
 ) -> Result<CodexAuthStatus, String> {
     let codex_cmd = resolve_codex_command();
     println!("[Codex Login] Starting login with command: {}", codex_cmd);
     let app_handle = app.clone();
-    let settings_handle = state.settings.clone();
 
     let mut child = tokio::process::Command::new(&codex_cmd)
         .arg("login")
+        .env("CODEX_HOME", codex_home)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -5187,10 +5809,7 @@ async fn codex_login(
 
     println!("[Codex Login] Process spawned successfully");
 
-    // Codex writes the OAuth URL to stderr, not stdout
     let stderr = child.stderr.take();
-
-    // Open browser when OAuth URL is printed
     if let Some(stderr) = stderr {
         let mut lines = BufReader::new(stderr).lines();
         let mut opened = false;
@@ -5200,7 +5819,6 @@ async fn codex_login(
                 continue;
             }
             for token in line.split_whitespace() {
-                // Security: Validate URL against known OAuth providers
                 if token.starts_with("https://") {
                     println!("[Codex Login] Found URL: {}", token);
                     if validate_oauth_url(token) {
@@ -5218,35 +5836,206 @@ async fn codex_login(
                 }
             }
         }
-    } else {
-        println!("[Codex Login] No stderr available");
     }
 
-    // Wait with 5-minute timeout to prevent indefinite hangs
     let result = timeout(Duration::from_secs(300), child.wait()).await;
 
     match result {
         Ok(Ok(status)) if status.success() => {
-            // Update settings with auth method
-            let mut settings = settings_handle.lock().await;
+            let mut settings = state.settings.lock().await;
             settings.codex_auth_method = Some("chatgpt".to_string());
-            drop(settings); // Release lock before persist
-
-            let settings = settings_handle.lock().await;
             persist_settings(&settings)?;
-            drop(settings);
 
-            // Return fresh auth status
-            check_codex_auth().await
+            read_codex_auth_status_from_home(codex_home)
         }
         Ok(Ok(_)) => Err("Login cancelled or failed".to_string()),
         Ok(Err(e)) => Err(format!("Process error: {}", e)),
         Err(_) => {
-            // Timeout - kill the process
             let _ = child.kill().await;
             Err("Login timed out after 5 minutes".to_string())
         }
     }
+}
+
+#[tauri::command]
+async fn codex_account_login(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_id: String,
+) -> Result<CodexAuthStatus, String> {
+    let codex_home = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        resolve_codex_account_home(&conn, Some(account_id.as_str()))
+            .ok_or("Codex account not found")?
+    };
+    let status = run_codex_login_for_home(&codex_home, state.inner(), app).await?;
+    if let Some(meta) = read_codex_account_meta(&codex_home) {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let label = if db::get_codex_account(&conn, &account_id)
+            .ok()
+            .flatten()
+            .and_then(|account| account.label)
+            .is_none()
+        {
+            meta.email.as_deref()
+        } else {
+            None
+        };
+        let _ = db::update_codex_account_meta(
+            &conn,
+            &account_id,
+            meta.email.as_deref(),
+            meta.plan_type.as_deref(),
+            label,
+        );
+    }
+    Ok(status)
+}
+
+async fn switch_running_codex_tasks(
+    state: &AppState,
+    app: tauri::AppHandle,
+    account_id: &str,
+    codex_home: &Path,
+) -> Result<(), String> {
+    let session_refs: Vec<(String, SharedSessionHandle)> = {
+        let sessions = state.sessions.lock().await;
+        sessions
+            .iter()
+            .map(|(task_id, handle_ref)| (task_id.clone(), handle_ref.clone()))
+            .collect()
+    };
+
+    for (task_id, handle_ref) in session_refs {
+        let agent_id = {
+            let handle = handle_ref.lock().await;
+            handle.agent_id.clone()
+        };
+        if agent_id != "codex" {
+            continue;
+        }
+
+        {
+            let handle = handle_ref.lock().await;
+            handle.cancel_token.cancel();
+        }
+
+        let task = {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            db::list_tasks(&conn)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|t| t.id == task_id)
+        };
+        let Some(task) = task else { continue };
+        let agent = match find_agent(&state.config, &task.agent_id) {
+            Some(a) => a,
+            None => continue,
+        };
+        let cwd = resolve_task_cwd(&task)?;
+        let settings = state.settings.lock().await.clone();
+        let overrides = auth_env_for(&task.agent_id, &settings, Some(codex_home));
+        let allow_missing = settings.codex_auth_method.as_deref() == Some("chatgpt");
+        let env = build_env(&agent.required_env, &overrides, allow_missing)?;
+        let (client, session_id, _used_session_load) =
+            reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, true).await?;
+
+        {
+            let mut handle = handle_ref.lock().await;
+            handle.client = client.clone();
+            handle.session_id = session_id.clone();
+            handle.pending_prompt = None;
+        }
+
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::update_task_codex_account_id(&conn, &task_id, account_id);
+
+        if let Some(chat_window) = app.get_webview_window(&chat_window_label(&task_id)) {
+            let _ = chat_window.emit("ChatLogStatus", (&task_id, "Switched account", "idle"));
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn codex_account_set_active(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+    account_id: String,
+) -> Result<(), String> {
+    let codex_home = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        resolve_codex_account_home(&conn, Some(account_id.as_str()))
+            .ok_or("Codex account not found")?
+    };
+
+    {
+        let mut settings = state.settings.lock().await;
+        settings.active_codex_account_id = Some(account_id.clone());
+        persist_settings(&settings)?;
+    }
+    set_process_codex_home(Some(&codex_home));
+
+    switch_running_codex_tasks(state.inner(), app, &account_id, &codex_home).await?;
+    emit_codex_accounts_updated(&app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn codex_account_delete(
+    state: State<'_, AppState>,
+    account_id: String,
+    remove_data: Option<bool>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let (codex_home, was_active) = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let account = db::get_codex_account(&conn, &account_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("Codex account not found")?;
+        let settings = state.settings.lock().await.clone();
+        (
+            PathBuf::from(account.codex_home),
+            settings.active_codex_account_id.as_deref() == Some(account_id.as_str()),
+        )
+    };
+
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::delete_codex_account(&conn, &account_id).map_err(|e| e.to_string())?;
+    }
+    if remove_data.unwrap_or(true) {
+        let _ = std::fs::remove_dir_all(&codex_home);
+    }
+
+    if was_active {
+        let accounts = codex_accounts_list_internal(state.inner()).await?;
+        if let Some(active) = accounts.iter().find(|a| a.is_active) {
+            let codex_home = PathBuf::from(&active.codex_home);
+            let _ = switch_running_codex_tasks(state.inner(), app, &active.id, &codex_home).await;
+        }
+    }
+    emit_codex_accounts_updated(&app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn codex_login(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<CodexAuthStatus, String> {
+    let active_account_id = {
+        let settings = state.settings.lock().await.clone();
+        settings.active_codex_account_id
+    };
+    if let Some(account_id) = active_account_id {
+        return codex_account_login(state, app, account_id).await;
+    }
+
+    // Fallback: create a new account and log in
+    let created = codex_account_create(state.clone(), None).await?;
+    codex_account_login(state, app, created.id).await
 }
 
 #[tauri::command]
@@ -5307,25 +6096,26 @@ async fn claude_login(
 }
 
 #[tauri::command]
-async fn check_codex_auth() -> Result<CodexAuthStatus, String> {
-    let auth_path = dirs::home_dir()
-        .ok_or("home dir unavailable")?
-        .join(".codex")
-        .join("auth.json");
-
-    if !auth_path.exists() {
-        return Ok(CodexAuthStatus {
-            authenticated: false,
-            method: None,
-            expires_at: None,
-            email: None,
-        });
-    }
+async fn check_codex_auth(
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+) -> Result<CodexAuthStatus, String> {
+    let settings = state.settings.lock().await.clone();
+    let account_id = account_id
+        .as_deref()
+        .or(settings.active_codex_account_id.as_deref());
+    let codex_home = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        resolve_codex_account_home(&conn, account_id)
+            .or_else(|| default_codex_home())
+            .ok_or("Unable to resolve Codex home")?
+    };
 
     // Security: Verify file permissions on Unix (should be 0600)
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let auth_path = codex_home.join("auth.json");
         if let Ok(metadata) = std::fs::metadata(&auth_path) {
             let mode = metadata.mode() & 0o777;
             if mode != 0o600 {
@@ -5334,49 +6124,11 @@ async fn check_codex_auth() -> Result<CodexAuthStatus, String> {
         }
     }
 
-    let content =
-        std::fs::read_to_string(&auth_path).map_err(|e| format!("read auth.json: {}", e))?;
-
-    // Security: Size limit to prevent DoS from malformed files
-    if content.len() > 1_000_000 {
-        return Err("auth.json exceeds size limit".to_string());
-    }
-
-    // Parse auth.json to check validity - don't leak parse details
-    let auth: serde_json::Value =
-        serde_json::from_str(&content).map_err(|_| "Invalid auth.json format")?;
-
-    // Check for tokens.access_token (the actual codex auth.json structure)
-    let access_token = auth
-        .get("tokens")
-        .and_then(|t| t.get("access_token"))
-        .and_then(|v| v.as_str());
-
-    let has_token = access_token.map(|s| !s.is_empty()).unwrap_or(false);
-
-    // Extract email from the JWT access token
-    let email = access_token.and_then(extract_email_from_jwt);
-
-    Ok(CodexAuthStatus {
-        authenticated: has_token,
-        method: Some("chatgpt".to_string()),
-        expires_at: auth
-            .get("last_refresh")
-            .and_then(|v| v.as_str())
-            .map(String::from),
-        email,
-    })
+    read_codex_auth_status_from_home(&codex_home)
 }
 
-#[tauri::command]
-async fn codex_rate_limits(_state: State<'_, AppState>) -> Result<RateLimits, String> {
-    println!("[Harness] codex_rate_limits called");
-
-    // Read auth.json to get access token and account ID
-    let auth_path = dirs::home_dir()
-        .ok_or("home dir unavailable")?
-        .join(".codex")
-        .join("auth.json");
+async fn codex_rate_limits_for_home(codex_home: &Path) -> Result<RateLimits, String> {
+    let auth_path = codex_home.join("auth.json");
 
     if !auth_path.exists() {
         return Ok(RateLimits {
@@ -5497,13 +6249,39 @@ async fn codex_rate_limits(_state: State<'_, AppState>) -> Result<RateLimits, St
 }
 
 #[tauri::command]
+async fn codex_rate_limits(
+    state: State<'_, AppState>,
+    account_id: Option<String>,
+) -> Result<RateLimits, String> {
+    println!("[Harness] codex_rate_limits called");
+    let settings = state.settings.lock().await.clone();
+    let account_id = account_id
+        .as_deref()
+        .or(settings.active_codex_account_id.as_deref());
+    let codex_home = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        resolve_codex_account_home(&conn, account_id)
+            .or_else(|| default_codex_home())
+            .ok_or("Unable to resolve Codex home")?
+    };
+    codex_rate_limits_for_home(&codex_home).await
+}
+
+#[tauri::command]
 async fn codex_logout(state: State<'_, AppState>) -> Result<(), String> {
     let codex_cmd = resolve_codex_command();
+    let active_home = {
+        let settings = state.settings.lock().await.clone();
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        resolve_codex_account_home(&conn, settings.active_codex_account_id.as_deref())
+    };
 
-    tokio::process::Command::new(&codex_cmd)
-        .arg("logout")
-        .status()
-        .await
+    let mut command = tokio::process::Command::new(&codex_cmd);
+    command.arg("logout");
+    if let Some(home) = active_home.as_ref() {
+        command.env("CODEX_HOME", home);
+    }
+    command.status().await
         .map_err(|e| format!("logout failed: {}", e))?;
 
     let mut settings = state.settings.lock().await;
@@ -7463,7 +8241,18 @@ pub(crate) async fn send_chat_message_internal(
 
         // Build environment
         let settings = state.settings.lock().await.clone();
-        let overrides = auth_env_for(&task.agent_id, &settings);
+        let codex_home = if task.agent_id == "codex" {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            resolve_codex_account_home(
+                &conn,
+                task.codex_account_id
+                    .as_deref()
+                    .or(settings.active_codex_account_id.as_deref()),
+            )
+        } else {
+            None
+        };
+        let overrides = auth_env_for(&task.agent_id, &settings, codex_home.as_deref());
         let allow_missing = (task.agent_id == "codex"
             && settings.codex_auth_method.as_deref() == Some("chatgpt"))
             || (task.agent_id == "claude-code"
@@ -7491,7 +8280,7 @@ pub(crate) async fn send_chat_message_internal(
         }
 
         let (client, session_id, used_session_load) =
-            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await {
+            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false).await {
                 Ok(result) => result,
                 Err(e) => {
                     let error_msg = format!("Failed to reconnect: {}", e);
@@ -7601,6 +8390,7 @@ pub(crate) async fn send_chat_message_internal(
             handle.cancel_token.clone(),
         )
     };
+    let mut effective_message = effective_message;
 
     // Load any pending attachments for this task (e.g., pasted images in chat log)
     let attachments: Vec<db::AttachmentRecord> = {
@@ -7884,6 +8674,7 @@ pub(crate) async fn send_chat_message_internal(
     let mut attempt = 0;
     let mut client = client;
     let mut session_id = session_id;
+    let mut auto_switch_attempted = false;
 
     let response = loop {
         attempt += 1;
@@ -7922,6 +8713,137 @@ pub(crate) async fn send_chat_message_internal(
                     "[Harness] send_chat_message error (attempt {}): {}",
                     attempt, error_str
                 );
+
+                if agent_id == "codex"
+                    && !auto_switch_attempted
+                    && is_codex_rate_limit_error(&error_str)
+                {
+                    auto_switch_attempted = true;
+                    let task = {
+                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                        db::list_tasks(&conn)
+                            .map_err(|e| e.to_string())?
+                            .into_iter()
+                            .find(|t| t.id == task_id)
+                    };
+
+                    if let Some(task) = task {
+                        let active_account_id =
+                            state.settings.lock().await.active_codex_account_id.clone();
+                        let current_account_id = task
+                            .codex_account_id
+                            .as_deref()
+                            .or(active_account_id.as_deref());
+                        if let Some(next_account) =
+                            pick_best_codex_account(state, current_account_id).await?
+                        {
+                            let codex_home = PathBuf::from(&next_account.codex_home);
+                            {
+                                let mut settings = state.settings.lock().await;
+                                settings.active_codex_account_id =
+                                    Some(next_account.id.clone());
+                                persist_settings(&settings)?;
+                            }
+                            set_process_codex_home(Some(&codex_home));
+                            {
+                                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                let _ = db::update_task_codex_account_id(
+                                    &conn,
+                                    &task_id,
+                                    &next_account.id,
+                                );
+                            }
+
+                            let agent = match find_agent(&state.config, &task.agent_id) {
+                                Some(a) => a,
+                                None => {
+                                    let (formatted_error, _) = format_agent_error(&error_str);
+                                    if let Some(window) = app.get_webview_window(&window_label) {
+                                        let _ = window.emit(
+                                            "ChatLogStatus",
+                                            (&task_id, &formatted_error, "error"),
+                                        );
+                                    }
+                                    return Err(format!("Agent error: {}", formatted_error));
+                                }
+                            };
+                            let cwd = resolve_task_cwd(&task)?;
+                            let settings = state.settings.lock().await.clone();
+                            let overrides =
+                                auth_env_for(&task.agent_id, &settings, Some(&codex_home));
+                            let allow_missing =
+                                settings.codex_auth_method.as_deref() == Some("chatgpt");
+                            let env = match build_env(&agent.required_env, &overrides, allow_missing)
+                            {
+                                Ok(e) => e,
+                                Err(e) => {
+                                    let error_msg =
+                                        format!("Reconnection failed - auth error: {}", e);
+                                    if let Some(window) = app.get_webview_window(&window_label) {
+                                        let _ = window.emit(
+                                            "ChatLogStatus",
+                                            (&task_id, &error_msg, "error"),
+                                        );
+                                    }
+                                    return Err(error_msg);
+                                }
+                            };
+
+                            let (new_client, new_session_id, _used_session_load) =
+                                reconnect_session_with_context(
+                                    agent,
+                                    &task,
+                                    &cwd,
+                                    &env,
+                                    &state.db,
+                                    true,
+                                )
+                                .await?;
+
+                            {
+                                let mut handle = handle_ref.lock().await;
+                                handle.client = new_client.clone();
+                                handle.session_id = new_session_id.clone();
+                            }
+
+                            let history_opt = {
+                                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                let mut messages = db::get_message_records(&conn, &task.id)
+                                    .map_err(|e| e.to_string())?;
+                                if let Some(last) = messages.last() {
+                                    if last.message_type == "user_message"
+                                        && last.content.as_deref() == Some(message.as_str())
+                                    {
+                                        messages.pop();
+                                    }
+                                }
+                                if !messages.is_empty() {
+                                    let (history, _) =
+                                        db::compact_history(&messages, task.prompt.as_deref(), 100_000);
+                                    Some(history)
+                                } else {
+                                    None
+                                }
+                            };
+                            if let Some(history) = history_opt {
+                                if !effective_message.contains("[User's new message]") {
+                                    effective_message =
+                                        format_message_with_history(&history, &effective_message);
+                                }
+                            }
+
+                            client = new_client;
+                            session_id = new_session_id;
+                            if let Some(window) = app.get_webview_window(&window_label) {
+                                let _ = window.emit(
+                                    "ChatLogStatus",
+                                    (&task_id, "Rate limit reached, switched account. Retrying...", "running"),
+                                );
+                            }
+                            continue;
+                        }
+                    }
+                }
 
                 // Check if this is a recoverable exit (SIGTERM/exit code 143)
                 if is_recoverable_exit(&error_str) && attempt < MAX_RECONNECT_ATTEMPTS {
@@ -7976,7 +8898,18 @@ pub(crate) async fn send_chat_message_internal(
 
                     // Build environment
                     let settings = state.settings.lock().await.clone();
-                    let overrides = auth_env_for(&task.agent_id, &settings);
+                    let codex_home = if task.agent_id == "codex" {
+                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                        resolve_codex_account_home(
+                            &conn,
+                            task.codex_account_id
+                                .as_deref()
+                                .or(settings.active_codex_account_id.as_deref()),
+                        )
+                    } else {
+                        None
+                    };
+                    let overrides = auth_env_for(&task.agent_id, &settings, codex_home.as_deref());
                     let allow_missing = (task.agent_id == "codex"
                         && settings.codex_auth_method.as_deref() == Some("chatgpt"))
                         || (task.agent_id == "claude-code"
@@ -7998,7 +8931,7 @@ pub(crate) async fn send_chat_message_internal(
                     };
 
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db).await
+                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false).await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(
@@ -8738,6 +9671,12 @@ fn main() {
             toggle_skill,
             get_running_tasks,
             restart_all_agents,
+            codex_accounts_list,
+            codex_account_create,
+            codex_account_import,
+            codex_account_login,
+            codex_account_set_active,
+            codex_account_delete,
             codex_login,
             codex_logout,
             check_codex_auth,

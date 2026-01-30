@@ -2,6 +2,7 @@
 //! Uses OAuth tokens from existing Claude/Codex logins.
 
 use crate::utils::safe_prefix;
+use std::path::PathBuf;
 use std::time::Duration;
 
 /// Resolve which agent to use for summarization.
@@ -272,10 +273,14 @@ async fn call_amp_cli(prompt: &str) -> Result<String, String> {
 
 /// Get Codex OAuth token and account ID from ~/.codex/auth.json
 fn get_codex_auth() -> Result<(String, Option<String>), String> {
-    let auth_path = dirs::home_dir()
-        .ok_or("No home dir")?
-        .join(".codex")
-        .join("auth.json");
+    let auth_path = std::env::var("CODEX_HOME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| PathBuf::from(value).join("auth.json"))
+        .or_else(|| {
+            dirs::home_dir().map(|home| home.join(".codex").join("auth.json"))
+        })
+        .ok_or("No home dir")?;
 
     let content =
         std::fs::read_to_string(&auth_path).map_err(|_| "Cannot read ~/.codex/auth.json")?;
