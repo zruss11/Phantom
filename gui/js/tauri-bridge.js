@@ -434,6 +434,16 @@
         if (channel === 'checkExistingPr') {
           return tauriInvoke('check_existing_pr', { projectPath: args[0] || null, branch: args[1] });
         }
+        if (channel === 'getGitHubPrUrl') {
+          return tauriInvoke('get_github_pr_url', {
+            projectPath: args[0] || null,
+            currentBranch: args[1],
+            baseBranch: args[2] || null
+          });
+        }
+        if (channel === 'openExternalUrl') {
+          return tauriInvoke('open_external_url', { url: args[0] });
+        }
         if (channel === 'getSettings') {
           return tauriInvoke('get_settings');
         }
@@ -707,6 +717,12 @@
               source: 'mock',
               error: 'Branches unavailable in mock mode'
             });
+            break;
+          case 'getGitHubPrUrl':
+            resolve(null);
+            break;
+          case 'openExternalUrl':
+            resolve();
             break;
           case 'getCachedModels':
             // Mock: return empty array (no cached models in mock mode)

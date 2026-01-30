@@ -710,16 +710,57 @@
       clearMessages();
     });
 
-    // PR Creation Button Handler
+    // PR Dropdown Toggle Handler
+    const prDropdownContainer = $("#prDropdownContainer");
+    const prDropdownToggle = $("#prDropdownToggle");
+    const prDropdownMenu = $("#prDropdownMenu");
+
+    prDropdownToggle.on("click", function (e) {
+      e.stopPropagation();
+      prDropdownContainer.toggleClass("open");
+      prDropdownToggle.attr("aria-expanded", prDropdownContainer.hasClass("open"));
+    });
+
+    // Close dropdown when clicking outside
+    $(document).on("click", function (e) {
+      if (!$(e.target).closest("#prDropdownContainer").length) {
+        prDropdownContainer.removeClass("open");
+        prDropdownToggle.attr("aria-expanded", "false");
+      }
+    });
+
+    // PR Creation Button Handler (main button - creates draft PR)
     $("#createPrButton").on("click", async function () {
+      prDropdownContainer.removeClass("open");
+      prDropdownToggle.attr("aria-expanded", "false");
+      await createDraftPr();
+    });
+
+    // Create Draft PR menu item
+    $("#createDraftPr").on("click", async function () {
+      prDropdownContainer.removeClass("open");
+      prDropdownToggle.attr("aria-expanded", "false");
+      await createDraftPr();
+    });
+
+    // Create PR Manually - opens GitHub in browser
+    $("#createPrManually").on("click", async function () {
+      prDropdownContainer.removeClass("open");
+      prDropdownToggle.attr("aria-expanded", "false");
+      await openGitHubPrPage();
+    });
+
+    // Helper function to create draft PR via agent
+    async function createDraftPr() {
       if (!currentTaskId || !currentTaskPath) {
         console.warn("[ChatLog] Cannot create PR: no task or path");
         addSystemMessage("Cannot create PR: No active task or project path.");
         return;
       }
 
-      const btn = $(this);
+      const btn = $("#createPrButton");
       btn.prop("disabled", true);
+      prDropdownToggle.prop("disabled", true);
 
       try {
         // Fetch git state
@@ -730,8 +771,8 @@
           return;
         }
 
-        // Generate dynamic prompt
-        const prompt = generatePrPrompt(prState);
+        // Generate dynamic prompt for draft PR
+        const prompt = generateDraftPrPrompt(prState);
 
         // Display as user message
         addMessage({
@@ -742,15 +783,46 @@
 
         // Send to agent
         ipcRenderer.send("SendChatMessage", currentTaskId, prompt);
-        updateStatus("Creating PR...", "running");
+        updateStatus("Creating Draft PR...", "running");
 
       } catch (err) {
         console.error("[ChatLog] PR creation error:", err);
         addSystemMessage("Error: " + (err.message || err));
       } finally {
         btn.prop("disabled", false);
+        prDropdownToggle.prop("disabled", false);
       }
-    });
+    }
+
+    // Helper function to open GitHub PR creation page
+    async function openGitHubPrPage() {
+      if (!currentTaskPath) {
+        addSystemMessage("Cannot open PR page: No project path.");
+        return;
+      }
+
+      try {
+        // Get the repo URL and branch info
+        const prState = await ipcRenderer.invoke("getPrReadyState", currentTaskPath);
+
+        if (prState.error) {
+          addSystemMessage("Cannot open PR page: " + prState.error);
+          return;
+        }
+
+        // Open the GitHub compare/PR creation page
+        const url = await ipcRenderer.invoke("getGitHubPrUrl", currentTaskPath, prState.currentBranch, prState.baseBranch);
+
+        if (url) {
+          await ipcRenderer.invoke("openExternalUrl", url);
+        } else {
+          addSystemMessage("Could not determine GitHub PR URL. Make sure the repository has a GitHub remote.");
+        }
+      } catch (err) {
+        console.error("[ChatLog] Error opening GitHub PR page:", err);
+        addSystemMessage("Error: " + (err.message || err));
+      }
+    }
 
     $("#taskIdCopy").on("click", function (e) {
       e.preventDefault();
@@ -3700,6 +3772,75 @@
     prompt += "   - Keep the title under 80 characters\n";
     prompt += "   - Write a clear, concise description (under 5 sentences unless more context is needed)\n";
     prompt += "   - If a PR template exists in the repo, follow it\n\n";
+
+    if (!hasUpstream) {
+      prompt += (uncommittedChanges > 0 ? "4" : "3") + ". The branch hasn't been pushed yet. Push it first with `git push -u origin " + branchName + "`\n\n";
+    }
+
+    prompt += "If any step fails, explain the error and ask the user for guidance.";
+
+    // Include PR template if found
+    if (prTemplate) {
+      prompt += "\n\n## Template\n\nA PR template was found. Use it for the PR description:\n\n```markdown\n" + prTemplate + "\n```";
+    }
+
+    return prompt;
+  }
+
+  // Generate DRAFT PR creation prompt based on git state
+  function generateDraftPrPrompt(state) {
+    const {
+      currentBranch,
+      baseBranch,
+      uncommittedChanges,
+      hasUpstream,
+      aheadCount,
+      prTemplate
+    } = state;
+
+    const targetBranch = baseBranch || "main";
+    const branchName = currentBranch || "current branch";
+
+    let context = [];
+
+    // State description
+    if (uncommittedChanges > 0) {
+      context.push("There are " + uncommittedChanges + " uncommitted change" + (uncommittedChanges > 1 ? "s" : "") + ".");
+    } else {
+      context.push("There are no uncommitted changes.");
+    }
+
+    context.push("The current branch is `" + branchName + "`.");
+    context.push("The target branch is `" + targetBranch + "`.");
+
+    if (hasUpstream) {
+      context.push("An upstream branch exists.");
+      if (aheadCount > 0) {
+        context.push("The branch is " + aheadCount + " commit" + (aheadCount > 1 ? "s" : "") + " ahead of the remote.");
+      }
+    } else {
+      context.push("No upstream branch exists yet (will be created on push).");
+    }
+
+    let prompt = "Create a new **draft** pull request for the current work.\n\n";
+    prompt += "## Snapshot\n\n";
+    prompt += "- " + context.join("\n- ") + "\n\n";
+    prompt += "## Action Plan\n\n";
+    prompt += "Do the following in order:\n\n";
+
+    if (uncommittedChanges > 0) {
+      prompt += "1. Uncommitted changes exist. Ask whether to commit them first or proceed without committing.\n\n";
+      prompt += "2. Review the diff with `git diff origin/" + targetBranch + "...`.\n\n";
+      prompt += "3. Open the **draft** PR using `gh pr create --draft --base " + targetBranch + "`:\n";
+    } else {
+      prompt += "1. Review the diff with `git diff origin/" + targetBranch + "...`.\n\n";
+      prompt += "2. Open the **draft** PR using `gh pr create --draft --base " + targetBranch + "`:\n";
+    }
+
+    prompt += "   - Keep the title under 80 characters\n";
+    prompt += "   - Write a clear, concise description (under 5 sentences unless more context is needed)\n";
+    prompt += "   - If a PR template exists in the repo, follow it\n";
+    prompt += "   - Use the `--draft` flag to create it as a draft PR\n\n";
 
     if (!hasUpstream) {
       prompt += (uncommittedChanges > 0 ? "4" : "3") + ". The branch hasn't been pushed yet. Push it first with `git push -u origin " + branchName + "`\n\n";
