@@ -185,6 +185,44 @@
   window.showImageLightbox = showImageLightbox;
   window.hideImageLightbox = hideImageLightbox;
 
+  // Load attachment image from backend and return data URL
+  // Caches loaded images to avoid repeated loads
+  const attachmentDataUrlCache = new Map();
+
+  async function loadAttachmentDataUrl(attachment) {
+    // If already has dataUrl, use it
+    if (attachment.dataUrl) {
+      return attachment.dataUrl;
+    }
+
+    // Check cache first
+    const cacheKey = attachment.relativePath || attachment.id;
+    if (attachmentDataUrlCache.has(cacheKey)) {
+      return attachmentDataUrlCache.get(cacheKey);
+    }
+
+    // Load from backend if we have relativePath
+    if (attachment.relativePath && ipcRenderer && typeof ipcRenderer.invoke === "function") {
+      try {
+        const base64Data = await ipcRenderer.invoke("getAttachmentBase64", attachment.relativePath);
+        if (base64Data) {
+          const mimeType = attachment.mimeType || "image/png";
+          const dataUrl = `data:${mimeType};base64,${base64Data}`;
+          attachmentDataUrlCache.set(cacheKey, dataUrl);
+          return dataUrl;
+        }
+      } catch (err) {
+        console.error("[agent_chat_log] Failed to load attachment:", err);
+      }
+    }
+
+    // Fallback: return empty string (image will show broken)
+    return "";
+  }
+
+  // Expose globally for inline onclick handlers
+  window.loadAttachmentDataUrl = loadAttachmentDataUrl;
+
   // Ghost SVG icon for unknown tools
   const GHOST_SVG =
     '<svg class="ghost-icon" width="14" height="14" viewBox="0 0 36 36" fill="currentColor" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M34.8888 33.9334C32.6622 32.7094 30.7428 31.0101 29.2718 28.9604C28.2094 27.4306 27.7961 25.5533 28.1199 23.7283C28.4437 21.9033 29.479 20.2747 31.0053 19.1892L32.6594 18.0175C33.3441 17.5877 33.8366 16.9174 34.0366 16.143C34.2366 15.3687 34.1291 14.5485 33.7359 13.8493C33.5397 13.4953 33.2724 13.1841 32.9503 12.9346C32.6282 12.6851 32.258 12.5025 31.862 12.3978C31.4774 12.2954 31.0756 12.271 30.6811 12.3261C30.2866 12.3812 29.9076 12.5147 29.5672 12.7185L28.3724 13.4246C28.3172 13.458 28.2537 13.4757 28.1889 13.4759C28.124 13.4761 28.0604 13.4588 28.005 13.4257C27.9529 13.3987 27.9093 13.3581 27.8789 13.3085C27.8485 13.2588 27.8324 13.2019 27.8325 13.144L27.834 13.1036C27.9001 11.3349 27.6064 9.57104 26.9702 7.91548C26.334 6.25992 25.3682 4.74598 24.1293 3.46243C23.0978 2.38214 21.8546 1.51843 20.4747 0.923368C19.0947 0.328306 17.6066 0.014207 16.0999 0C9.86269 0 5.15898 5.62316 5.15898 13.0795C5.15898 13.234 5.16053 13.4151 5.16325 13.6126C5.16495 13.6746 5.14965 13.7359 5.11895 13.7901C5.08826 13.8443 5.04331 13.8894 4.98881 13.9207C4.93588 13.9531 4.87496 13.9708 4.8126 13.9717C4.75024 13.9726 4.6888 13.9568 4.63489 13.926L4.5678 13.8898C4.22733 13.6862 3.84834 13.5528 3.45384 13.4976C3.05935 13.4425 2.65758 13.4668 2.27293 13.5691C1.87693 13.6738 1.50666 13.8564 1.18456 14.106C0.862453 14.3556 0.595215 14.6669 0.399044 15.021C0.00286865 15.7253 -0.103195 16.5523 0.102764 17.3312C0.308727 18.1102 0.810974 18.7816 1.50578 19.2068L4.69883 21.0941C5.3548 21.475 5.86448 22.0583 6.14862 22.7535C8.52337 28.7598 14.3466 35.9199 28.6035 35.9199C30.6011 35.9199 32.0448 35.9537 33.1017 35.9785L33.1262 35.979L33.1492 35.9796L33.1502 35.9796C33.6243 35.9908 34.0155 36 34.3399 36C35.4924 36 35.8017 35.8852 35.9606 35.3411C36.156 34.6747 35.5968 34.3476 34.889 33.9336L34.8888 33.9334ZM15.963 12.3796C15.0378 11.9925 14.4827 10.9906 14.6214 9.92043C14.6908 9.30564 14.9221 8.59976 15.4773 8.1899C16.6801 7.2791 22.2547 6.00398 23.1568 8.75915C24.0589 11.4916 18.9701 13.6092 15.963 12.3796ZM8.29434 8.85085C7.99363 9.35179 7.9705 9.98935 8.13242 10.5586C8.47938 11.7654 9.24271 12.3802 10.538 12.4485C12.0184 12.4713 12.9437 12.2664 12.8743 9.60226C12.828 7.98559 11.417 7.75789 10.6537 7.75789C9.28897 7.73512 8.61817 8.30437 8.29434 8.85085Z"/></svg>';
@@ -2912,17 +2950,35 @@
           const imageStrip = document.createElement("div");
           imageStrip.className = "user-image-strip";
 
+          // Store references for async loading
+          const imageElements = [];
+          const placeholderElements = [];
+
           attachments.forEach((att, index) => {
             const img = document.createElement("img");
             img.className = "user-image-thumb";
-            img.src = att.dataUrl || `phantom://attachment/${att.id}`;
+            // Use dataUrl if available, otherwise show loading state
+            if (att.dataUrl) {
+              img.src = att.dataUrl;
+            }
             img.alt = att.fileName || `Image ${index + 1}`;
             img.title = att.fileName || `Image ${index + 1}`;
             img.dataset.attachmentId = att.id;
             img.dataset.index = index;
-            // Click to show lightbox
-            img.onclick = () => showImageLightbox(img.src, img.alt);
+            // Click to show lightbox - will use current src
+            img.onclick = () => {
+              const currentSrc = img.getAttribute("src");
+              if (!currentSrc) return;
+              showImageLightbox(currentSrc, img.alt);
+            };
+
+            // If no dataUrl, add loading class
+            if (!att.dataUrl) {
+              img.classList.add("loading");
+            }
+
             imageStrip.appendChild(img);
+            imageElements.push({ img, att, index });
           });
 
           wrapper.appendChild(imageStrip);
@@ -2935,7 +2991,8 @@
             // Replace [Image X] or similar with animated placeholders
             let processedContent = escapeHtml(content);
             attachments.forEach((att, index) => {
-              const placeholderHtml = `<span class="image-placeholder" data-attachment-id="${att.id}" onclick="showImageLightbox('${att.dataUrl || ""}', '${escapeHtml(att.fileName || "Image " + (index + 1))}')"><i class="fal fa-image"></i> Image ${index + 1}</span>`;
+              // Use a data attribute to store info, onclick will use cached dataUrl
+              const placeholderHtml = `<span class="image-placeholder" data-attachment-id="${att.id}" data-index="${index}"><i class="fal fa-image"></i> Image ${index + 1}</span>`;
               // Replace common image reference patterns
               processedContent = processedContent
                 .replace(
@@ -2950,9 +3007,45 @@
 
             textBubble.innerHTML = processedContent;
             wrapper.appendChild(textBubble);
+
+            // Store placeholder elements for async update
+            textBubble.querySelectorAll(".image-placeholder").forEach((el) => {
+              placeholderElements.push(el);
+            });
           }
 
           div.appendChild(wrapper);
+
+          // Async load images that don't have dataUrl
+          imageElements.forEach(({ img, att, index }) => {
+            if (!att.dataUrl && (att.relativePath || att.id)) {
+              loadAttachmentDataUrl(att).then((dataUrl) => {
+                if (dataUrl) {
+                  img.src = dataUrl;
+                  img.classList.remove("loading");
+
+                  // Also update any placeholders for this attachment
+                  placeholderElements
+                    .filter((el) => el.dataset.attachmentId === att.id)
+                    .forEach((el) => {
+                      const altText = att.fileName || "Image " + (index + 1);
+                      el.onclick = () => showImageLightbox(dataUrl, altText);
+                    });
+                } else {
+                  img.classList.remove("loading");
+                  img.classList.add("error");
+                }
+              });
+            } else if (att.dataUrl) {
+              // Already have dataUrl, just set up placeholder click handlers
+              placeholderElements
+                .filter((el) => el.dataset.attachmentId === att.id)
+                .forEach((el) => {
+                  const altText = att.fileName || "Image " + (index + 1);
+                  el.onclick = () => showImageLightbox(att.dataUrl, altText);
+                });
+            }
+          });
         } else {
           // Regular user message without images
           div.innerHTML = escapeHtml(content);

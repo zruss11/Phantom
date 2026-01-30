@@ -2372,6 +2372,23 @@
         box-shadow: 0 4px 12px rgba(74, 144, 217, 0.3);
       }
 
+      /* Loading state for images being fetched */
+      .user-image-thumb.loading {
+        background: rgba(74, 144, 217, 0.2);
+        animation: image-loading-pulse 1.5s ease-in-out infinite;
+      }
+
+      @keyframes image-loading-pulse {
+        0%, 100% { opacity: 0.6; }
+        50% { opacity: 1; }
+      }
+
+      /* Error state for images that failed to load */
+      .user-image-thumb.error {
+        background: rgba(255, 100, 100, 0.2);
+        border-color: rgba(255, 100, 100, 0.5);
+      }
+
       /* The actual message text bubble */
       .user-message-text {
         background: linear-gradient(135deg, #4a90d9, #357abd);
