@@ -86,10 +86,15 @@ async fn generate_title(prompt: &str, agent_id: &str) -> Result<String, String> 
 }
 
 async fn generate_status(response: &str, agent_id: &str) -> Result<String, String> {
+    // Check for PR links first - handle them directly without LLM
+    if let Some(pr_summary) = extract_pr_summary(response) {
+        return Ok(pr_summary);
+    }
+
     // Truncate to first 500 chars (safe for UTF-8)
     let truncated = safe_prefix(response, 500);
     let full_prompt = format!(
-        "Summarize what was done in max 40 characters. Return ONLY the summary, no quotes.\n\n{}",
+        "Summarize what was done in max 40 characters. Return ONLY the summary, no quotes. Do NOT try to access any URLs - just describe what was done based on the text.\n\n{}",
         truncated
     );
 
@@ -329,6 +334,53 @@ fn extract_codex_sse_text(sse_body: &str) -> Result<String, String> {
     Err("Could not extract text from Codex SSE response".to_string())
 }
 
+/// Extract PR number from GitHub PR URLs and return a formatted summary
+/// Returns None if no qualifying PR link is found, allowing fallback to LLM summarization
+fn extract_pr_summary(text: &str) -> Option<String> {
+    // Look for GitHub PR URLs: https://github.com/owner/repo/pull/123
+    // Use a simple pattern match rather than regex for performance
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+
+    let normalized: Vec<String> = words.iter().map(|word| normalize_token(word)).collect();
+
+    for (idx, word) in words.iter().enumerate() {
+        if let Some(pr_part) = word.strip_prefix("https://github.com/") {
+            if let Some(pull_idx) = pr_part.find("/pull/") {
+                let after_pull = &pr_part[pull_idx + 6..]; // Skip "/pull/"
+                let pr_number: String =
+                    after_pull.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !pr_number.is_empty() && has_opened_created_context(&normalized, idx) {
+                    return Some(format!("PR #{} opened", pr_number));
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_token(word: &str) -> String {
+    word.trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_ascii_lowercase()
+}
+
+fn has_opened_created_context(tokens: &[String], url_index: usize) -> bool {
+    const WINDOW: usize = 4;
+    let start = url_index.saturating_sub(WINDOW);
+    let end = (url_index + WINDOW + 1).min(tokens.len());
+
+    for token in &tokens[start..end] {
+        if matches!(token.as_str(), "opened" | "created") {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Clean up LLM response (remove quotes, trim whitespace)
 fn clean_response(text: &str) -> String {
     text.trim()
@@ -395,5 +447,44 @@ mod tests {
     fn test_clean_response() {
         assert_eq!(clean_response("  \"Hello World\"  "), "Hello World");
         assert_eq!(clean_response("'Test'"), "Test");
+    }
+
+    #[test]
+    fn test_extract_pr_summary() {
+        // Standard GitHub PR URL
+        assert_eq!(
+            extract_pr_summary("Created PR https://github.com/user/repo/pull/123"),
+            Some("PR #123 opened".to_string())
+        );
+
+        // PR URL with trailing content
+        assert_eq!(
+            extract_pr_summary("See https://github.com/org/project/pull/456 for details"),
+            None
+        );
+
+        // No PR link
+        assert_eq!(
+            extract_pr_summary("Fixed the bug in auth.ts"),
+            None
+        );
+
+        // GitHub URL but not a PR
+        assert_eq!(
+            extract_pr_summary("Check https://github.com/user/repo/issues/123"),
+            None
+        );
+
+        // Multiple URLs, only explicit opened/created wins
+        assert_eq!(
+            extract_pr_summary("Reviewed https://github.com/a/b/pull/1 and opened https://github.com/c/d/pull/2"),
+            Some("PR #2 opened".to_string())
+        );
+
+        // PR URL without opened/created language
+        assert_eq!(
+            extract_pr_summary("Reviewed PR https://github.com/a/b/pull/7"),
+            None
+        );
     }
 }
