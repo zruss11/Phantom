@@ -2907,13 +2907,19 @@
             const img = document.createElement("img");
             img.className = "user-image-thumb";
             // Use dataUrl if available, otherwise show loading state
-            img.src = att.dataUrl || "";
+            if (att.dataUrl) {
+              img.src = att.dataUrl;
+            }
             img.alt = att.fileName || `Image ${index + 1}`;
             img.title = att.fileName || `Image ${index + 1}`;
             img.dataset.attachmentId = att.id;
             img.dataset.index = index;
             // Click to show lightbox - will use current src
-            img.onclick = () => showImageLightbox(img.src, img.alt);
+            img.onclick = () => {
+              const currentSrc = img.getAttribute("src");
+              if (!currentSrc) return;
+              showImageLightbox(currentSrc, img.alt);
+            };
 
             // If no dataUrl, add loading class
             if (!att.dataUrl) {
@@ -2971,7 +2977,7 @@
                   placeholderElements
                     .filter((el) => el.dataset.attachmentId === att.id)
                     .forEach((el) => {
-                      const altText = escapeHtml(att.fileName || "Image " + (index + 1));
+                      const altText = att.fileName || "Image " + (index + 1);
                       el.onclick = () => showImageLightbox(dataUrl, altText);
                     });
                 } else {
@@ -2984,7 +2990,7 @@
               placeholderElements
                 .filter((el) => el.dataset.attachmentId === att.id)
                 .forEach((el) => {
-                  const altText = escapeHtml(att.fileName || "Image " + (index + 1));
+                  const altText = att.fileName || "Image " + (index + 1);
                   el.onclick = () => showImageLightbox(att.dataUrl, altText);
                 });
             }
