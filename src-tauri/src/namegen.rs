@@ -307,8 +307,8 @@ fn get_codex_auth() -> Result<(String, Option<String>), String> {
         })
         .ok_or("No home dir")?;
 
-    let content =
-        std::fs::read_to_string(&auth_path).map_err(|_| "Cannot read ~/.codex/auth.json")?;
+    let content = std::fs::read_to_string(&auth_path)
+        .map_err(|_| format!("Cannot read {}", auth_path.display()))?;
 
     if content.len() > 1_000_000 {
         return Err("Auth file exceeds size limit".to_string());

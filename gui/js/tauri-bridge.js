@@ -483,10 +483,18 @@
           return tauriInvoke('codex_accounts_list');
         }
         if (channel === 'createCodexAccount') {
-          return tauriInvoke('codex_account_create', { label: args[0] || null });
+          // args[0] = label (optional), args[1] = codex_home (required path)
+          return tauriInvoke('codex_account_create', {
+            label: args[0] || null,
+            codexHome: args[1]
+          });
         }
         if (channel === 'importCodexAccount') {
-          return tauriInvoke('codex_account_import', { label: args[0] || null });
+          // args[0] = label (optional), args[1] = codex_home (optional, defaults to ~/.codex)
+          return tauriInvoke('codex_account_import', {
+            label: args[0] || null,
+            codexHome: args[1] || null
+          });
         }
         if (channel === 'loginCodexAccount') {
           return tauriInvoke('codex_account_login', { accountId: args[0] });
@@ -650,9 +658,18 @@
             break;
           }
           case 'loginCodexAccount':
+            mockData.codexAccounts = (mockData.codexAccounts || []).map(function(a) {
+              if (a.id === args[0]) {
+                return Object.assign({}, a, { authenticated: true, email: 'mock@example.com' });
+              }
+              return a;
+            });
             resolve({ authenticated: true, method: 'chatgpt', expires_at: null, email: 'mock@example.com' });
             break;
           case 'setActiveCodexAccount':
+            mockData.codexAccounts = (mockData.codexAccounts || []).map(function(a) {
+              return Object.assign({}, a, { isActive: a.id === args[0] });
+            });
             resolve(true);
             break;
           case 'deleteCodexAccount':

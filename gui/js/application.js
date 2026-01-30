@@ -598,6 +598,16 @@ async function loadCodexAccounts() {
     codexAccounts = accounts || [];
     const active = codexAccounts.find((a) => a.isActive) || codexAccounts[0] || null;
     activeCodexAccountId = active ? active.id : null;
+    if (!codexAccounts.some((a) => a.isActive) && activeCodexAccountId) {
+      try {
+        await ipcRenderer.invoke("setActiveCodexAccount", activeCodexAccountId);
+        codexAccounts = codexAccounts.map((a) =>
+          a.id === activeCodexAccountId ? { ...a, isActive: true } : a,
+        );
+      } catch (err) {
+        console.warn("[Harness] Failed to persist active Codex account", err);
+      }
+    }
     codexAuthState = active
       ? {
           authenticated: !!active.authenticated,

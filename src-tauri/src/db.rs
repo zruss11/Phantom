@@ -533,7 +533,7 @@ pub fn update_task_agent_session_id(
 pub fn update_task_codex_account_id(
     conn: &Connection,
     id: &str,
-    codex_account_id: &str,
+    codex_account_id: Option<&str>,
 ) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
     conn.execute(

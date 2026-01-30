@@ -524,6 +524,9 @@ struct SessionHandle {
     claude_watcher: Option<claude_usage_watcher::WatcherHandle>,
     /// Token to signal cancellation of current generation without killing the session
     cancel_token: CancellationToken,
+    /// When true, the next message should be wrapped with conversation history context.
+    /// This is set when a session is reconnected without session/load (e.g., after account switch).
+    needs_history_injection: bool,
 }
 
 type SharedSessionHandle = Arc<Mutex<SessionHandle>>;
@@ -863,12 +866,8 @@ fn settings_path() -> Result<PathBuf, String> {
     Ok(dir.join("settings.json"))
 }
 
-fn codex_accounts_root() -> Result<PathBuf, String> {
-    let base = dirs::config_dir().ok_or_else(|| "config dir unavailable".to_string())?;
-    let dir = base.join("phantom-harness").join("codex-accounts");
-    std::fs::create_dir_all(&dir).map_err(|err| format!("codex accounts dir: {}", err))?;
-    Ok(dir)
-}
+// NOTE: codex_accounts_root() was removed to avoid copying Codex data into app storage.
+// Codex homes are now referenced directly at their original paths (e.g., ~/.codex).
 
 fn default_codex_home() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".codex"))
@@ -3238,6 +3237,7 @@ pub(crate) async fn create_agent_session_internal(
         messages: Vec::new(),
         claude_watcher,
         cancel_token: CancellationToken::new(),
+        needs_history_injection: false,
     };
 
     let mut sessions = state.sessions.lock().await;
@@ -3858,6 +3858,7 @@ pub(crate) async fn start_task_internal(
             messages: Vec::new(),
             claude_watcher,
             cancel_token: CancellationToken::new(),
+            needs_history_injection: false,
         };
 
         let handle_ref = Arc::new(Mutex::new(handle));
@@ -4428,7 +4429,7 @@ pub(crate) async fn start_task_internal(
                                 let _ = db::update_task_codex_account_id(
                                     &conn,
                                     &task_id,
-                                    &next_account.id,
+                                    Some(&next_account.id),
                                 );
                             }
 
@@ -5604,27 +5605,8 @@ fn select_active_codex_account_id(
     next
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
-    if !src.exists() {
-        return Err("Source directory does not exist".to_string());
-    }
-    std::fs::create_dir_all(dst).map_err(|e| format!("create dir: {}", e))?;
-    for entry in std::fs::read_dir(src).map_err(|e| format!("read dir: {}", e))? {
-        let entry = entry.map_err(|e| format!("read entry: {}", e))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|e| format!("file type: {}", e))?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_all(&src_path, &dst_path)?;
-        } else if file_type.is_file() {
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("copy file: {}", e))?;
-        }
-    }
-    Ok(())
-}
+// NOTE: copy_dir_all() was removed - we no longer copy Codex directories.
+// Codex homes are referenced directly at their original paths.
 
 async fn codex_accounts_list_internal(
     state: &AppState,
@@ -5635,8 +5617,9 @@ async fn codex_accounts_list_internal(
     };
 
     let mut settings = state.settings.lock().await;
+    let prev_active = settings.active_codex_account_id.clone();
     let active_id = select_active_codex_account_id(&mut settings, &accounts);
-    if settings.active_codex_account_id.is_some() {
+    if settings.active_codex_account_id != prev_active {
         persist_settings(&settings)?;
     }
 
@@ -5695,22 +5678,43 @@ async fn codex_accounts_list(state: State<'_, AppState>) -> Result<Vec<CodexAcco
     codex_accounts_list_internal(state.inner()).await
 }
 
+/// Register a Codex home directory as an account reference.
+/// The `codex_home` parameter must be provided by the caller - we do NOT create
+/// directories under app storage. The path is stored as a read-only reference.
 #[tauri::command]
 async fn codex_account_create(
     state: State<'_, AppState>,
     label: Option<String>,
+    codex_home: String,
 ) -> Result<CodexAccountSummary, String> {
-    let account_id = uuid::Uuid::new_v4().to_string();
-    let root = codex_accounts_root()?;
-    let codex_home = root.join(&account_id);
-    std::fs::create_dir_all(&codex_home)
-        .map_err(|e| format!("create codex home: {}", e))?;
+    let codex_home_path = PathBuf::from(&codex_home);
 
+    // Validate the path exists - caller is responsible for creating it
+    if !codex_home_path.exists() {
+        return Err(format!(
+            "Codex home path does not exist: {}. Please create it first or select an existing path.",
+            codex_home
+        ));
+    }
+
+    // Check if this path is already registered
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let existing = db::list_codex_accounts(&conn).map_err(|e| e.to_string())?;
+        if existing.iter().any(|a| a.codex_home == codex_home) {
+            return Err(format!(
+                "This Codex home is already registered: {}",
+                codex_home
+            ));
+        }
+    }
+
+    let account_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
     let record = db::CodexAccountRecord {
         id: account_id.clone(),
         label,
-        codex_home: codex_home.to_string_lossy().to_string(),
+        codex_home,
         email: None,
         plan_type: None,
         created_at: now,
@@ -5725,7 +5729,7 @@ async fn codex_account_create(
     if settings.active_codex_account_id.is_none() {
         settings.active_codex_account_id = Some(account_id.clone());
         persist_settings(&settings)?;
-        set_process_codex_home(Some(&codex_home));
+        set_process_codex_home(Some(&codex_home_path));
     }
 
     Ok(CodexAccountSummary {
@@ -5739,25 +5743,47 @@ async fn codex_account_create(
     })
 }
 
+/// Import an existing Codex home directory (e.g., ~/.codex) as a read-only reference.
+/// This does NOT copy any files - it simply registers the path in the database.
+/// Optionally accepts a custom path; defaults to ~/.codex if not provided.
 #[tauri::command]
 async fn codex_account_import(
     state: State<'_, AppState>,
     label: Option<String>,
+    codex_home: Option<String>,
 ) -> Result<CodexAccountSummary, String> {
-    let source = default_codex_home().ok_or("home dir unavailable")?;
-    if !source.exists() {
-        return Err("~/.codex not found".to_string());
-    }
-    let account_id = uuid::Uuid::new_v4().to_string();
-    let root = codex_accounts_root()?;
-    let codex_home = root.join(&account_id);
-    copy_dir_all(&source, &codex_home)?;
+    // Use provided path or default to ~/.codex
+    let codex_home_path = match codex_home {
+        Some(path) => PathBuf::from(path),
+        None => default_codex_home().ok_or("home dir unavailable")?,
+    };
 
+    if !codex_home_path.exists() {
+        return Err(format!(
+            "Codex home path not found: {}",
+            codex_home_path.display()
+        ));
+    }
+
+    // Check if this path is already registered
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let existing = db::list_codex_accounts(&conn).map_err(|e| e.to_string())?;
+        let path_str = codex_home_path.to_string_lossy().to_string();
+        if existing.iter().any(|a| a.codex_home == path_str) {
+            return Err(format!(
+                "This Codex home is already registered: {}",
+                codex_home_path.display()
+            ));
+        }
+    }
+
+    let account_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
     let record = db::CodexAccountRecord {
         id: account_id.clone(),
         label,
-        codex_home: codex_home.to_string_lossy().to_string(),
+        codex_home: codex_home_path.to_string_lossy().to_string(),
         email: None,
         plan_type: None,
         created_at: now,
@@ -5772,7 +5798,7 @@ async fn codex_account_import(
     if settings.active_codex_account_id.is_none() {
         settings.active_codex_account_id = Some(account_id.clone());
         persist_settings(&settings)?;
-        set_process_codex_home(Some(&codex_home));
+        set_process_codex_home(Some(&codex_home_path));
     }
 
     Ok(CodexAccountSummary {
@@ -5945,10 +5971,13 @@ async fn switch_running_codex_tasks(
             handle.client = client.clone();
             handle.session_id = session_id.clone();
             handle.pending_prompt = None;
+            // Mark that the next message needs history injection since we skipped session/load
+            // (Codex session/load would try to restore from the old account's session data)
+            handle.needs_history_injection = true;
         }
 
         let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let _ = db::update_task_codex_account_id(&conn, &task_id, account_id);
+        let _ = db::update_task_codex_account_id(&conn, &task_id, Some(account_id));
 
         if let Some(chat_window) = app.get_webview_window(&chat_window_label(&task_id)) {
             let _ = chat_window.emit("ChatLogStatus", (&task_id, "Switched account", "idle"));
@@ -5977,7 +6006,7 @@ async fn codex_account_set_active(
     }
     set_process_codex_home(Some(&codex_home));
 
-    switch_running_codex_tasks(state.inner(), app, &account_id, &codex_home).await?;
+    switch_running_codex_tasks(state.inner(), app.clone(), &account_id, &codex_home).await?;
     emit_codex_accounts_updated(&app);
     Ok(())
 }
@@ -5989,23 +6018,28 @@ async fn codex_account_delete(
     remove_data: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let (codex_home, was_active) = {
+    // Get account codex_home first (sync lock released before async operations)
+    let codex_home = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let account = db::get_codex_account(&conn, &account_id)
             .map_err(|e| e.to_string())?
             .ok_or("Codex account not found")?;
-        let settings = state.settings.lock().await.clone();
-        (
-            PathBuf::from(account.codex_home),
-            settings.active_codex_account_id.as_deref() == Some(account_id.as_str()),
-        )
+        PathBuf::from(account.codex_home)
+    };
+
+    // Check if this account was active (async lock)
+    let was_active = {
+        let settings = state.settings.lock().await;
+        settings.active_codex_account_id.as_deref() == Some(account_id.as_str())
     };
 
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::delete_codex_account(&conn, &account_id).map_err(|e| e.to_string())?;
     }
-    if remove_data.unwrap_or(true) {
+    // Default to NOT removing data since codex homes are now read-only references
+    // to external directories (e.g., ~/.codex) that the user may want to preserve.
+    if remove_data.unwrap_or(false) {
         let _ = std::fs::remove_dir_all(&codex_home);
     }
 
@@ -6013,7 +6047,7 @@ async fn codex_account_delete(
         let accounts = codex_accounts_list_internal(state.inner()).await?;
         if let Some(active) = accounts.iter().find(|a| a.is_active) {
             let codex_home = PathBuf::from(&active.codex_home);
-            let _ = switch_running_codex_tasks(state.inner(), app, &active.id, &codex_home).await;
+            let _ = switch_running_codex_tasks(state.inner(), app.clone(), &active.id, &codex_home).await;
         }
     }
     emit_codex_accounts_updated(&app);
@@ -6033,9 +6067,10 @@ async fn codex_login(
         return codex_account_login(state, app, account_id).await;
     }
 
-    // Fallback: create a new account and log in
-    let created = codex_account_create(state.clone(), None).await?;
-    codex_account_login(state, app, created.id).await
+    // Fallback: import default ~/.codex as a reference and log in
+    // Note: codex_account_import registers the path directly without copying
+    let imported = codex_account_import(state.clone(), None, None).await?;
+    codex_account_login(state, app, imported.id).await
 }
 
 #[tauri::command]
@@ -8349,6 +8384,7 @@ pub(crate) async fn send_chat_message_internal(
             messages: Vec::new(),
             claude_watcher,
             cancel_token: CancellationToken::new(),
+            needs_history_injection: false,
         };
 
         let handle_ref = Arc::new(Mutex::new(handle));
@@ -8368,8 +8404,11 @@ pub(crate) async fn send_chat_message_internal(
     };
 
     let user_timestamp = chrono::Utc::now().to_rfc3339();
-    let (agent_id, model, client, session_id, effective_message, cancel_token) = {
+    let (agent_id, model, client, session_id, effective_message, cancel_token, needs_history_injection) = {
         let mut handle = handle_ref.lock().await;
+        let needs_history = handle.needs_history_injection;
+        // Clear the flag - history will be injected on this message
+        handle.needs_history_injection = false;
         let effective_message = handle
             .pending_prompt
             .take()
@@ -8388,9 +8427,35 @@ pub(crate) async fn send_chat_message_internal(
             handle.session_id.clone(),
             effective_message,
             handle.cancel_token.clone(),
+            needs_history,
         )
     };
-    let mut effective_message = effective_message;
+    // If the session was reconnected without session/load (e.g., after account switch),
+    // wrap the message with conversation history so the agent has context
+    let mut effective_message = if needs_history_injection && !effective_message.contains("[User's new message]") {
+        let history_opt = {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let messages_db = db::get_message_records(&conn, &task_id).map_err(|e| e.to_string())?;
+            if !messages_db.is_empty() {
+                let (history, _) = db::compact_history(&messages_db, None, 100_000);
+                Some(history)
+            } else {
+                None
+            }
+        };
+        if let Some(history) = history_opt {
+            println!(
+                "[Harness] Injecting history context for switched session: task_id={} history_len={}",
+                task_id,
+                history.len()
+            );
+            format_message_with_history(&history, &effective_message)
+        } else {
+            effective_message
+        }
+    } else {
+        effective_message
+    };
 
     // Load any pending attachments for this task (e.g., pasted images in chat log)
     let attachments: Vec<db::AttachmentRecord> = {
@@ -8750,7 +8815,7 @@ pub(crate) async fn send_chat_message_internal(
                                 let _ = db::update_task_codex_account_id(
                                     &conn,
                                     &task_id,
-                                    &next_account.id,
+                                    Some(&next_account.id),
                                 );
                             }
 

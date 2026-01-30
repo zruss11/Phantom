@@ -271,7 +271,8 @@ async fn call_amp_cli(prompt: &str) -> Result<String, String> {
     Ok(clean_response(&result_text))
 }
 
-/// Get Codex OAuth token and account ID from ~/.codex/auth.json
+/// Get Codex OAuth token and account ID from auth.json
+/// Uses CODEX_HOME env var if set, otherwise falls back to ~/.codex/
 fn get_codex_auth() -> Result<(String, Option<String>), String> {
     let auth_path = std::env::var("CODEX_HOME")
         .ok()
@@ -282,8 +283,8 @@ fn get_codex_auth() -> Result<(String, Option<String>), String> {
         })
         .ok_or("No home dir")?;
 
-    let content =
-        std::fs::read_to_string(&auth_path).map_err(|_| "Cannot read ~/.codex/auth.json")?;
+    let content = std::fs::read_to_string(&auth_path)
+        .map_err(|_| format!("Cannot read {}", auth_path.display()))?;
 
     if content.len() > 1_000_000 {
         return Err("Auth file exceeds size limit".to_string());
