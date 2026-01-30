@@ -6219,6 +6219,89 @@ async fn get_task_diff_stats(
     })
 }
 
+// Review Center (diff viewer) - stubs for now.
+// TODO(review): implement real diff listing/rendering and comment storage.
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewDiffFile {
+    path: String,
+    additions: u64,
+    deletions: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewDiffFilesResult {
+    files: Vec<ReviewDiffFile>,
+}
+
+#[tauri::command]
+async fn get_task_diff_files(
+    task_id: String,
+    compare: Option<String>,
+    _state: State<'_, AppState>,
+) -> Result<ReviewDiffFilesResult, String> {
+    let _ = (task_id, compare);
+    // Placeholder so frontend wiring can land first.
+    Ok(ReviewDiffFilesResult { files: Vec::new() })
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewSplitLine {
+    number: Option<u32>,
+    text: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewSplitDiff {
+    left: Vec<ReviewSplitLine>,
+    right: Vec<ReviewSplitLine>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewFileDiffResult {
+    diff: serde_json::Value,
+}
+
+#[tauri::command]
+async fn get_task_file_diff(
+    task_id: String,
+    file_path: String,
+    compare: Option<String>,
+    view: Option<String>,
+    _state: State<'_, AppState>,
+) -> Result<ReviewFileDiffResult, String> {
+    let _ = (task_id, file_path, compare);
+
+    // Placeholder payloads for the two supported views.
+    let view_mode = view.unwrap_or_else(|| "split".to_string());
+    if view_mode == "unified" {
+        return Ok(ReviewFileDiffResult {
+            diff: serde_json::Value::String(
+                "// TODO(review): unified diff rendering is not implemented yet.".to_string(),
+            ),
+        });
+    }
+
+    let split = ReviewSplitDiff {
+        left: vec![ReviewSplitLine {
+            number: Some(1),
+            text: "// base".to_string(),
+            kind: None,
+        }],
+        right: vec![ReviewSplitLine {
+            number: Some(1),
+            text: "// TODO(review): split diff rendering is not implemented yet.".to_string(),
+            kind: Some("add".to_string()),
+        }],
+    };
+
+    Ok(ReviewFileDiffResult {
+        diff: serde_json::to_value(split).unwrap_or_else(|_| serde_json::json!({})),
+    })
+}
+
 #[tauri::command]
 async fn delete_task(
     task_id: String,
@@ -8749,6 +8832,8 @@ fn main() {
             load_tasks,
             check_task_uncommitted_changes,
             get_task_diff_stats,
+            get_task_diff_files,
+            get_task_file_diff,
             delete_task,
             get_task_history,
             open_task_directory,
