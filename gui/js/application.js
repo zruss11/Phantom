@@ -339,6 +339,7 @@ async function saveSettingsFromUi() {
       agentNotificationsEnabled: $("#agentNotificationsEnabled").is(":checked"),
       agentNotificationStack: $("#agentNotificationStack").is(":checked"),
       aiSummariesEnabled: $("#aiSummariesEnabled").is(":checked"),
+      summariesAgent: $("#summariesAgent").val(),
       taskProjectAllowlist: taskProjectAllowlist,
       mcpEnabled: $("#mcpEnabled").is(":checked"),
       mcpPort: parsedMcpPort,
@@ -357,8 +358,15 @@ async function saveSettingsFromUi() {
 }
 
 // Auto-save settings on any change (inputs and toggles)
-$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken").on("change", saveSettingsFromUi);
+$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken, #summariesAgent").on("change", saveSettingsFromUi);
 $("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
+
+// Show/hide summaries agent dropdown based on AI summaries toggle
+function updateSummariesAgentVisibility() {
+  const enabled = $("#aiSummariesEnabled").is(":checked");
+  $("#summariesAgentGroup").toggle(enabled);
+}
+$("#aiSummariesEnabled").on("change", updateSummariesAgentVisibility);
 
 $(document).on("click", ".project-allowlist-star", function () {
   const path = $(this).data("path");
@@ -446,9 +454,25 @@ async function fetchAgentAvailability() {
           status.error_message
         );
       }
+      // Auto-default summaries agent to Amp if not configured and Amp is available
+      autoDefaultSummariesAgentToAmp();
     }
   } catch (err) {
     console.warn("[Harness] Failed to fetch agent availability:", err);
+  }
+}
+
+// Auto-default summaries agent to Amp if not configured and Amp is available
+function autoDefaultSummariesAgentToAmp() {
+  const currentValue = $("#summariesAgent").val();
+  // Only auto-default if currently set to "auto" (i.e., user hasn't explicitly chosen)
+  if (currentValue === "auto" && !currentSettings.summariesAgent) {
+    const ampAvailable = agentAvailability?.amp?.available;
+    if (ampAvailable) {
+      console.log("[Harness] Auto-defaulting summaries agent to Amp (free)");
+      $("#summariesAgent").val("amp");
+      saveSettingsFromUi();
+    }
   }
 }
 
@@ -1859,6 +1883,16 @@ async function getSettings() {
   } else {
     $("#aiSummariesEnabled").prop("checked", true);
   }
+
+  // Summaries Agent setting
+  if (settingsPayload.summariesAgent) {
+    $("#summariesAgent").val(settingsPayload.summariesAgent);
+  } else {
+    // Default to "auto" - auto-default to amp will happen after agent availability is loaded
+    $("#summariesAgent").val("auto");
+  }
+  // Update visibility based on current toggle state
+  updateSummariesAgentVisibility();
 
   if (settingsPayload.taskProjectAllowlist !== undefined) {
     currentSettings.taskProjectAllowlist = Array.isArray(

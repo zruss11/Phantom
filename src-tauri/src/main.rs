@@ -435,6 +435,10 @@ struct Settings {
     // AI-powered summarization for task titles and status
     #[serde(rename = "aiSummariesEnabled")]
     ai_summaries_enabled: Option<bool>,
+    // Dedicated agent for summaries (overrides task agent for titles, status, branch names)
+    // Values: "auto" (use task agent), "amp", "codex", "claude-code"
+    #[serde(rename = "summariesAgent")]
+    summaries_agent: Option<String>,
     // Task creation settings (sticky between restarts)
     #[serde(rename = "taskProjectPath")]
     pub(crate) task_project_path: Option<String>,
@@ -3041,9 +3045,15 @@ pub(crate) async fn create_agent_session_internal(
         let task_id_clone = task_id.clone();
         let db_clone = state.db.clone();
         let window_opt = app.get_webview_window("main");
+        let summaries_agent = settings.summaries_agent.clone();
 
         tauri::async_runtime::spawn(async move {
-            let title = summarize::summarize_title(&prompt_clone, &agent_clone).await;
+            let title = summarize::summarize_title_with_override(
+                &prompt_clone,
+                &agent_clone,
+                summaries_agent.as_deref(),
+            )
+            .await;
             println!("[Harness] Generated title summary: {}", title);
 
             // Update database
@@ -3071,6 +3081,7 @@ pub(crate) async fn create_agent_session_internal(
         let window_opt = app.get_webview_window("main");
         let multi_create = payload.multi_create;
         let db_clone = state.db.clone();
+        let summaries_agent = settings.summaries_agent.clone();
         let api_key = match payload.agent_id.as_str() {
             "codex" => settings.openai_api_key.clone(),
             "claude-code" => settings.anthropic_api_key.clone(),
@@ -3081,10 +3092,11 @@ pub(crate) async fn create_agent_session_internal(
         };
 
         tauri::async_runtime::spawn(async move {
-            // Generate proper branch name via LLM
-            let metadata = namegen::generate_run_metadata_with_timeout(
+            // Generate proper branch name via LLM (using configured summaries agent)
+            let metadata = namegen::generate_run_metadata_with_timeout_and_override(
                 &prompt_clone,
                 &agent_clone,
+                summaries_agent.as_deref(),
                 api_key.as_deref(),
                 5,
             )
@@ -7163,7 +7175,7 @@ async fn maybe_show_agent_notification(
 
 async fn summarize_status_for_notifications(
     state: &AppState,
-    agent_id: &str,
+    task_agent_id: &str,
     full_text: &str,
     fallback: &str,
 ) -> String {
@@ -7172,7 +7184,12 @@ async fn summarize_status_for_notifications(
         return fallback.to_string();
     }
 
-    let summary = summarize::summarize_status(full_text, agent_id).await;
+    let summary = summarize::summarize_status_with_override(
+        full_text,
+        task_agent_id,
+        settings.summaries_agent.as_deref(),
+    )
+    .await;
     if summary.trim().is_empty() {
         fallback.to_string()
     } else {

@@ -4,6 +4,35 @@
 use crate::utils::safe_prefix;
 use std::time::Duration;
 
+/// Resolve which agent to use for summarization.
+/// Returns the configured agent, or falls back to the task's agent if "auto" or None.
+fn resolve_summaries_agent<'a>(task_agent: &'a str, configured: Option<&'a str>) -> &'a str {
+    match configured {
+        Some("auto") | None => task_agent,
+        Some(agent) => agent,
+    }
+}
+
+/// Generate title using the configured summaries agent (or fallback to task agent)
+pub async fn summarize_title_with_override(
+    prompt: &str,
+    task_agent_id: &str,
+    summaries_agent: Option<&str>,
+) -> String {
+    let agent_id = resolve_summaries_agent(task_agent_id, summaries_agent);
+    summarize_title(prompt, agent_id).await
+}
+
+/// Generate status using the configured summaries agent (or fallback to task agent)
+pub async fn summarize_status_with_override(
+    response: &str,
+    task_agent_id: &str,
+    summaries_agent: Option<&str>,
+) -> String {
+    let agent_id = resolve_summaries_agent(task_agent_id, summaries_agent);
+    summarize_status(response, agent_id).await
+}
+
 /// Generate a short title from a task prompt (async with timeout)
 pub async fn summarize_title(prompt: &str, agent_id: &str) -> String {
     let result =

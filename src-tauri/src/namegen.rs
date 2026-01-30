@@ -4,11 +4,44 @@
 //! from user prompts. Each agent type uses an appropriate model:
 //! - Claude Code: claude-haiku-4-5-20251001 (OAuth)
 //! - Codex: gpt-5.1-codex-mini (ChatGPT backend)
+//! - Amp: Amp CLI (free, local)
 
 use crate::utils::truncate_str;
 use crate::worktree::sanitize_branch_name;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+/// Resolve which agent to use for name generation.
+/// Returns the configured agent, or falls back to the task's agent if "auto" or None.
+fn resolve_summaries_agent<'a>(task_agent: &'a str, configured: Option<&'a str>) -> &'a str {
+    match configured {
+        Some("auto") | None => task_agent,
+        Some(agent) => agent,
+    }
+}
+
+/// Generate run metadata using the configured summaries agent (or fallback to task agent)
+pub async fn generate_run_metadata_with_override(
+    prompt: &str,
+    task_agent_id: &str,
+    summaries_agent: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<RunMetadata, String> {
+    let agent_id = resolve_summaries_agent(task_agent_id, summaries_agent);
+    generate_run_metadata(prompt, agent_id, api_key).await
+}
+
+/// Generate run metadata with timeout, using the configured summaries agent
+pub async fn generate_run_metadata_with_timeout_and_override(
+    prompt: &str,
+    task_agent_id: &str,
+    summaries_agent: Option<&str>,
+    api_key: Option<&str>,
+    timeout_secs: u64,
+) -> RunMetadata {
+    let agent_id = resolve_summaries_agent(task_agent_id, summaries_agent);
+    generate_run_metadata_with_timeout(prompt, agent_id, api_key, timeout_secs).await
+}
 
 /// Metadata generated for a task run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,11 +100,10 @@ pub async fn generate_run_metadata(
 
     let response = match agent_id {
         "codex" => generate_with_codex_backend(&full_prompt).await?,
+        "amp" => generate_with_amp_cli(&full_prompt).await?,
         "claude-code" => generate_with_claude_oauth(&full_prompt).await?,
-        _ => {
-            // Fallback: generate a simple name from the prompt
-            return Ok(generate_fallback(&truncated_prompt));
-        }
+        // Default to Claude for unknown agents (factory-droid, etc.)
+        _ => generate_with_claude_oauth(&full_prompt).await?,
     };
 
     // Parse JSON response
@@ -130,6 +162,73 @@ async fn generate_with_claude_oauth(prompt: &str) -> Result<String, String> {
         .as_str()
         .map(|s| extract_json_from_text(s))
         .ok_or_else(|| "No content in Claude response".to_string())
+}
+
+/// Generate using Amp CLI (spawns amp with --stream-json --execute).
+async fn generate_with_amp_cli(prompt: &str) -> Result<String, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::process::Command;
+
+    let mut cmd = Command::new("amp");
+    cmd.args(["--stream-json", "--execute", prompt])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn amp: {}", e))?;
+
+    let stdout = child.stdout.take().ok_or("Failed to capture amp stdout")?;
+
+    let mut reader = BufReader::new(stdout).lines();
+    let mut result_text = String::new();
+
+    // Parse NDJSON output looking for assistant text or final result
+    while let Ok(Some(line)) = reader.next_line().await {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
+            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            match event_type {
+                "assistant" => {
+                    // Extract text from message.content array
+                    if let Some(content) = json
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    {
+                        for block in content {
+                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                                    result_text.push_str(text);
+                                }
+                            }
+                        }
+                    }
+                }
+                "result" => {
+                    // Check for final result text
+                    if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
+                        if !result.is_empty() {
+                            result_text = result.to_string();
+                        }
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Kill the process if still running
+    let _ = child.kill().await;
+
+    if result_text.is_empty() {
+        return Err("No text in Amp response".to_string());
+    }
+
+    Ok(extract_json_from_text(&clean_response(&result_text)))
 }
 
 /// Generate using Codex ChatGPT backend (same setup as title summarization).
