@@ -2929,7 +2929,8 @@
 
     // Route tool returns through the bundle system
     if (isToolReturnType(type)) {
-      const rawReturn = message.tool_return || message.result || message.content || "";
+      const rawReturn =
+        message.tool_return || message.result || message.output || message.content || "";
       if (mergeBundleToolResult(rawReturn)) {
         if (shouldScroll && autoScroll) {
           scrollToBottom();
@@ -3026,7 +3027,8 @@
 
     // Handle tool_return specially - try to merge into pending tool call first
     if (isToolReturnType(type)) {
-      const rawReturn = message.tool_return || message.result || message.content || "";
+      const rawReturn =
+        message.tool_return || message.result || message.output || message.content || "";
       const pendingToolCall = container.find(".tool-call.pending").last();
 
       if (pendingToolCall.length > 0) {
@@ -3478,7 +3480,7 @@
         // Tool returns are now merged into tool calls via mergeToolResult()
         // This case only handles standalone tool returns (e.g., from history loading)
         const rawReturn =
-          message.tool_return || message.result || content || "";
+          message.tool_return || message.result || message.output || content || "";
         const returnValue = rawReturn.toString().trim();
         // Skip rendering empty tool returns
         if (
