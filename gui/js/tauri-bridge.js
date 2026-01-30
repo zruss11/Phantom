@@ -499,6 +499,9 @@
         if (channel === 'getWorktreeDiffStats') {
           return tauriInvoke('get_task_diff_stats', { taskId: args[0] });
         }
+        if (channel === 'dismissNotificationsForTask') {
+          return tauriInvoke('dismiss_notifications_for_task', args[0] || {});
+        }
         if (channel === 'getCachedModels') {
           return tauriInvoke('get_cached_models', { agentId: args[0] });
         }

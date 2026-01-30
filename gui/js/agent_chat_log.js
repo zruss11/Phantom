@@ -1464,7 +1464,7 @@
 
     window.addEventListener("focus", function () {
       // When chat window gains focus, dismiss any notifications for this task
-      ipcRenderer.invoke("dismiss_notifications_for_task", { taskId: currentTaskId })
+      ipcRenderer.invoke("dismissNotificationsForTask", { taskId: currentTaskId })
         .catch(function (err) {
           // Silently ignore errors (notification may already be closed)
           console.debug("[ChatLog] Could not dismiss notifications:", err);
@@ -1472,7 +1472,7 @@
     });
 
     // Also dismiss notifications immediately when the window loads (user is viewing it)
-    ipcRenderer.invoke("dismiss_notifications_for_task", { taskId: currentTaskId })
+    ipcRenderer.invoke("dismissNotificationsForTask", { taskId: currentTaskId })
       .catch(function () {
         // Silently ignore
       });
