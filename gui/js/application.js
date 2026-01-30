@@ -25,6 +25,7 @@ let execModelDropdown = null;
 let reasoningEffortDropdown = null;
 let agentModeDropdown = null;
 let baseBranchDropdown = null;
+let summariesAgentDropdown = null;
 
 // Flag to prevent saving during restoration (avoids overwriting saved preferences)
 let isRestoringSettings = false;
@@ -141,6 +142,29 @@ function initCustomDropdowns() {
       }
     });
     window.baseBranchDropdown = baseBranchDropdown;
+  }
+
+  // Summaries Agent dropdown (in Settings page)
+  const summariesAgentContainer = document.getElementById('summariesAgentDropdown');
+  if (summariesAgentContainer && window.CustomDropdown) {
+    summariesAgentDropdown = new window.CustomDropdown({
+      container: summariesAgentContainer,
+      items: [
+        { value: 'auto', name: 'Auto', description: "Use task's agent" },
+        { value: 'amp', name: 'Amp', description: 'Free' },
+        { value: 'codex', name: 'Codex', description: 'GPT-5.1-codex-mini' },
+        { value: 'claude-code', name: 'Claude', description: 'Haiku' }
+      ],
+      placeholder: 'Summaries Agent',
+      defaultValue: 'auto',
+      onChange: function(value) {
+        console.log('[Harness] Summaries agent changed:', value);
+        if (!isRestoringSettings) {
+          saveSettingsFromUi();
+        }
+      }
+    });
+    window.summariesAgentDropdown = summariesAgentDropdown;
   }
 
   console.log('[Harness] Custom dropdowns initialized');
@@ -340,7 +364,7 @@ async function saveSettingsFromUi() {
       agentNotificationsEnabled: $("#agentNotificationsEnabled").is(":checked"),
       agentNotificationStack: $("#agentNotificationStack").is(":checked"),
       aiSummariesEnabled: $("#aiSummariesEnabled").is(":checked"),
-      summariesAgent: $("#summariesAgent").val(),
+      summariesAgent: summariesAgentDropdown ? summariesAgentDropdown.getValue() : "auto",
       taskProjectAllowlist: taskProjectAllowlist,
       mcpEnabled: $("#mcpEnabled").is(":checked"),
       mcpPort: parsedMcpPort,
@@ -359,7 +383,7 @@ async function saveSettingsFromUi() {
 }
 
 // Auto-save settings on any change (inputs and toggles)
-$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken, #summariesAgent").on("change", saveSettingsFromUi);
+$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken").on("change", saveSettingsFromUi);
 $("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
 
 // Show/hide summaries agent dropdown based on AI summaries toggle
@@ -467,13 +491,14 @@ async function fetchAgentAvailability() {
 function autoDefaultSummariesAgentToAmp() {
   // Guard against race condition: don't run until settings are fully loaded
   if (!settingsLoaded) return;
-  const currentValue = $("#summariesAgent").val();
+  if (!summariesAgentDropdown) return;
+  const currentValue = summariesAgentDropdown.getValue();
   // Only auto-default if currently set to "auto" (i.e., user hasn't explicitly chosen)
   if (currentValue === "auto" && !currentSettings.summariesAgent) {
     const ampAvailable = agentAvailability?.amp?.available;
     if (ampAvailable) {
       console.log("[Harness] Auto-defaulting summaries agent to Amp (free)");
-      $("#summariesAgent").val("amp");
+      summariesAgentDropdown.setValue("amp");
       saveSettingsFromUi();
     }
   }
@@ -1888,11 +1913,13 @@ async function getSettings() {
   }
 
   // Summaries Agent setting
-  if (settingsPayload.summariesAgent) {
-    $("#summariesAgent").val(settingsPayload.summariesAgent);
-  } else {
-    // Default to "auto" - auto-default to amp will happen after agent availability is loaded
-    $("#summariesAgent").val("auto");
+  if (summariesAgentDropdown) {
+    if (settingsPayload.summariesAgent) {
+      summariesAgentDropdown.setValue(settingsPayload.summariesAgent);
+    } else {
+      // Default to "auto" - auto-default to amp will happen after agent availability is loaded
+      summariesAgentDropdown.setValue("auto");
+    }
   }
   // Update visibility based on current toggle state
   updateSummariesAgentVisibility();

@@ -1217,12 +1217,7 @@
                   <!-- Summaries Agent Dropdown -->
                   <div class="form-group mb-3" id="summariesAgentGroup">
                     <label class="settings-label">Summaries Agent</label>
-                    <select class="form-control" id="summariesAgent">
-                      <option value="auto">Auto (use task's agent)</option>
-                      <option value="amp">Amp (free)</option>
-                      <option value="codex">Codex (GPT-5.1-codex-mini)</option>
-                      <option value="claude-code">Claude (Haiku)</option>
-                    </select>
+                    <div id="summariesAgentDropdown" class="custom-dropdown-wrapper"></div>
                     <small class="text-muted d-block mt-1">
                       Select which agent generates summaries. Amp is free and recommended if installed.
                     </small>
