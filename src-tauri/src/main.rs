@@ -4345,43 +4345,69 @@ pub(crate) async fn start_task_internal(
         }
     }
 
-    // Mark complete
-    let final_status = response
-        .messages
-        .iter()
-        .filter(|m| m.message_type == "assistant_message")
-        .filter_map(|m| m.content.as_ref())
-        .last()
-        .map(|s| truncate_str(s, 50))
-        .unwrap_or_else(|| "Completed".to_string());
-    let preview_source = response
-        .messages
-        .iter()
-        .filter(|m| m.message_type == "assistant_message")
-        .filter_map(|m| m.content.as_ref())
-        .last()
-        .cloned()
-        .unwrap_or_else(|| final_status.clone());
+    // Check if the generation was cancelled (soft stop)
+    let was_cancelled = cancel_token.is_cancelled();
 
-    let summary_status =
-        summarize_status_for_notifications(state, &agent_id, &preview_source, &final_status).await;
+    if was_cancelled {
+        // Generation was stopped by user - emit GenerationStopped and set status to Ready
+        println!(
+            "[Harness] Generation was cancelled for task_id={}, emitting GenerationStopped",
+            task_id
+        );
 
-    post_discord_assistant_message(state, &task_id, &preview_source).await;
+        emit_status("Ready", "#04d885", "idle")?;
 
-    emit_status(&summary_status, "#04d885", "completed")?;
+        // Emit GenerationStopped to chat window
+        if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
+            let _ = chat_window.emit("GenerationStopped", &task_id);
+        }
 
-    // Emit completion status to chat window
-    if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
-        let _ = chat_window.emit("ChatLogStatus", (&task_id, &summary_status, "completed"));
+        // Update DB status to Ready (session still alive)
+        {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let _ = db::update_task_status(&conn, &task_id, "Ready", "idle");
+        }
+    } else {
+        // Normal completion
+        let final_status = response
+            .messages
+            .iter()
+            .filter(|m| m.message_type == "assistant_message")
+            .filter_map(|m| m.content.as_ref())
+            .last()
+            .map(|s| truncate_str(s, 50))
+            .unwrap_or_else(|| "Completed".to_string());
+        let preview_source = response
+            .messages
+            .iter()
+            .filter(|m| m.message_type == "assistant_message")
+            .filter_map(|m| m.content.as_ref())
+            .last()
+            .cloned()
+            .unwrap_or_else(|| final_status.clone());
+
+        let summary_status =
+            summarize_status_for_notifications(state, &agent_id, &preview_source, &final_status)
+                .await;
+
+        post_discord_assistant_message(state, &task_id, &preview_source).await;
+
+        emit_status(&summary_status, "#04d885", "completed")?;
+
+        // Emit completion status to chat window
+        if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
+            let _ = chat_window.emit("ChatLogStatus", (&task_id, &summary_status, "completed"));
+        }
+
+        // Update DB status to completed (with summary)
+        {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let _ = db::update_task_status(&conn, &task_id, &summary_status, "completed");
+        }
+
+        let _ =
+            maybe_show_agent_notification(&app, state, &task_id, &agent_id, &summary_status).await;
     }
-
-    // Update DB status to completed (with summary)
-    {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let _ = db::update_task_status(&conn, &task_id, &summary_status, "completed");
-    }
-
-    let _ = maybe_show_agent_notification(&app, state, &task_id, &agent_id, &summary_status).await;
 
     Ok(())
 }
@@ -4461,7 +4487,7 @@ async fn soft_stop_task(
 pub(crate) async fn soft_stop_task_internal(
     task_id: String,
     state: &AppState,
-    app: tauri::AppHandle,
+    _app: tauri::AppHandle,
 ) -> Result<(), String> {
     println!("[Harness] soft_stop_task: task_id={}", task_id);
 
@@ -4483,29 +4509,12 @@ pub(crate) async fn soft_stop_task_internal(
         );
     }
 
-    // Remove from running_tasks so new messages can be sent
-    {
-        let mut running = state.running_tasks.lock().await;
-        running.remove(&task_id);
-    }
-
-    // Update DB status to "Ready" (not "Stopped") since session is still alive
-    {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let _ = db::update_task_status(&conn, &task_id, "Ready", "idle");
-    }
-
-    // Emit GenerationStopped event to chat window
-    let window_label = format!(
-        "chat-{}",
-        task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
-    );
-    if let Some(window) = app.get_webview_window(&window_label) {
-        let _ = window.emit("GenerationStopped", &task_id);
-    }
-    if let Some(main_window) = app.get_webview_window("main") {
-        let _ = main_window.emit("StatusUpdate", (&task_id, "Ready", "#04d885", "idle"));
-    }
+    // Note: We don't update status or emit events here.
+    // The start_task_internal function will detect the cancellation and handle:
+    // - Emitting GenerationStopped to the chat window
+    // - Updating the status to "Ready"
+    // - Removing from running_tasks
+    // This ensures the in-flight response completes before we update the UI.
 
     Ok(())
 }
@@ -8003,31 +8012,59 @@ pub(crate) async fn send_chat_message_internal(
             .map(|s| truncate_str(s, 40))
             .unwrap_or_else(|| "Ready".to_string());
     }
-    let preview_source = response
-        .messages
-        .iter()
-        .filter(|m| m.message_type == "assistant_message")
-        .filter_map(|m| m.content.as_ref())
-        .last()
-        .cloned()
-        .unwrap_or_else(|| final_status.clone());
-    let summary_status =
-        summarize_status_for_notifications(state, &agent_id, &preview_source, &final_status).await;
-    if let Some(window) = app.get_webview_window(&window_label) {
-        let _ = window.emit("ChatLogStatus", (&task_id, &summary_status, "completed"));
-    }
-    if let Some(main_window) = app.get_webview_window("main") {
-        let _ = main_window.emit(
-            "StatusUpdate",
-            (&task_id, &summary_status, "#04d885", "completed"),
+
+    // Check if the generation was cancelled (soft stop)
+    let was_cancelled = cancel_token.is_cancelled();
+
+    if was_cancelled {
+        // Generation was stopped by user - emit GenerationStopped and set status to Ready
+        println!(
+            "[Harness] Generation was cancelled for task_id={}, emitting GenerationStopped",
+            task_id
         );
-    }
-    {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let _ = db::update_task_status(&conn, &task_id, &summary_status, "completed");
+
+        if let Some(window) = app.get_webview_window(&window_label) {
+            let _ = window.emit("GenerationStopped", &task_id);
+        }
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("StatusUpdate", (&task_id, "Ready", "#04d885", "idle"));
+        }
+        {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let _ = db::update_task_status(&conn, &task_id, "Ready", "idle");
+        }
+    } else {
+        // Normal completion
+        let preview_source = response
+            .messages
+            .iter()
+            .filter(|m| m.message_type == "assistant_message")
+            .filter_map(|m| m.content.as_ref())
+            .last()
+            .cloned()
+            .unwrap_or_else(|| final_status.clone());
+        let summary_status =
+            summarize_status_for_notifications(state, &agent_id, &preview_source, &final_status)
+                .await;
+        if let Some(window) = app.get_webview_window(&window_label) {
+            let _ = window.emit("ChatLogStatus", (&task_id, &summary_status, "completed"));
+        }
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit(
+                "StatusUpdate",
+                (&task_id, &summary_status, "#04d885", "completed"),
+            );
+        }
+        {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let _ = db::update_task_status(&conn, &task_id, &summary_status, "completed");
+        }
+
+        let _ =
+            maybe_show_agent_notification(&app, state, &task_id, &agent_id, &summary_status).await;
     }
 
-    // Process token usage and update cost
+    // Process token usage and update cost (always do this, even if cancelled)
     if let Some(usage) = &response.token_usage {
         let cost = calculate_cost_from_usage(&model, usage);
         if cost > 0.0 {
@@ -8048,8 +8085,6 @@ pub(crate) async fn send_chat_message_internal(
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let _ = db::update_task_token_usage(&conn, &task_id, total_tokens, context_window);
     }
-
-    let _ = maybe_show_agent_notification(&app, state, &task_id, &agent_id, &summary_status).await;
 
     Ok(())
 }

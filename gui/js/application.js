@@ -1391,14 +1391,10 @@ function StartTask(id) {
 }
 
 function StopTask(id) {
-  ipcRenderer.send("StopTask", id);
-  // Update animation to idle
-  const logoEl = $(`#task-${id}-Logo`);
-  logoEl.removeClass("idle running completed error");
-  logoEl.addClass("idle");
-  if (taskDataMap[id]) {
-    taskDataMap[id].statusState = "idle";
-  }
+  // Use soft stop to cancel generation without killing the session
+  // This allows the in-flight response to complete and preserves the session for recovery
+  ipcRenderer.send("StopGeneration", id);
+  // UI update will be handled by StatusUpdate event from backend
 }
 
 async function DeleteTask(id) {
@@ -1549,7 +1545,7 @@ $("#globalRestartTasks").click(() => {
 });
 $("#globalStopTasks").click(() => {
   tasksOnPage.forEach((taskID) => {
-    ipcRenderer.send("StopTask", taskID);
+    ipcRenderer.send("StopGeneration", taskID);
   });
 });
 $("#globalDeleteTasks").click(() => {
@@ -1623,7 +1619,7 @@ ipcRenderer.on("StartAllTB", (e) => {
 });
 ipcRenderer.on("StopAllTB", (e) => {
   tasksOnPage.forEach((taskID) => {
-    ipcRenderer.send("StopTask", taskID);
+    ipcRenderer.send("StopGeneration", taskID);
   });
 });
 ipcRenderer.on("RestartAllTB", (e) => {

@@ -2599,23 +2599,29 @@
   }
 
   // Stop the current generation
+  // Track if we're waiting for the stop to complete
+  let stopPending = false;
+
   function stopGeneration() {
-    if (!isGenerating) return;
+    if (!isGenerating || stopPending) return;
 
     // Send stop request to backend
     if (ipcRenderer && currentTaskId) {
+      stopPending = true;
       ipcRenderer.send("StopGeneration", currentTaskId);
       addSystemMessage("Stopping generation...");
+      // Disable the stop button to prevent double-clicks
+      $("#stopButton").prop("disabled", true);
     }
-
-    // Update UI state
-    finishGeneration();
+    // Don't call finishGeneration() here - let the in-flight response complete
+    // The GenerationStopped event or ChatLogStatus event will handle the cleanup
   }
 
   // Called when generation is complete (success, error, or stopped)
   function finishGeneration() {
     isGenerating = false;
-    $("#stopButton").hide();
+    stopPending = false;
+    $("#stopButton").hide().prop("disabled", false);
     $("#sendButton").show().prop("disabled", false);
     finalizeStreamingMessage();
   }
