@@ -620,6 +620,7 @@
     populateCodeReviewMenu();
     setupIPCListeners();
     initTodoSidebar();
+    setupFocusDismissListener();
 
     // Initialize slash command autocomplete for the chat input
     var chatInput = document.getElementById("chatInput");
@@ -1455,6 +1456,26 @@
       input.prop("disabled", false);
       input.focus();
     }, 100);
+  }
+
+  // Set up window focus listener to dismiss notifications for this task
+  function setupFocusDismissListener() {
+    if (!ipcRenderer || !currentTaskId) return;
+
+    window.addEventListener("focus", function () {
+      // When chat window gains focus, dismiss any notifications for this task
+      ipcRenderer.invoke("dismissNotificationsForTask", { taskId: currentTaskId })
+        .catch(function (err) {
+          // Silently ignore errors (notification may already be closed)
+          console.debug("[ChatLog] Could not dismiss notifications:", err);
+        });
+    });
+
+    // Also dismiss notifications immediately when the window loads (user is viewing it)
+    ipcRenderer.invoke("dismissNotificationsForTask", { taskId: currentTaskId })
+      .catch(function () {
+        // Silently ignore
+      });
   }
 
   // Set up IPC listeners for chat messages

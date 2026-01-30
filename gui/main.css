@@ -3768,6 +3768,11 @@ input:checked + .slider:before {
   color: rgba(255, 255, 255, 0.8);
 }
 
+.settings-page .settings-dropdown {
+  width: 170px;
+  min-width: 140px;
+}
+
 .settings-page .settings-toggles {
   margin-top: 8px;
 }

@@ -126,6 +126,7 @@
     const taskId = getParam('taskId');
     const agentId = getParam('agent') || 'codex';
     const preview = decodeParam(getParam('preview')) || 'Agent finished and is waiting on your reply.';
+    const timeoutSecs = parseInt(getParam('timeout'), 10) || 0;
 
     const logo = AGENT_LOGOS[agentId] || AGENT_LOGOS['codex'];
     const name = AGENT_NAMES[agentId] || 'Agent';
@@ -181,6 +182,13 @@
     });
 
     playSound();
+
+    // Auto-dismiss after timeout (if configured)
+    if (timeoutSecs > 0) {
+      setTimeout(function() {
+        closeWindow();
+      }, timeoutSecs * 1000);
+    }
   }
 
   init();

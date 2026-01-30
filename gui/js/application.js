@@ -13,6 +13,15 @@ const PERMISSION_MODE_OPTIONS = [
   { value: 'bypassPermissions', name: 'Bypass Permissions', description: 'Bypass all permission checks (dangerous)' }
 ];
 
+const AGENT_NOTIFICATION_TIMEOUT_OPTIONS = [
+  { value: '0', name: 'Never' },
+  { value: '5', name: '5 seconds' },
+  { value: '10', name: '10 seconds' },
+  { value: '15', name: '15 seconds' },
+  { value: '30', name: '30 seconds' },
+  { value: '60', name: '1 minute' }
+];
+
 function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text || "";
@@ -25,6 +34,7 @@ let execModelDropdown = null;
 let reasoningEffortDropdown = null;
 let agentModeDropdown = null;
 let baseBranchDropdown = null;
+let agentNotificationTimeoutDropdown = null;
 let summariesAgentDropdown = null;
 
 // Flag to prevent saving during restoration (avoids overwriting saved preferences)
@@ -62,6 +72,7 @@ function initCustomDropdowns() {
   const reasoningContainer = document.getElementById('reasoningEffortDropdown');
   const modeContainer = document.getElementById('agentModeDropdown');
   const baseBranchContainer = document.getElementById('baseBranchDropdown');
+  const agentNotificationTimeoutContainer = document.getElementById('agentNotificationTimeoutDropdown');
 
   if (permContainer && window.CustomDropdown) {
     permissionDropdown = new window.CustomDropdown({
@@ -144,6 +155,19 @@ function initCustomDropdowns() {
     window.baseBranchDropdown = baseBranchDropdown;
   }
 
+  if (agentNotificationTimeoutContainer && window.CustomDropdown) {
+    agentNotificationTimeoutDropdown = new window.CustomDropdown({
+      container: agentNotificationTimeoutContainer,
+      items: AGENT_NOTIFICATION_TIMEOUT_OPTIONS,
+      placeholder: 'Auto-dismiss after',
+      defaultValue: '0',
+      onChange: function(value) {
+        console.log('[Harness] Notification timeout changed:', value);
+        saveSettingsFromUi();
+      }
+    });
+    window.agentNotificationTimeoutDropdown = agentNotificationTimeoutDropdown;
+  }
   // Summaries Agent dropdown (in Settings page)
   const summariesAgentContainer = document.getElementById('summariesAgentDropdown');
   if (summariesAgentContainer && window.CustomDropdown) {
@@ -343,6 +367,7 @@ async function saveSettingsFromUi() {
   let mcpPortRaw = $("#mcpPort").val();
   let mcpTokenRaw = $("#mcpToken").val();
   let taskProjectAllowlist = getProjectAllowlist();
+  let agentNotificationTimeoutValue = 0;
   let parsedMcpPort = parseInt(mcpPortRaw, 10);
   if (Number.isNaN(parsedMcpPort)) {
     parsedMcpPort = currentSettings.mcpPort;
@@ -350,6 +375,13 @@ async function saveSettingsFromUi() {
   let nextMcpToken = (mcpTokenRaw || "").toString().trim();
   if (!nextMcpToken && currentSettings.mcpToken) {
     nextMcpToken = currentSettings.mcpToken;
+  }
+  if (agentNotificationTimeoutDropdown) {
+    agentNotificationTimeoutValue =
+      parseInt(agentNotificationTimeoutDropdown.getValue(), 10) || 0;
+  } else {
+    agentNotificationTimeoutValue =
+      parseInt($("#agentNotificationTimeout").val(), 10) || 0;
   }
   let pl = Object.assign(
     {},
@@ -363,6 +395,7 @@ async function saveSettingsFromUi() {
       ignoreDeclines: $("#ignoreDeclines").is(":checked"),
       agentNotificationsEnabled: $("#agentNotificationsEnabled").is(":checked"),
       agentNotificationStack: $("#agentNotificationStack").is(":checked"),
+      agentNotificationTimeout: agentNotificationTimeoutValue,
       aiSummariesEnabled: $("#aiSummariesEnabled").is(":checked"),
       summariesAgent: summariesAgentDropdown ? summariesAgentDropdown.getValue() : "auto",
       taskProjectAllowlist: taskProjectAllowlist,
@@ -384,7 +417,7 @@ async function saveSettingsFromUi() {
 
 // Auto-save settings on any change (inputs and toggles)
 $("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken").on("change", saveSettingsFromUi);
-$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
+$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #agentNotificationTimeout, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
 
 // Show/hide summaries agent dropdown based on AI summaries toggle
 function updateSummariesAgentVisibility() {
@@ -1903,6 +1936,21 @@ async function getSettings() {
     );
   } else {
     $("#agentNotificationStack").prop("checked", true);
+  }
+  if (settingsPayload.agentNotificationTimeout !== undefined) {
+    if (agentNotificationTimeoutDropdown) {
+      agentNotificationTimeoutDropdown.setValue(
+        String(settingsPayload.agentNotificationTimeout),
+      );
+    } else {
+      $("#agentNotificationTimeout").val(settingsPayload.agentNotificationTimeout);
+    }
+  } else {
+    if (agentNotificationTimeoutDropdown) {
+      agentNotificationTimeoutDropdown.setValue('0');
+    } else {
+      $("#agentNotificationTimeout").val(0);
+    }
   }
 
   // AI Summaries setting (default enabled)
