@@ -1669,6 +1669,7 @@
           finalizeStreamingMessage();
           flushAccumulatedReasoning();
           finalizeToolBundle();
+          finalizeSubAgent();
         }
         updateStatus(status, statusState);
       }
@@ -1793,6 +1794,204 @@
     expanded: false, // Whether bundle is expanded
     iconNames: new Set() // Track unique tool names for icon deduplication
   };
+
+  // Sub-agent state - tracks Task tool calls and their nested tool calls
+  let currentSubAgent = null;  // { id, description, subagent_type, status, element, toolCount }
+  let subAgentToolCount = 0;   // Running count of tools in current sub-agent
+
+  // Detect if a tool call is a sub-agent (Task tool with subagent_type)
+  function isSubAgentCall(toolName, toolArgs) {
+    if (toolName !== "Task") return false;
+    try {
+      const args = typeof toolArgs === "string" ? JSON.parse(toolArgs) : toolArgs;
+      return args && args.subagent_type;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  // Parse sub-agent info from Task tool arguments
+  function parseSubAgentInfo(toolArgs) {
+    try {
+      const args = typeof toolArgs === "string" ? JSON.parse(toolArgs) : toolArgs;
+      return {
+        subagent_type: args.subagent_type || "unknown",
+        description: args.description || args.prompt?.substring(0, 100) || "Sub-agent task",
+        prompt: args.prompt || ""
+      };
+    } catch (e) {
+      return {
+        subagent_type: "unknown",
+        description: "Sub-agent task",
+        prompt: ""
+      };
+    }
+  }
+
+  // Create a sub-agent bubble element
+  function createSubAgentBubble(subAgentInfo, messageId) {
+    const container = $("#chatContainer");
+    container.find(".chat-empty").remove();
+
+    // Finalize any existing tool bundle before creating sub-agent
+    finalizeToolBundle();
+
+    // Finalize previous sub-agent if one exists
+    if (currentSubAgent && currentSubAgent.element) {
+      finalizeSubAgent();
+    }
+
+    const div = document.createElement("div");
+    div.className = "chat-message subagent-bubble pending";
+    div.dataset.subagentId = messageId;
+    div.innerHTML = `
+      <div class="subagent-header">
+        <span class="subagent-status"><i class="fal fa-spinner-third fa-spin"></i></span>
+        <span class="subagent-type-badge">${escapeHtml(subAgentInfo.subagent_type)}</span>
+        <span class="subagent-description">${escapeHtml(subAgentInfo.description)}</span>
+        <span class="subagent-tool-count">0 tools</span>
+        <i class="fal fa-chevron-down subagent-toggle"></i>
+      </div>
+      <div class="subagent-tools"></div>
+    `;
+
+    container.append(div);
+
+    currentSubAgent = {
+      id: messageId,
+      description: subAgentInfo.description,
+      subagent_type: subAgentInfo.subagent_type,
+      status: "pending",
+      element: div,
+      toolCount: 0,
+      iconNames: new Set()
+    };
+    subAgentToolCount = 0;
+
+    // Add click handler for expand/collapse
+    $(div).find(".subagent-header").on("click", function() {
+      $(div).toggleClass("expanded");
+    });
+
+    return div;
+  }
+
+  // Add a tool call to the current sub-agent bubble
+  function addToolToSubAgent(toolCall) {
+    if (!currentSubAgent || !currentSubAgent.element) return false;
+
+    const toolsContainer = $(currentSubAgent.element).find(".subagent-tools");
+    const iconHtml = getToolIconHtml(toolCall.name);
+
+    // Format the tool call summary
+    const summary = formatToolSummary(toolCall.name, toolCall.arguments);
+
+    const itemHtml = `
+      <div class="subagent-tool-item pending" data-tool-index="${currentSubAgent.toolCount}">
+        <span class="subagent-tool-icon">${iconHtml}</span>
+        <span class="subagent-tool-name">${escapeHtml(toolCall.name)}</span>
+        <span class="subagent-tool-summary">${escapeHtml(summary)}</span>
+        <span class="subagent-tool-status"><i class="fal fa-spinner-third fa-spin"></i></span>
+      </div>
+    `;
+
+    toolsContainer.append(itemHtml);
+    currentSubAgent.toolCount++;
+    subAgentToolCount++;
+
+    // Update tool count display
+    const countText = currentSubAgent.toolCount === 1 ? "1 tool" : `${currentSubAgent.toolCount} tools`;
+    $(currentSubAgent.element).find(".subagent-tool-count").text(countText);
+
+    // Add icon if unique
+    if (!currentSubAgent.iconNames.has(toolCall.name)) {
+      currentSubAgent.iconNames.add(toolCall.name);
+    }
+
+    return true;
+  }
+
+  // Format a compact summary for a tool call
+  function formatToolSummary(toolName, args) {
+    try {
+      const parsed = typeof args === "string" ? JSON.parse(args) : args;
+
+      switch (toolName) {
+        case "Read":
+          return parsed.file_path ? `[${getFileName(parsed.file_path)}]` : "";
+        case "Write":
+          return parsed.file_path ? `[${getFileName(parsed.file_path)}]` : "";
+        case "Edit":
+          return parsed.file_path ? `[${getFileName(parsed.file_path)}]` : "";
+        case "Grep":
+          const pattern = parsed.pattern || "";
+          return `'${truncateText(pattern, 30)}'`;
+        case "Glob":
+          return parsed.pattern || "";
+        case "Bash":
+          const cmd = parsed.command || "";
+          return `[${truncateText(cmd, 40)}]`;
+        case "WebFetch":
+          return parsed.url ? `[${truncateText(parsed.url, 40)}]` : "";
+        case "WebSearch":
+          return parsed.query ? `'${truncateText(parsed.query, 30)}'` : "";
+        case "Task":
+          return parsed.description || "";
+        default:
+          // Return first string value we find
+          for (const key of Object.keys(parsed)) {
+            if (typeof parsed[key] === "string" && parsed[key].length > 0) {
+              return truncateText(parsed[key], 40);
+            }
+          }
+          return "";
+      }
+    } catch (e) {
+      return "";
+    }
+  }
+
+  // Get just the filename from a path
+  function getFileName(path) {
+    if (!path) return "";
+    const parts = path.split(/[/\\]/);
+    return parts[parts.length - 1] || path;
+  }
+
+  // Mark the last tool in the sub-agent as complete
+  function markSubAgentToolComplete() {
+    if (!currentSubAgent || !currentSubAgent.element || currentSubAgent.toolCount === 0) return false;
+
+    const lastToolIndex = currentSubAgent.toolCount - 1;
+    const toolItem = $(currentSubAgent.element).find(`.subagent-tool-item[data-tool-index="${lastToolIndex}"]`);
+
+    if (toolItem.length > 0 && toolItem.hasClass("pending")) {
+      toolItem.removeClass("pending").addClass("complete");
+      toolItem.find(".subagent-tool-status").html('<i class="fal fa-check"></i>');
+      return true;
+    }
+    return false;
+  }
+
+  // Finalize the current sub-agent (mark complete)
+  function finalizeSubAgent() {
+    if (!currentSubAgent || !currentSubAgent.element) return;
+
+    const bubbleEl = $(currentSubAgent.element);
+    bubbleEl.removeClass("pending").addClass("complete");
+
+    // Update status icon
+    bubbleEl.find(".subagent-header .subagent-status").html('<i class="fal fa-check"></i>');
+
+    // Mark any remaining pending tools as complete
+    bubbleEl.find(".subagent-tool-item.pending").each(function() {
+      $(this).removeClass("pending").addClass("complete");
+      $(this).find(".subagent-tool-status").html('<i class="fal fa-check"></i>');
+    });
+
+    currentSubAgent = null;
+    subAgentToolCount = 0;
+  }
 
   // Create a new tool call bundle element
   function createToolBundle() {
@@ -2027,8 +2226,9 @@
       case "text_chunk":
         // Flush any accumulated reasoning to the bundle before assistant response
         flushAccumulatedReasoning();
-        // Finalize any pending tool bundle before assistant response
+        // Finalize any pending tool bundle and sub-agent before assistant response
         finalizeToolBundle();
+        finalizeSubAgent();
         appendToStreamingMessage("assistant", content, update.item_id);
         updateStatus("Responding...", "running");
         break;
@@ -2047,7 +2247,30 @@
         // Track this tool call to prevent duplicates from ChatLogUpdate
         const streamToolKey = getToolCallKey(update.name, update.arguments);
         markToolCallRendered(streamToolKey);
-        // Add the tool call to the current bundle
+
+        // Check if this is a sub-agent Task call
+        if (isSubAgentCall(update.name, update.arguments)) {
+          // Finalize current tool bundle before starting sub-agent
+          finalizeToolBundle();
+
+          const subAgentInfo = parseSubAgentInfo(update.arguments);
+          const messageId = update.item_id || `subagent-${Date.now()}`;
+          createSubAgentBubble(subAgentInfo, messageId);
+          updateStatus("Sub-agent: " + subAgentInfo.description, "running");
+          break;
+        }
+
+        // If we have an active sub-agent, route tool calls to it
+        if (currentSubAgent && currentSubAgent.element) {
+          addToolToSubAgent({
+            name: update.name,
+            arguments: update.arguments,
+          });
+          updateStatus("Running: " + (update.name || "tool"), "running");
+          break;
+        }
+
+        // Otherwise use the regular tool bundle system
         addToToolBundle({
           name: update.name,
           arguments: update.arguments,
@@ -2057,6 +2280,11 @@
       }
 
       case "tool_return":
+        // If we have an active sub-agent, mark the tool complete there
+        if (currentSubAgent && currentSubAgent.element && currentSubAgent.toolCount > 0) {
+          markSubAgentToolComplete();
+          break;
+        }
         // Try to merge into bundle first, then fall back to individual tool calls
         if (!mergeBundleToolResult(content)) {
           mergeToolResult(content);
@@ -2874,6 +3102,7 @@
     finalizeStreamingMessage();
     flushAccumulatedReasoning();
     finalizeToolBundle();
+    finalizeSubAgent();
   }
 
   // Get icon HTML for a tool name
@@ -2901,12 +3130,13 @@
 
   // Add a message with bundling support for tool calls
   // Routes tool_call messages through the bundle system, non-tool messages finalize any pending bundle
+  // Also routes Task tool calls to sub-agent bubbles with nested tool calls
   function addMessageWithBundling(message, shouldScroll = true) {
     if (!message) return;
 
     const type = message.type || message.message_type || "system";
 
-    // Route tool calls through the bundle system
+    // Route tool calls through the bundle system OR sub-agent system
     if (isToolCallType(type)) {
       const toolName = message.tool_call
         ? message.tool_call.name
@@ -2925,10 +3155,39 @@
       // Skip bundling for AskUserQuestion (interactive UI)
       if (toolName.toLowerCase() === "askuserquestion") {
         finalizeToolBundle();
+        finalizeSubAgent();
         addMessage(message, shouldScroll);
         return;
       }
 
+      // Check if this is a sub-agent Task call
+      if (isSubAgentCall(toolName, toolArgs)) {
+        // Finalize current tool bundle before starting sub-agent
+        finalizeToolBundle();
+
+        const subAgentInfo = parseSubAgentInfo(toolArgs);
+        const messageId = message.item_id || `subagent-${Date.now()}`;
+        createSubAgentBubble(subAgentInfo, messageId);
+
+        if (shouldScroll && autoScroll) {
+          scrollToBottom();
+        }
+        return;
+      }
+
+      // If we have an active sub-agent, route tool calls to it
+      if (currentSubAgent && currentSubAgent.element) {
+        addToolToSubAgent({
+          name: toolName,
+          arguments: toolArgs,
+        });
+        if (shouldScroll && autoScroll) {
+          scrollToBottom();
+        }
+        return;
+      }
+
+      // Otherwise use the regular tool bundle system
       addToToolBundle({
         name: toolName,
         arguments: toolArgs,
@@ -2939,10 +3198,21 @@
       return;
     }
 
-    // Route tool returns through the bundle system
+    // Route tool returns through the sub-agent or bundle system
     if (isToolReturnType(type)) {
       const rawReturn =
         message.tool_return || message.result || message.output || message.content || "";
+
+      // If we have an active sub-agent, mark the tool complete there
+      if (currentSubAgent && currentSubAgent.element && currentSubAgent.toolCount > 0) {
+        markSubAgentToolComplete();
+        if (shouldScroll && autoScroll) {
+          scrollToBottom();
+        }
+        return;
+      }
+
+      // Otherwise try the bundle system
       if (mergeBundleToolResult(rawReturn)) {
         if (shouldScroll && autoScroll) {
           scrollToBottom();
@@ -2966,9 +3236,13 @@
       return;
     }
 
-    // Non-tool messages finalize any pending bundle first
+    // Non-tool messages finalize any pending bundle and sub-agent first
     if (!isToolReturnType(type)) {
       finalizeToolBundle();
+      // Finalize sub-agent on assistant messages (but not all types)
+      if (type === "assistant" || type === "assistant_message") {
+        finalizeSubAgent();
+      }
     }
 
     addMessage(message, shouldScroll);
@@ -3999,6 +4273,9 @@
     toolCallBundle.calls = [];
     toolCallBundle.expanded = false;
     toolCallBundle.iconNames = new Set();
+    // Reset sub-agent state
+    currentSubAgent = null;
+    subAgentToolCount = 0;
   }
 
   // Scroll to bottom of chat
