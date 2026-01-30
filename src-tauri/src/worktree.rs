@@ -3,15 +3,22 @@
 //! This module provides utilities for creating and managing git worktrees,
 //! enabling agents to work in isolated branches without affecting the main working tree.
 
-use crate::utils::{resolve_gh_binary, resolve_git_binary};
+use crate::utils::{git_env_path, resolve_gh_binary, resolve_git_binary, resolve_rsync_binary};
 use rand::seq::SliceRandom;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 const GIT_COMMAND_TIMEOUT_SECS: u64 = 20;
+const GIT_WORKTREE_TIMEOUT_SECS: u64 = 120;
+const RSYNC_TIMEOUT_SECS: u64 = 120;
+
+static REPO_LOCKS: OnceLock<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
 
 /// Sanitize branch name for git and filesystem safety.
 ///
@@ -183,7 +190,10 @@ pub async fn diff_stats(repo_path: &PathBuf) -> Result<(u64, u64, u64), String> 
         (additions, deletions, files)
     }
 
-    let base = if run_git_command(repo_path, &["rev-parse", "--verify", "HEAD"]).await.is_ok() {
+    let base = if run_git_command(repo_path, &["rev-parse", "--verify", "HEAD"])
+        .await
+        .is_ok()
+    {
         "HEAD".to_string()
     } else {
         git_empty_tree_hash(repo_path).await.unwrap_or_default()
@@ -199,27 +209,128 @@ pub async fn diff_stats(repo_path: &PathBuf) -> Result<(u64, u64, u64), String> 
     Ok((additions, deletions, files))
 }
 
-async fn run_git_command_raw(
+fn repo_lock_key(repo_path: &PathBuf) -> String {
+    std::fs::canonicalize(repo_path)
+        .unwrap_or_else(|_| repo_path.clone())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn repo_lock(repo_path: &PathBuf) -> Arc<tokio::sync::Mutex<()>> {
+    let map = REPO_LOCKS.get_or_init(|| StdMutex::new(HashMap::new()));
+    let key = repo_lock_key(repo_path);
+    let mut guard = map.lock().expect("repo lock map poisoned");
+    guard
+        .entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+async fn with_repo_lock<T, Fut>(
+    repo_path: &PathBuf,
+    operation: impl FnOnce() -> Fut,
+) -> Result<T, String>
+where
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let lock = repo_lock(repo_path);
+    let _guard = lock.lock().await;
+    operation().await
+}
+
+fn resolve_git_dir(repo_path: &PathBuf) -> Option<PathBuf> {
+    let dot_git = repo_path.join(".git");
+    if dot_git.is_dir() {
+        return Some(dot_git);
+    }
+    if dot_git.is_file() {
+        if let Ok(contents) = std::fs::read_to_string(&dot_git) {
+            let line = contents.trim();
+            if let Some(rest) = line.strip_prefix("gitdir:") {
+                let git_dir = rest.trim();
+                let resolved = PathBuf::from(git_dir);
+                return Some(if resolved.is_absolute() {
+                    resolved
+                } else {
+                    repo_path.join(resolved)
+                });
+            }
+        }
+    }
+    None
+}
+
+fn clean_stale_git_locks(repo_path: &PathBuf, max_age: Duration) -> Result<Vec<PathBuf>, String> {
+    let git_dir = match resolve_git_dir(repo_path) {
+        Some(dir) => dir,
+        None => return Ok(Vec::new()),
+    };
+
+    let lock_files = [
+        git_dir.join("index.lock"),
+        git_dir.join("config.lock"),
+        git_dir.join("HEAD.lock"),
+        git_dir.join("shallow.lock"),
+    ];
+
+    let mut removed = Vec::new();
+    for lock in lock_files {
+        if !lock.exists() {
+            continue;
+        }
+        let metadata = match std::fs::metadata(&lock) {
+            Ok(meta) => meta,
+            Err(_) => continue,
+        };
+        let modified = match metadata.modified() {
+            Ok(time) => time,
+            Err(_) => continue,
+        };
+        let age = match modified.elapsed() {
+            Ok(duration) => duration,
+            Err(_) => continue,
+        };
+        if age > max_age {
+            if std::fs::remove_file(&lock).is_ok() {
+                removed.push(lock);
+            }
+        }
+    }
+    Ok(removed)
+}
+
+async fn run_git_command_raw_with_timeout(
     repo_path: &PathBuf,
     args: &[&str],
+    timeout_secs: u64,
 ) -> Result<std::process::Output, String> {
     let git_path = resolve_git_binary()?;
     let mut cmd = Command::new(&git_path);
     cmd.args(args)
         .current_dir(repo_path)
+        .env("PATH", git_env_path())
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+        .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
 
-    tokio::time::timeout(Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS), cmd.output())
+    tokio::time::timeout(Duration::from_secs(timeout_secs), cmd.output())
         .await
         .map_err(|_| {
             format!(
                 "Git command timed out after {}s: git {}",
-                GIT_COMMAND_TIMEOUT_SECS,
+                timeout_secs,
                 args.join(" ")
             )
         })?
         .map_err(|e| format!("Failed to execute git: {}", e))
+}
+
+async fn run_git_command_raw(
+    repo_path: &PathBuf,
+    args: &[&str],
+) -> Result<std::process::Output, String> {
+    run_git_command_raw_with_timeout(repo_path, args, GIT_COMMAND_TIMEOUT_SECS).await
 }
 
 async fn run_git_command_raw_with_input(
@@ -227,15 +338,26 @@ async fn run_git_command_raw_with_input(
     args: &[&str],
     input: &[u8],
 ) -> Result<std::process::Output, String> {
+    run_git_command_raw_with_input_timeout(repo_path, args, input, GIT_COMMAND_TIMEOUT_SECS).await
+}
+
+async fn run_git_command_raw_with_input_timeout(
+    repo_path: &PathBuf,
+    args: &[&str],
+    input: &[u8],
+    timeout_secs: u64,
+) -> Result<std::process::Output, String> {
     let git_path = resolve_git_binary()?;
     let mut cmd = Command::new(&git_path);
     cmd.args(args)
         .current_dir(repo_path)
+        .env("PATH", git_env_path())
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
 
     let mut child = cmd
         .spawn()
@@ -252,12 +374,12 @@ async fn run_git_command_raw_with_input(
             .map_err(|e| format!("Failed to close git stdin: {}", e))?;
     }
 
-    tokio::time::timeout(Duration::from_secs(GIT_COMMAND_TIMEOUT_SECS), child.wait_with_output())
+    tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
         .await
         .map_err(|_| {
             format!(
                 "Git command timed out after {}s: git {}",
-                GIT_COMMAND_TIMEOUT_SECS,
+                timeout_secs,
                 args.join(" ")
             )
         })?
@@ -265,12 +387,9 @@ async fn run_git_command_raw_with_input(
 }
 
 async fn git_empty_tree_hash(repo_path: &PathBuf) -> Result<String, String> {
-    let output = run_git_command_raw_with_input(
-        repo_path,
-        &["hash-object", "-t", "tree", "--stdin"],
-        b"",
-    )
-    .await?;
+    let output =
+        run_git_command_raw_with_input(repo_path, &["hash-object", "-t", "tree", "--stdin"], b"")
+            .await?;
 
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -351,6 +470,7 @@ pub async fn unique_branch_name(repo_path: &PathBuf, desired: &str) -> Result<St
 /// Generate a unique temporary branch name by appending -v2, -v3, etc. if the branch exists.
 /// Unlike `unique_branch_name`, this does not sanitize or require branch prefixes,
 /// making it suitable for animal-name branches used during worktree creation.
+#[allow(dead_code)]
 pub async fn unique_temp_branch_name(repo_path: &PathBuf, base: &str) -> Result<String, String> {
     // Check if base name is available
     if !branch_exists(repo_path, base).await? {
@@ -443,12 +563,16 @@ pub fn build_workspace_path(repo_slug: &str) -> Result<PathBuf, String> {
     Ok(repo_dir.join(unique))
 }
 
-fn random_animal_name() -> Result<&'static str, String> {
-    let names: Vec<&'static str> = ANIMAL_NAMES_RAW
+fn all_animal_names() -> Vec<&'static str> {
+    ANIMAL_NAMES_RAW
         .lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty())
-        .collect();
+        .collect()
+}
+
+fn random_animal_name() -> Result<&'static str, String> {
+    let names = all_animal_names();
     let mut rng = rand::thread_rng();
     names
         .choose(&mut rng)
@@ -562,11 +686,13 @@ pub async fn apply_uncommitted_changes(
     let mut child = Command::new(&git_path)
         .args(["apply", "--3way", "--whitespace=nowarn", "-"])
         .current_dir(&worktree)
+        .env("PATH", git_env_path())
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .spawn()
         .map_err(|e| format!("Failed to run git apply: {}", e))?;
 
@@ -635,10 +761,15 @@ async fn run_rsync(src: &Path, dest: &Path) -> Result<(), String> {
     }
     let dest_path = dest.to_string_lossy().to_string();
 
-    let output = Command::new("rsync")
-        .args(["-a", "--delete", "--exclude=.git", &src_path, &dest_path])
-        .output()
+    let rsync_path = resolve_rsync_binary().ok_or_else(|| "rsync not found in PATH".to_string())?;
+    let mut cmd = Command::new(rsync_path);
+    cmd.args(["-a", "--delete", "--exclude=.git", &src_path, &dest_path])
+        .env("PATH", git_env_path())
+        .kill_on_drop(true);
+
+    let output = tokio::time::timeout(Duration::from_secs(RSYNC_TIMEOUT_SECS), cmd.output())
         .await
+        .map_err(|_| "rsync timed out".to_string())?
         .map_err(|e| format!("Failed to execute rsync: {}", e))?;
 
     if output.status.success() {
@@ -753,42 +884,75 @@ pub async fn create_worktree(
 
     // Create worktree with new branch based on base_branch
     // git worktree add -b <new-branch> <path> <base-branch>
-    let result = run_git_command(
-        repo_path,
-        &[
-            "worktree",
-            "add",
-            "-b",
-            branch,
-            &worktree_path.to_string_lossy(),
-            base_branch,
-        ],
-    )
-    .await;
+    let args = [
+        "worktree",
+        "add",
+        "-b",
+        branch,
+        &worktree_path.to_string_lossy(),
+        base_branch,
+    ];
+    let output =
+        run_git_command_raw_with_timeout(repo_path, &args, GIT_WORKTREE_TIMEOUT_SECS).await?;
 
-    if let Err(err) = result {
-        let err_lower = err.to_lowercase();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        let detail = if detail.is_empty() {
+            "Git command failed.".to_string()
+        } else {
+            detail.to_string()
+        };
+        let err_lower = detail.to_lowercase();
         let looks_like_lfs = err_lower.contains("git-lfs")
             || err_lower.contains("git lfs")
-            || err_lower.contains("git lfs");
+            || err_lower.contains("filter-process")
+            || err_lower.contains("smudge filter");
+        let looks_like_lock = err_lower.contains("could not lock")
+            || err_lower.contains("unable to lock")
+            || (err_lower.contains(".lock") && err_lower.contains("exists"));
+
+        if looks_like_lock {
+            let _ = clean_stale_git_locks(repo_path, Duration::from_secs(5 * 60));
+        }
+
         if looks_like_lfs {
             // Retry without hooks so missing git-lfs hooks don't block worktree creation.
-            run_git_command(
-                repo_path,
-                &[
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "worktree",
-                    "add",
-                    "-b",
-                    branch,
-                    &worktree_path.to_string_lossy(),
-                    base_branch,
-                ],
-            )
-            .await?;
+            let retry_args = [
+                "-c",
+                "core.hooksPath=/dev/null",
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                &worktree_path.to_string_lossy(),
+                base_branch,
+            ];
+            let retry_output =
+                run_git_command_raw_with_timeout(repo_path, &retry_args, GIT_WORKTREE_TIMEOUT_SECS)
+                    .await?;
+            if !retry_output.status.success() {
+                let stderr = String::from_utf8_lossy(&retry_output.stderr);
+                let stdout = String::from_utf8_lossy(&retry_output.stdout);
+                let detail = if stderr.trim().is_empty() {
+                    stdout.trim()
+                } else {
+                    stderr.trim()
+                };
+                let detail = if detail.is_empty() {
+                    "Git command failed.".to_string()
+                } else {
+                    detail.to_string()
+                };
+                return Err(detail);
+            }
         } else {
-            return Err(err);
+            return Err(detail);
         }
     }
 
@@ -823,53 +987,95 @@ pub async fn create_worktree_with_animal_name(
     repo_slug: &str,
     base_branch: &str,
 ) -> Result<(PathBuf, String), String> {
-    const MAX_ANIMAL_ATTEMPTS: usize = 25;
     const MAX_SUFFIX_ATTEMPTS: usize = 100;
 
-    let root = workspace_root_dir()?;
-    let repo_dir = root.join(repo_slug);
-    std::fs::create_dir_all(&repo_dir)
-        .map_err(|e| format!("Failed to create repo workspace dir: {}", e))?;
+    let repo_path = repo_path.clone();
+    let repo_slug = repo_slug.to_string();
+    let base_branch = base_branch.to_string();
 
-    let mut last_error: Option<String> = None;
+    with_repo_lock(&repo_path.clone(), || {
+        let repo_path = repo_path.clone();
+        let repo_slug = repo_slug.clone();
+        let base_branch = base_branch.clone();
+        async move {
+            let root = workspace_root_dir()?;
+            let repo_dir = root.join(&repo_slug);
+            std::fs::create_dir_all(&repo_dir)
+                .map_err(|e| format!("Failed to create repo workspace dir: {}", e))?;
 
-    for _ in 0..MAX_ANIMAL_ATTEMPTS {
-        let base_raw = random_animal_name()?;
-        let base = sanitize_workspace_slug(base_raw);
-        if base.is_empty() {
-            continue;
-        }
+            // Best-effort prune to clear stale worktree metadata before creating new ones.
+            let _ = run_git_command_raw_with_timeout(
+                &repo_path,
+                &["worktree", "prune", "--expire", "now"],
+                GIT_COMMAND_TIMEOUT_SECS,
+            )
+            .await;
+            let _ = clean_stale_git_locks(&repo_path, Duration::from_secs(5 * 60));
 
-        for suffix in 0..MAX_SUFFIX_ATTEMPTS {
-            let candidate = worktree_candidate_name(&base, suffix);
-            let worktree_path = repo_dir.join(&candidate);
+            let existing_branches: HashSet<String> =
+                list_branches(&repo_path).await?.into_iter().collect();
+            let mut used_branches = existing_branches;
 
-            if worktree_path.exists() {
-                continue;
-            }
-
-            if branch_exists(repo_path, &candidate).await? {
-                continue;
-            }
-
-            match create_worktree(repo_path, &worktree_path, &candidate, base_branch).await {
-                Ok(()) => return Ok((worktree_path, candidate)),
-                Err(err) => {
-                    if is_branch_conflict_error(&err) || is_worktree_path_conflict_error(&err) {
-                        last_error = Some(err);
-                        continue;
+            let mut used_paths: HashSet<String> = HashSet::new();
+            if let Ok(entries) = std::fs::read_dir(&repo_dir) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.file_name().to_str() {
+                        used_paths.insert(name.to_string());
                     }
-                    return Err(err);
                 }
             }
-        }
-    }
 
-    Err(format!(
-        "Failed to create worktree after {} animal attempts (last error: {})",
-        MAX_ANIMAL_ATTEMPTS,
-        last_error.unwrap_or_else(|| "no error details".to_string())
-    ))
+            let mut animals = all_animal_names();
+            animals.shuffle(&mut rand::thread_rng());
+
+            let mut last_error: Option<String> = None;
+
+            for base_raw in animals {
+                let base = sanitize_workspace_slug(base_raw);
+                if base.is_empty() {
+                    continue;
+                }
+
+                for suffix in 0..MAX_SUFFIX_ATTEMPTS {
+                    let candidate = worktree_candidate_name(&base, suffix);
+                    if used_paths.contains(&candidate) || used_branches.contains(&candidate) {
+                        continue;
+                    }
+
+                    let worktree_path = repo_dir.join(&candidate);
+                    if worktree_path.exists() {
+                        used_paths.insert(candidate.clone());
+                        continue;
+                    }
+
+                    match create_worktree(&repo_path, &worktree_path, &candidate, &base_branch)
+                        .await
+                    {
+                        Ok(()) => return Ok((worktree_path, candidate)),
+                        Err(err) => {
+                            if is_branch_conflict_error(&err) {
+                                used_branches.insert(candidate.clone());
+                                last_error = Some(err);
+                                continue;
+                            }
+                            if is_worktree_path_conflict_error(&err) {
+                                used_paths.insert(candidate.clone());
+                                last_error = Some(err);
+                                continue;
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+
+            Err(format!(
+                "Failed to create worktree after exhausting animal names (last error: {})",
+                last_error.unwrap_or_else(|| "no error details".to_string())
+            ))
+        }
+    })
+    .await
 }
 
 /// Rename a branch in a worktree.
@@ -949,6 +1155,7 @@ pub async fn remove_worktree(repo_path: &PathBuf, worktree_path: &PathBuf) -> Re
 }
 
 /// List all worktrees for a repository.
+#[allow(dead_code)]
 pub async fn list_worktrees(repo_path: &PathBuf) -> Result<Vec<String>, String> {
     let output = run_git_command(repo_path, &["worktree", "list", "--porcelain"]).await?;
 
@@ -964,6 +1171,7 @@ pub async fn list_worktrees(repo_path: &PathBuf) -> Result<Vec<String>, String> 
 /// Push a branch to the remote and create a PR using gh CLI.
 ///
 /// Returns the PR URL on success.
+#[allow(dead_code)]
 pub async fn create_pull_request(
     worktree_path: &PathBuf,
     branch: &str,
@@ -1099,7 +1307,9 @@ mod tests {
         assert!(is_worktree_path_conflict_error(
             "fatal: 'feat/foo' is already checked out at '/tmp/foo'"
         ));
-        assert!(!is_worktree_path_conflict_error("fatal: not a git repository"));
+        assert!(!is_worktree_path_conflict_error(
+            "fatal: not a git repository"
+        ));
     }
 
     #[test]

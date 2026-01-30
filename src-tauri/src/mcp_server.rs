@@ -8,10 +8,10 @@ use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tauri::AppHandle;
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_stream::StreamExt;
-use tauri::AppHandle;
 use url::form_urlencoded;
 
 use crate::db;
@@ -96,7 +96,10 @@ async fn handle_request(
                 ))
             }
         }
-        _ => Ok(response_json(StatusCode::NOT_FOUND, json!({"error": "not_found"}))),
+        _ => Ok(response_json(
+            StatusCode::NOT_FOUND,
+            json!({"error": "not_found"}),
+        )),
     }
 }
 
@@ -208,7 +211,12 @@ async fn handle_sse(req: Request<Body>, server_state: McpServerState) -> Respons
         .header("cache-control", "no-cache")
         .header("connection", "keep-alive")
         .body(Body::wrap_stream(stream))
-        .unwrap_or_else(|_| response_json(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "sse_failed"})))
+        .unwrap_or_else(|_| {
+            response_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": "sse_failed"}),
+            )
+        })
 }
 
 async fn handle_streamable_sse(
@@ -226,19 +234,19 @@ async fn handle_streamable_sse(
         .header("connection", "keep-alive")
         .header("mcp-server", "phantom")
         .body(Body::wrap_stream(stream))
-        .unwrap_or_else(|_| response_json(StatusCode::INTERNAL_SERVER_ERROR, json!({"error": "sse_failed"})))
+        .unwrap_or_else(|_| {
+            response_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": "sse_failed"}),
+            )
+        })
 }
 
 async fn handle_mcp_post(req: Request<Body>, server_state: McpServerState) -> Response<Body> {
     let session_id = query_param(req.uri().query(), "sessionId");
     let body_bytes = match hyper::body::to_bytes(req.into_body()).await {
         Ok(bytes) => bytes,
-        Err(_) => {
-            return response_json(
-                StatusCode::BAD_REQUEST,
-                json!({"error": "invalid_body"}),
-            )
-        }
+        Err(_) => return response_json(StatusCode::BAD_REQUEST, json!({"error": "invalid_body"})),
     };
 
     if body_bytes.len() > 1_000_000 {
@@ -250,12 +258,7 @@ async fn handle_mcp_post(req: Request<Body>, server_state: McpServerState) -> Re
 
     let payload: Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) => value,
-        Err(_) => {
-            return response_json(
-                StatusCode::BAD_REQUEST,
-                json!({"error": "invalid_json"}),
-            )
-        }
+        Err(_) => return response_json(StatusCode::BAD_REQUEST, json!({"error": "invalid_json"})),
     };
 
     let responses = match handle_rpc_payload(payload, server_state.clone()).await {
@@ -268,10 +271,7 @@ async fn handle_mcp_post(req: Request<Body>, server_state: McpServerState) -> Re
     if let Some(session_id) = session_id {
         let mut sessions = server_state.sessions.lock().await;
         let Some(sender) = sessions.get(&session_id) else {
-            return response_json(
-                StatusCode::NOT_FOUND,
-                json!({"error": "session_not_found"}),
-            );
+            return response_json(StatusCode::NOT_FOUND, json!({"error": "session_not_found"}));
         };
         for response in &responses {
             if sender
@@ -294,12 +294,7 @@ async fn handle_rpc_payload(
 ) -> Result<Vec<Value>, Value> {
     if payload.is_array() {
         let mut responses = Vec::new();
-        for value in payload
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-        {
+        for value in payload.as_array().cloned().unwrap_or_default().into_iter() {
             if let Some(response) = handle_rpc_request(value, server_state.clone()).await? {
                 responses.push(response);
             }
@@ -362,22 +357,20 @@ async fn handle_rpc_request(
         "tools/call" => {
             let params = payload.get("params").cloned().unwrap_or(Value::Null);
             let result = handle_tool_call(params, server_state).await;
-            Ok(id.map(|id| {
-                match result {
-                    Ok(value) => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": value
-                    }),
-                    Err(err) => json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "error": {
-                            "code": -32602,
-                            "message": err
-                        }
-                    })
-                }
+            Ok(id.map(|id| match result {
+                Ok(value) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": value
+                }),
+                Err(err) => json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {
+                        "code": -32602,
+                        "message": err
+                    }
+                }),
             }))
         }
         "ping" => Ok(id.map(|id| {
@@ -560,12 +553,9 @@ fn tool_error(message: String) -> Value {
     })
 }
 
-async fn tool_create_task(
-    arguments: Value,
-    server_state: McpServerState,
-) -> Result<Value, String> {
-    let args: CreateTaskArgs = serde_json::from_value(arguments)
-        .map_err(|e| format!("Invalid create_task args: {e}"))?;
+async fn tool_create_task(arguments: Value, server_state: McpServerState) -> Result<Value, String> {
+    let args: CreateTaskArgs =
+        serde_json::from_value(arguments).map_err(|e| format!("Invalid create_task args: {e}"))?;
     if args.prompt.trim().is_empty() {
         return Err("Prompt is required".to_string());
     }
@@ -635,13 +625,9 @@ async fn tool_create_task(
         attachments: Vec::new(),
     };
 
-    let created = create_agent_session_internal(
-        server_state.app.clone(),
-        payload,
-        &server_state.state,
-        true,
-    )
-    .await?;
+    let created =
+        create_agent_session_internal(server_state.app.clone(), payload, &server_state.state, true)
+            .await?;
 
     let should_start = args.start.unwrap_or(true);
     if should_start {
@@ -661,12 +647,9 @@ async fn tool_create_task(
     }))
 }
 
-async fn tool_update_task(
-    arguments: Value,
-    server_state: McpServerState,
-) -> Result<Value, String> {
-    let args: UpdateTaskArgs = serde_json::from_value(arguments)
-        .map_err(|e| format!("Invalid update_task args: {e}"))?;
+async fn tool_update_task(arguments: Value, server_state: McpServerState) -> Result<Value, String> {
+    let args: UpdateTaskArgs =
+        serde_json::from_value(arguments).map_err(|e| format!("Invalid update_task args: {e}"))?;
     let conn = server_state.state.db.lock().map_err(|e| e.to_string())?;
     let tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
     let task = tasks
@@ -725,8 +708,8 @@ async fn tool_list_tasks(server_state: McpServerState) -> Result<Value, String> 
 }
 
 async fn tool_get_task(arguments: Value, server_state: McpServerState) -> Result<Value, String> {
-    let args: TaskIdArgs = serde_json::from_value(arguments)
-        .map_err(|e| format!("Invalid get_task args: {e}"))?;
+    let args: TaskIdArgs =
+        serde_json::from_value(arguments).map_err(|e| format!("Invalid get_task args: {e}"))?;
     let conn = server_state.state.db.lock().map_err(|e| e.to_string())?;
     let tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
     let task = tasks
@@ -754,8 +737,8 @@ async fn tool_get_task(arguments: Value, server_state: McpServerState) -> Result
 }
 
 async fn tool_delete_task(arguments: Value, server_state: McpServerState) -> Result<Value, String> {
-    let args: TaskIdArgs = serde_json::from_value(arguments)
-        .map_err(|e| format!("Invalid delete_task args: {e}"))?;
+    let args: TaskIdArgs =
+        serde_json::from_value(arguments).map_err(|e| format!("Invalid delete_task args: {e}"))?;
     delete_task_internal(
         args.task_id.clone(),
         &server_state.state,
@@ -852,8 +835,8 @@ async fn tool_list_workspaces(_server_state: McpServerState) -> Result<Value, St
             if !repo_path.is_dir() {
                 continue;
             }
-            for ws_entry in std::fs::read_dir(&repo_path)
-                .map_err(|e| format!("workspace dir: {e}"))?
+            for ws_entry in
+                std::fs::read_dir(&repo_path).map_err(|e| format!("workspace dir: {e}"))?
             {
                 let ws_entry = ws_entry.map_err(|e| format!("workspace entry: {e}"))?;
                 let ws_path = ws_entry.path();

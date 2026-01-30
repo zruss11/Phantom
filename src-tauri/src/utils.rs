@@ -15,6 +15,47 @@ fn find_in_path(binary: &str) -> Option<PathBuf> {
     None
 }
 
+/// Build a PATH value that includes common git install locations.
+pub fn git_env_path() -> String {
+    let mut paths: Vec<PathBuf> = Vec::new();
+
+    if let Some(existing) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&existing));
+    }
+
+    let candidates: &[&str] = if cfg!(windows) {
+        &[
+            "C:\\Program Files\\Git\\bin",
+            "C:\\Program Files (x86)\\Git\\bin",
+        ]
+    } else {
+        &[
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+            "/opt/local/bin",
+            "/run/current-system/sw/bin",
+            "/Library/Developer/CommandLineTools/usr/bin",
+        ]
+    };
+
+    for candidate in candidates {
+        paths.push(PathBuf::from(candidate));
+    }
+
+    // Deduplicate while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+
+    env::join_paths(paths)
+        .unwrap_or_else(|_| env::var_os("PATH").unwrap_or_default())
+        .to_string_lossy()
+        .to_string()
+}
+
 /// Resolve the full path to the `gh` CLI binary.
 ///
 /// In packaged macOS apps, the PATH is minimal (/usr/bin:/bin:/usr/sbin:/sbin),
@@ -33,10 +74,10 @@ pub fn resolve_gh_binary() -> Result<PathBuf, String> {
         ]
     } else {
         &[
-            "/opt/homebrew/bin/gh",  // Apple Silicon Homebrew
-            "/usr/local/bin/gh",      // Intel Homebrew / manual install
-            "/usr/bin/gh",            // System package manager
-            "/opt/local/bin/gh",      // MacPorts
+            "/opt/homebrew/bin/gh",          // Apple Silicon Homebrew
+            "/usr/local/bin/gh",             // Intel Homebrew / manual install
+            "/usr/bin/gh",                   // System package manager
+            "/opt/local/bin/gh",             // MacPorts
             "/run/current-system/sw/bin/gh", // NixOS
         ]
     };
@@ -101,6 +142,34 @@ pub fn resolve_git_binary() -> Result<PathBuf, String> {
         "Git not found. Install Git or ensure it is on PATH. Tried: {}",
         candidates_primary.join(", ")
     ))
+}
+
+/// Resolve the full path to the `rsync` binary (best-effort).
+pub fn resolve_rsync_binary() -> Option<PathBuf> {
+    if let Some(path) = find_in_path("rsync") {
+        return Some(path);
+    }
+
+    let candidates: &[&str] = if cfg!(windows) {
+        &[]
+    } else {
+        &[
+            "/opt/homebrew/bin/rsync",
+            "/usr/local/bin/rsync",
+            "/usr/bin/rsync",
+            "/opt/local/bin/rsync",
+            "/run/current-system/sw/bin/rsync",
+        ]
+    };
+
+    for candidate in candidates {
+        let path = PathBuf::from(candidate);
+        if path.exists() {
+            return Some(path);
+        }
+    }
+
+    None
 }
 
 /// Safely truncate a string to at most `max_chars` characters.

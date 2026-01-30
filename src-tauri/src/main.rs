@@ -26,7 +26,7 @@ use phantom_harness_backend::{
     get_codex_modes as backend_get_codex_modes, get_factory_custom_models, AgentLaunchConfig,
     CancellationToken, EnrichedModelOption, ModeOption, ModelOption,
 };
-use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -336,9 +336,8 @@ pub(crate) struct AttachmentRef {
 }
 
 struct TerminalSession {
-    id: String,
-    task_id: String,
-    window_label: String,
+    _id: String,
+    _task_id: String,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send>,
@@ -1028,7 +1027,10 @@ fn codex_builtin_commands() -> Vec<AvailableCommand> {
         ("/resume", "Resume a saved chat"),
         ("/fork", "Fork the current chat"),
         ("/init", "Create an AGENTS.md file"),
-        ("/compact", "Summarize conversation to prevent context limit"),
+        (
+            "/compact",
+            "Summarize conversation to prevent context limit",
+        ),
         ("/collab", "Change collaboration mode"),
         ("/diff", "Show git diff (including untracked files)"),
         ("/mention", "Mention a file"),
@@ -1080,10 +1082,7 @@ fn parse_codex_prompt_description(contents: &str) -> Option<String> {
                 break;
             }
             if let Some(rest) = trimmed.strip_prefix("description:") {
-                let value = rest
-                    .trim()
-                    .trim_matches('"')
-                    .trim_matches('\'');
+                let value = rest.trim().trim_matches('"').trim_matches('\'');
                 if !value.is_empty() {
                     description = Some(value.to_string());
                 }
@@ -1358,7 +1357,9 @@ struct ClaudePluginInstall {
     install_path: String,
 }
 
-fn read_claude_plugin_commands(plugins_dir: &Path) -> Result<Vec<AvailableCommand>, std::io::Error> {
+fn read_claude_plugin_commands(
+    plugins_dir: &Path,
+) -> Result<Vec<AvailableCommand>, std::io::Error> {
     let installed_path = plugins_dir.join("installed_plugins.json");
     if !installed_path.exists() {
         return Ok(Vec::new());
@@ -1371,10 +1372,7 @@ fn read_claude_plugin_commands(plugins_dir: &Path) -> Result<Vec<AvailableComman
     let mut commands = Vec::new();
     for installs in installed.plugins.values() {
         for install in installs {
-            let scope = install
-                .scope
-                .clone()
-                .unwrap_or_else(|| "user".to_string());
+            let scope = install.scope.clone().unwrap_or_else(|| "user".to_string());
             let install_path = PathBuf::from(&install.install_path);
             let command_dirs = [
                 install_path.join("commands"),
@@ -2812,12 +2810,9 @@ pub(crate) async fn create_agent_session_internal(
 
             // Create worktree with a unique animal name (base, then -v1, -v2, etc.).
             // The branch will be renamed asynchronously after LLM generates the proper name.
-            let (created_path, created_branch) = worktree::create_worktree_with_animal_name(
-                repo_root,
-                &repo_slug,
-                &base_ref,
-            )
-            .await?;
+            let (created_path, created_branch) =
+                worktree::create_worktree_with_animal_name(repo_root, &repo_slug, &base_ref)
+                    .await?;
             if let Err(err) = worktree::apply_uncommitted_changes(sync_source, &created_path).await
             {
                 eprintln!(
@@ -2828,8 +2823,11 @@ pub(crate) async fn create_agent_session_internal(
             }
 
             // Store info for deferred branch rename
-            deferred_branch_rename =
-                Some((repo_root.clone(), created_branch.clone(), created_path.clone()));
+            deferred_branch_rename = Some((
+                repo_root.clone(),
+                created_branch.clone(),
+                created_path.clone(),
+            ));
 
             worktree_path = Some(created_path.clone());
 
@@ -4728,7 +4726,12 @@ fn parse_skill_frontmatter(content: &str) -> Option<AgentSkill> {
 }
 
 /// Scan a directory for SKILL.md files
-fn scan_skills_directory(dir: &Path, source: &str, enabled: bool, can_toggle: bool) -> Vec<AgentSkill> {
+fn scan_skills_directory(
+    dir: &Path,
+    source: &str,
+    enabled: bool,
+    can_toggle: bool,
+) -> Vec<AgentSkill> {
     let mut skills = Vec::new();
 
     if !dir.exists() {
@@ -4804,12 +4807,12 @@ fn read_claude_plugin_skills(plugins_dir: &Path) -> Result<Vec<AgentSkill>, std:
     let mut skills = Vec::new();
     for installs in installed.plugins.values() {
         for install in installs {
-            let scope = install
-                .scope
-                .as_deref()
-                .unwrap_or("user")
-                .to_string();
-            let source = if scope == "project" { "project" } else { "personal" };
+            let scope = install.scope.as_deref().unwrap_or("user").to_string();
+            let source = if scope == "project" {
+                "project"
+            } else {
+                "personal"
+            };
             let install_path = PathBuf::from(&install.install_path);
             let skill_dirs = [
                 install_path.join("skills"),
@@ -6541,7 +6544,10 @@ fn default_terminal_command() -> (String, Vec<String>) {
         }
         for candidate in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
             if Path::new(candidate).exists() {
-                return (candidate.to_string(), vec!["-i".to_string(), "-l".to_string()]);
+                return (
+                    candidate.to_string(),
+                    vec!["-i".to_string(), "-l".to_string()],
+                );
             }
         }
         ("sh".to_string(), vec!["-i".to_string()])
@@ -6607,7 +6613,10 @@ async fn start_terminal_session(
     }
 
     let (command, args) = default_terminal_command();
-    println!("[Harness] start_terminal_session: starting shell {} with args {:?}", command, args);
+    println!(
+        "[Harness] start_terminal_session: starting shell {} with args {:?}",
+        command, args
+    );
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -6624,14 +6633,14 @@ async fn start_terminal_session(
     }
     cmd.cwd(&cwd_path);
 
-    println!("[Harness] start_terminal_session: spawning command in {:?}", cwd_path);
-    let child = pair
-        .slave
-        .spawn_command(cmd)
-        .map_err(|err| {
-            println!("[Harness] start_terminal_session: spawn failed: {}", err);
-            err.to_string()
-        })?;
+    println!(
+        "[Harness] start_terminal_session: spawning command in {:?}",
+        cwd_path
+    );
+    let child = pair.slave.spawn_command(cmd).map_err(|err| {
+        println!("[Harness] start_terminal_session: spawn failed: {}", err);
+        err.to_string()
+    })?;
     println!("[Harness] start_terminal_session: shell spawned successfully");
     drop(pair.slave);
 
@@ -6639,20 +6648,15 @@ async fn start_terminal_session(
         .master
         .try_clone_reader()
         .map_err(|err| err.to_string())?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|err| err.to_string())?;
+    let writer = pair.master.take_writer().map_err(|err| err.to_string())?;
 
     let session_id = uuid::Uuid::new_v4().to_string();
-    let window_label = chat_window_label(&task_id);
-
     let app_handle = app.clone();
     let sessions = state.terminal_sessions.clone();
     let task_sessions = state.task_terminal_sessions.clone();
     let session_id_clone = session_id.clone();
     let task_id_clone = task_id.clone();
-    let window_label_clone = window_label.clone();
+    let window_label_clone = chat_window_label(&task_id);
 
     std::thread::spawn(move || {
         let mut reader = reader;
@@ -6730,9 +6734,8 @@ async fn start_terminal_session(
     });
 
     let session = TerminalSession {
-        id: session_id.clone(),
-        task_id: task_id.clone(),
-        window_label,
+        _id: session_id.clone(),
+        _task_id: task_id.clone(),
         master: pair.master,
         writer,
         child,
@@ -6762,19 +6765,17 @@ async fn terminal_write(
         data.len()
     );
     let mut sessions = state.terminal_sessions.lock().await;
-    let session = sessions
-        .get_mut(&session_id)
-        .ok_or_else(|| {
-            println!("[Harness] terminal_write: session not found: {}", session_id);
-            "Terminal session not found".to_string()
-        })?;
-    session
-        .writer
-        .write_all(data.as_bytes())
-        .map_err(|err| {
-            println!("[Harness] terminal_write: write failed: {}", err);
-            err.to_string()
-        })?;
+    let session = sessions.get_mut(&session_id).ok_or_else(|| {
+        println!(
+            "[Harness] terminal_write: session not found: {}",
+            session_id
+        );
+        "Terminal session not found".to_string()
+    })?;
+    session.writer.write_all(data.as_bytes()).map_err(|err| {
+        println!("[Harness] terminal_write: write failed: {}", err);
+        err.to_string()
+    })?;
     session.writer.flush().map_err(|err| {
         println!("[Harness] terminal_write: flush failed: {}", err);
         err.to_string()
@@ -6812,7 +6813,7 @@ async fn terminal_close(session_id: String, state: State<'_, AppState>) -> Resul
         let mut sessions = state.terminal_sessions.lock().await;
         if let Some(mut session) = sessions.remove(&session_id) {
             let _ = session.child.kill();
-            Some(session.task_id)
+            Some(session._task_id)
         } else {
             None
         }

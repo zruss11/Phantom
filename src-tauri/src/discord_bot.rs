@@ -27,7 +27,7 @@ use serenity::all::ShardManager;
 pub struct DiscordBotHandle {
     http: Arc<Http>,
     channel_id: ChannelId,
-    bot_user_id: Arc<StdMutex<Option<UserId>>>,
+    _bot_user_id: Arc<StdMutex<Option<UserId>>>,
     shard_manager: Arc<ShardManager>,
 }
 
@@ -38,10 +38,6 @@ impl DiscordBotHandle {
 
     pub fn channel_id(&self) -> ChannelId {
         self.channel_id
-    }
-
-    pub fn bot_user_id(&self) -> Option<UserId> {
-        self.bot_user_id.lock().ok().and_then(|g| *g)
     }
 
     pub async fn send_channel_message(&self, content: &str) -> Result<Message, String> {
@@ -1538,7 +1534,7 @@ pub async fn start_discord_bot(
     Ok(DiscordBotHandle {
         http,
         channel_id: ChannelId::new(channel_id),
-        bot_user_id,
+        _bot_user_id: bot_user_id,
         shard_manager,
     })
 }
