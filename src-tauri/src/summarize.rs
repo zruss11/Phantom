@@ -57,10 +57,15 @@ async fn generate_title(prompt: &str, agent_id: &str) -> Result<String, String> 
 }
 
 async fn generate_status(response: &str, agent_id: &str) -> Result<String, String> {
+    // Check for PR links first - handle them directly without LLM
+    if let Some(pr_summary) = extract_pr_summary(response) {
+        return Ok(pr_summary);
+    }
+
     // Truncate to first 500 chars (safe for UTF-8)
     let truncated = safe_prefix(response, 500);
     let full_prompt = format!(
-        "Summarize what was done in max 40 characters. Return ONLY the summary, no quotes.\n\n{}",
+        "Summarize what was done in max 40 characters. Return ONLY the summary, no quotes. Do NOT try to access any URLs - just describe what was done based on the text.\n\n{}",
         truncated
     );
 
@@ -300,6 +305,27 @@ fn extract_codex_sse_text(sse_body: &str) -> Result<String, String> {
     Err("Could not extract text from Codex SSE response".to_string())
 }
 
+/// Extract PR number from GitHub PR URLs and return a formatted summary
+/// Returns None if no PR link is found, allowing fallback to LLM summarization
+fn extract_pr_summary(text: &str) -> Option<String> {
+    // Look for GitHub PR URLs: https://github.com/owner/repo/pull/123
+    // Use a simple pattern match rather than regex for performance
+    for word in text.split_whitespace() {
+        if let Some(pr_part) = word.strip_prefix("https://github.com/") {
+            // Check if this is a PR URL
+            if let Some(pull_idx) = pr_part.find("/pull/") {
+                let after_pull = &pr_part[pull_idx + 6..]; // Skip "/pull/"
+                // Extract the PR number (digits only, stop at non-digit)
+                let pr_number: String = after_pull.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !pr_number.is_empty() {
+                    return Some(format!("PR #{} opened", pr_number));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Clean up LLM response (remove quotes, trim whitespace)
 fn clean_response(text: &str) -> String {
     text.trim()
@@ -366,5 +392,38 @@ mod tests {
     fn test_clean_response() {
         assert_eq!(clean_response("  \"Hello World\"  "), "Hello World");
         assert_eq!(clean_response("'Test'"), "Test");
+    }
+
+    #[test]
+    fn test_extract_pr_summary() {
+        // Standard GitHub PR URL
+        assert_eq!(
+            extract_pr_summary("Created PR https://github.com/user/repo/pull/123"),
+            Some("PR #123 opened".to_string())
+        );
+
+        // PR URL with trailing content
+        assert_eq!(
+            extract_pr_summary("See https://github.com/org/project/pull/456 for details"),
+            Some("PR #456 opened".to_string())
+        );
+
+        // No PR link
+        assert_eq!(
+            extract_pr_summary("Fixed the bug in auth.ts"),
+            None
+        );
+
+        // GitHub URL but not a PR
+        assert_eq!(
+            extract_pr_summary("Check https://github.com/user/repo/issues/123"),
+            None
+        );
+
+        // Multiple URLs, first PR wins
+        assert_eq!(
+            extract_pr_summary("PR https://github.com/a/b/pull/1 and https://github.com/c/d/pull/2"),
+            Some("PR #1 opened".to_string())
+        );
     }
 }
