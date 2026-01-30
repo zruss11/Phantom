@@ -4460,3 +4460,413 @@ input:checked + .slider:before {
   width: 0%;
   transition: width 0.2s ease;
 }
+
+/************************************ Review Center start ****************************************/
+
+.review-page {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.review-page .review-header-card {
+  background: linear-gradient(
+    160deg,
+    rgba(18, 16, 20, 0.95),
+    rgba(34, 28, 36, 0.92)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.35);
+}
+
+.review-page .review-title {
+  font-family: "proxima_nova_altbold", sans-serif;
+  font-size: 100%;
+}
+
+.review-page .review-title i {
+  color: #f78a97;
+}
+
+.review-page .review-subtitle {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55) !important;
+  margin-top: 4px;
+}
+
+.review-page .muted-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.review-page .review-controls {
+  display: grid;
+  grid-template-columns: minmax(200px, 1fr) auto auto;
+  gap: 12px;
+  align-items: end;
+}
+
+.review-page .review-control-actions {
+  justify-self: end;
+}
+
+.review-page .review-header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.review-page .review-toggle {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: 999px;
+  background: rgba(15, 14, 16, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.review-page .review-toggle-btn {
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  padding: 6px 12px;
+  border-radius: 999px;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.review-page .review-toggle-btn.active {
+  background: linear-gradient(135deg, #f78a97, #d06d7e);
+  color: rgba(20, 12, 14, 0.8);
+}
+
+.review-page .review-grid {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 16px;
+  padding: 0 16px;
+  height: calc(100vh - 240px);
+  min-height: 420px;
+}
+
+.review-page .review-panel {
+  background: rgba(36, 30, 40, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.review-page .review-panel-header {
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.review-page .review-panel-body {
+  flex: 1;
+  min-height: 0;
+  padding: 8px 0;
+}
+
+.review-page .review-badge {
+  background: rgba(247, 138, 151, 0.15);
+  color: #f78a97;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.review-page .review-empty {
+  padding: 14px 14px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+}
+
+.review-page .review-file-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  font-size: 13px;
+}
+
+.review-page .review-file-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.review-page .review-file-item.selected {
+  background: rgba(247, 138, 151, 0.1);
+  border-left: 2px solid #f78a97;
+}
+
+.review-page .review-file-icon {
+  color: rgba(255, 255, 255, 0.65);
+  width: 16px;
+  text-align: center;
+}
+
+.review-page .review-file-name {
+  flex: 1;
+  font-family: "Roboto Mono", monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-page .review-file-stats {
+  display: inline-flex;
+  gap: 6px;
+  font-family: "Roboto Mono", monospace;
+  font-size: 10px;
+}
+
+.review-page .review-stat-add {
+  color: #3fb950;
+}
+
+.review-page .review-stat-del {
+  color: #f85149;
+}
+
+.review-page .review-diff-header {
+  gap: 12px;
+}
+
+.review-page .review-diff-path {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: "Roboto Mono", monospace;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-page .review-diff-path i {
+  color: #f78a97;
+}
+
+.review-page .review-diff-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.review-page .review-action-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.65);
+  padding: 6px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s ease;
+}
+
+.review-page .review-action-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.review-page .review-action-btn.active {
+  background: rgba(247, 138, 151, 0.15);
+  border-color: rgba(247, 138, 151, 0.55);
+  color: #f78a97;
+}
+
+.review-page .review-action-btn.review-approve {
+  border-color: rgba(63, 185, 80, 0.25);
+}
+
+.review-page .review-action-btn.review-approve:hover {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+}
+
+.review-page .review-action-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.review-page .review-diff-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.review-page .review-diff-placeholder {
+  padding: 18px 14px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+}
+
+.review-page .review-split-view {
+  height: 100%;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+}
+
+.review-page .review-split-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.review-page .review-split-pane:last-child {
+  border-right: none;
+}
+
+.review-page .review-split-header {
+  padding: 8px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.02);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.review-page .review-split-header.old {
+  color: #f85149;
+}
+
+.review-page .review-split-header.new {
+  color: #3fb950;
+}
+
+.review-page .review-split-content {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  font-family: "Roboto Mono", monospace;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.review-page .review-split-line {
+  padding: 1px 12px;
+  display: flex;
+  white-space: pre;
+  min-height: 22px;
+}
+
+.review-page .review-split-line:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.review-page .review-split-line.add {
+  background: rgba(63, 185, 80, 0.1);
+}
+
+.review-page .review-split-line.add .review-split-text {
+  color: #3fb950;
+}
+
+.review-page .review-split-line.del {
+  background: rgba(248, 81, 73, 0.1);
+}
+
+.review-page .review-split-line.del .review-split-text {
+  color: #f85149;
+}
+
+.review-page .review-split-num {
+  width: 35px;
+  text-align: right;
+  padding-right: 12px;
+  opacity: 0.5;
+  color: rgba(255, 255, 255, 0.55);
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.review-page .review-split-text {
+  flex: 1;
+}
+
+.review-page .review-unified-view {
+  height: 100%;
+  overflow-y: auto;
+  font-family: "Roboto Mono", monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  padding: 14px;
+}
+
+.review-page .review-unified-view pre {
+  color: rgba(255, 255, 255, 0.85);
+  margin: 0;
+  white-space: pre;
+}
+
+.review-page .review-timeline-card {
+  background: rgba(36, 30, 40, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.review-page .review-timeline-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.review-page .review-timeline-title {
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.review-page .review-timeline-title i {
+  color: #f78a97;
+}
+
+.review-page .review-timeline-meta {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.review-page .review-timeline-track {
+  min-height: 36px;
+}
+
+@media (max-width: 991px) {
+  .review-page .review-controls {
+    grid-template-columns: 1fr;
+  }
+
+  .review-page .review-control-actions {
+    justify-self: start;
+  }
+
+  .review-page .review-grid {
+    grid-template-columns: 1fr;
+    height: auto;
+    padding: 0 16px;
+  }
+}
+
+/************************************ Review Center end ****************************************/

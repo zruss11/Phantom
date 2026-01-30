@@ -509,6 +509,22 @@
         if (channel === 'getWorktreeDiffStats') {
           return tauriInvoke('get_task_diff_stats', { taskId: args[0] });
         }
+        if (channel === 'getTaskDiffFiles') {
+          var payload = args[0] || {};
+          return tauriInvoke('get_task_diff_files', {
+            taskId: payload.taskId,
+            compare: payload.compare || null
+          });
+        }
+        if (channel === 'getTaskFileDiff') {
+          var payload = args[0] || {};
+          return tauriInvoke('get_task_file_diff', {
+            taskId: payload.taskId,
+            filePath: payload.filePath,
+            compare: payload.compare || null,
+            view: payload.view || null
+          });
+        }
         if (channel === 'dismissNotificationsForTask') {
           return tauriInvoke('dismiss_notifications_for_task', args[0] || {});
         }
@@ -681,6 +697,20 @@
               diff: '--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,6 +10,8 @@ fn main() {\n     println!("Hello, world!");\n+    // New feature added\n+    do_something_cool();\n }',
               commit_log: 'abc1234 feat: add cool feature (Dev, 2 hours ago)\ndef5678 fix: minor bug fix (Dev, 1 day ago)',
               diff_truncated: false
+            });
+            break;
+          case 'getTaskDiffFiles':
+            resolve({
+              files: [
+                { path: 'src-tauri/src/main.rs', additions: 12, deletions: 3 },
+                { path: 'gui/menu.html', additions: 44, deletions: 0 },
+                { path: 'gui/js/review.js', additions: 120, deletions: 0 }
+              ]
+            });
+            break;
+          case 'getTaskFileDiff':
+            resolve({
+              diff: 'diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n-  println!("hello");\n+  println!("review");\n }\n'
             });
             break;
           case 'loadTasks':

@@ -350,8 +350,10 @@ fn extract_pr_summary(text: &str) -> Option<String> {
         if let Some(pr_part) = word.strip_prefix("https://github.com/") {
             if let Some(pull_idx) = pr_part.find("/pull/") {
                 let after_pull = &pr_part[pull_idx + 6..]; // Skip "/pull/"
-                let pr_number: String =
-                    after_pull.chars().take_while(|c| c.is_ascii_digit()).collect();
+                let pr_number: String = after_pull
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect();
                 if !pr_number.is_empty() && has_opened_created_context(&normalized, idx) {
                     return Some(format!("PR #{} opened", pr_number));
                 }
@@ -464,10 +466,7 @@ mod tests {
         );
 
         // No PR link
-        assert_eq!(
-            extract_pr_summary("Fixed the bug in auth.ts"),
-            None
-        );
+        assert_eq!(extract_pr_summary("Fixed the bug in auth.ts"), None);
 
         // GitHub URL but not a PR
         assert_eq!(
@@ -477,7 +476,9 @@ mod tests {
 
         // Multiple URLs, only explicit opened/created wins
         assert_eq!(
-            extract_pr_summary("Reviewed https://github.com/a/b/pull/1 and opened https://github.com/c/d/pull/2"),
+            extract_pr_summary(
+                "Reviewed https://github.com/a/b/pull/1 and opened https://github.com/c/d/pull/2"
+            ),
             Some("PR #2 opened".to_string())
         );
 
