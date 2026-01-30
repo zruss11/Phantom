@@ -363,6 +363,7 @@ async function saveSettingsFromUi() {
       ignoreDeclines: $("#ignoreDeclines").is(":checked"),
       agentNotificationsEnabled: $("#agentNotificationsEnabled").is(":checked"),
       agentNotificationStack: $("#agentNotificationStack").is(":checked"),
+      agentNotificationTimeout: parseInt($("#agentNotificationTimeout").val(), 10) || 0,
       aiSummariesEnabled: $("#aiSummariesEnabled").is(":checked"),
       summariesAgent: summariesAgentDropdown ? summariesAgentDropdown.getValue() : "auto",
       taskProjectAllowlist: taskProjectAllowlist,
@@ -384,7 +385,7 @@ async function saveSettingsFromUi() {
 
 // Auto-save settings on any change (inputs and toggles)
 $("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken").on("change", saveSettingsFromUi);
-$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
+$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #agentNotificationTimeout, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
 
 // Show/hide summaries agent dropdown based on AI summaries toggle
 function updateSummariesAgentVisibility() {
@@ -1903,6 +1904,11 @@ async function getSettings() {
     );
   } else {
     $("#agentNotificationStack").prop("checked", true);
+  }
+  if (settingsPayload.agentNotificationTimeout !== undefined) {
+    $("#agentNotificationTimeout").val(settingsPayload.agentNotificationTimeout);
+  } else {
+    $("#agentNotificationTimeout").val(0);
   }
 
   // AI Summaries setting (default enabled)

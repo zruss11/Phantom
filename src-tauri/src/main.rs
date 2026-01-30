@@ -432,6 +432,8 @@ struct Settings {
     agent_notifications_enabled: Option<bool>,
     #[serde(rename = "agentNotificationStack")]
     agent_notification_stack: Option<bool>,
+    #[serde(rename = "agentNotificationTimeout")]
+    agent_notification_timeout: Option<u32>,
     // AI-powered summarization for task titles and status
     #[serde(rename = "aiSummariesEnabled")]
     ai_summaries_enabled: Option<bool>,
@@ -6865,6 +6867,11 @@ fn notification_stack(settings: &Settings) -> bool {
     settings.agent_notification_stack.unwrap_or(true)
 }
 
+/// Returns the notification auto-dismiss timeout in seconds (0 = disabled).
+fn notification_timeout(settings: &Settings) -> u32 {
+    settings.agent_notification_timeout.unwrap_or(0)
+}
+
 fn format_notification_preview(text: &str) -> String {
     let cleaned = text.split_whitespace().collect::<Vec<&str>>().join(" ");
     let max_chars = 160usize;
@@ -6910,10 +6917,38 @@ fn notification_position(app: &AppHandle, index: usize) -> Position {
     Position::Logical(LogicalPosition { x: 100.0, y: 100.0 })
 }
 
+/// Close all notification windows associated with a specific task.
+#[tauri::command]
+async fn dismiss_notifications_for_task(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    task_id: String,
+) -> Result<(), String> {
+    let safe_task_id = task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
+    let notification_prefix = format!("notification-{}-", safe_task_id);
+
+    // Close all notification windows for this task
+    for (label, window) in app.webview_windows() {
+        if label.starts_with(&notification_prefix) {
+            let _ = window.close();
+        }
+    }
+
+    // Remove from tracking vector
+    if let Ok(mut notification_windows) = state.notification_windows.lock() {
+        notification_windows.retain(|label| {
+            !label.starts_with(&notification_prefix) && app.get_webview_window(label).is_some()
+        });
+    }
+
+    Ok(())
+}
+
 fn build_notification_url(
     task_id: &str,
     agent_id: &str,
     preview: &str,
+    timeout_secs: u32,
 ) -> Result<WebviewUrl, String> {
     let encoded_task_id = urlencoding::encode(task_id);
     let encoded_agent = urlencoding::encode(agent_id);
@@ -6922,8 +6957,8 @@ fn build_notification_url(
     #[cfg(debug_assertions)]
     let window_url = {
         let url = format!(
-            "http://127.0.0.1:8000/agent_notification.html?taskId={}&agent={}&preview={}",
-            encoded_task_id, encoded_agent, encoded_preview
+            "http://127.0.0.1:8000/agent_notification.html?taskId={}&agent={}&preview={}&timeout={}",
+            encoded_task_id, encoded_agent, encoded_preview, timeout_secs
         );
         tauri::WebviewUrl::External(url.parse().map_err(|e| format!("Invalid URL: {}", e))?)
     };
@@ -6931,8 +6966,8 @@ fn build_notification_url(
     #[cfg(not(debug_assertions))]
     let window_url = {
         let path = format!(
-            "agent_notification.html?taskId={}&agent={}&preview={}",
-            encoded_task_id, encoded_agent, encoded_preview
+            "agent_notification.html?taskId={}&agent={}&preview={}&timeout={}",
+            encoded_task_id, encoded_agent, encoded_preview, timeout_secs
         );
         tauri::WebviewUrl::App(path.into())
     };
@@ -7121,7 +7156,8 @@ async fn maybe_show_agent_notification(
     let safe_task_id = task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_");
     let label = format!("notification-{}-{}", safe_task_id, uuid::Uuid::new_v4());
     let preview_text = format_notification_preview(preview);
-    let window_url = build_notification_url(task_id, agent_id, &preview_text)?;
+    let timeout_secs = notification_timeout(&settings);
+    let window_url = build_notification_url(task_id, agent_id, &preview_text, timeout_secs)?;
 
     let notification_window = tauri::WebviewWindowBuilder::new(app, &label, window_url)
         .title("Agent Notification")
@@ -8641,6 +8677,7 @@ fn main() {
             send_chat_message,
             respond_to_permission,
             respond_to_user_input,
+            dismiss_notifications_for_task,
             local_usage::local_usage_snapshot,
             claude_local_usage::claude_local_usage_snapshot,
             // Analytics cache commands
