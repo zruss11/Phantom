@@ -306,24 +306,50 @@ fn extract_codex_sse_text(sse_body: &str) -> Result<String, String> {
 }
 
 /// Extract PR number from GitHub PR URLs and return a formatted summary
-/// Returns None if no PR link is found, allowing fallback to LLM summarization
+/// Returns None if no qualifying PR link is found, allowing fallback to LLM summarization
 fn extract_pr_summary(text: &str) -> Option<String> {
     // Look for GitHub PR URLs: https://github.com/owner/repo/pull/123
     // Use a simple pattern match rather than regex for performance
-    for word in text.split_whitespace() {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    if words.is_empty() {
+        return None;
+    }
+
+    let normalized: Vec<String> = words.iter().map(|word| normalize_token(word)).collect();
+
+    for (idx, word) in words.iter().enumerate() {
         if let Some(pr_part) = word.strip_prefix("https://github.com/") {
-            // Check if this is a PR URL
             if let Some(pull_idx) = pr_part.find("/pull/") {
                 let after_pull = &pr_part[pull_idx + 6..]; // Skip "/pull/"
-                // Extract the PR number (digits only, stop at non-digit)
-                let pr_number: String = after_pull.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if !pr_number.is_empty() {
+                let pr_number: String =
+                    after_pull.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if !pr_number.is_empty() && has_opened_created_context(&normalized, idx) {
                     return Some(format!("PR #{} opened", pr_number));
                 }
             }
         }
     }
+
     None
+}
+
+fn normalize_token(word: &str) -> String {
+    word.trim_matches(|c: char| !c.is_ascii_alphanumeric())
+        .to_ascii_lowercase()
+}
+
+fn has_opened_created_context(tokens: &[String], url_index: usize) -> bool {
+    const WINDOW: usize = 4;
+    let start = url_index.saturating_sub(WINDOW);
+    let end = (url_index + WINDOW + 1).min(tokens.len());
+
+    for token in &tokens[start..end] {
+        if matches!(token.as_str(), "opened" | "created") {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Clean up LLM response (remove quotes, trim whitespace)
@@ -405,7 +431,7 @@ mod tests {
         // PR URL with trailing content
         assert_eq!(
             extract_pr_summary("See https://github.com/org/project/pull/456 for details"),
-            Some("PR #456 opened".to_string())
+            None
         );
 
         // No PR link
@@ -420,10 +446,16 @@ mod tests {
             None
         );
 
-        // Multiple URLs, first PR wins
+        // Multiple URLs, only explicit opened/created wins
         assert_eq!(
-            extract_pr_summary("PR https://github.com/a/b/pull/1 and https://github.com/c/d/pull/2"),
-            Some("PR #1 opened".to_string())
+            extract_pr_summary("Reviewed https://github.com/a/b/pull/1 and opened https://github.com/c/d/pull/2"),
+            Some("PR #2 opened".to_string())
+        );
+
+        // PR URL without opened/created language
+        assert_eq!(
+            extract_pr_summary("Reviewed PR https://github.com/a/b/pull/7"),
+            None
         );
     }
 }
