@@ -1816,6 +1816,20 @@
     return div;
   }
 
+  // Update the tool bundle label based on actual tool calls vs thinking entries
+  function updateToolBundleLabel() {
+    if (!toolCallBundle.element) return;
+    const toolCount = toolCallBundle.calls.filter((call) => !call.isThinking).length;
+    const thinkingCount = toolCallBundle.calls.filter((call) => call.isThinking).length;
+    let label;
+    if (toolCount === 0 && thinkingCount > 0) {
+      label = "Thinking";
+    } else {
+      label = toolCount + " Tool Call" + (toolCount !== 1 ? "s" : "");
+    }
+    $(toolCallBundle.element).find(".tool-bundle-label").text(label);
+  }
+
   // Add a tool call to the current bundle
   function addToToolBundle(toolCall) {
     if (!toolCallBundle.element) {
@@ -1833,8 +1847,7 @@
 
     // Update the bundle summary
     const bundleEl = $(toolCallBundle.element);
-    const count = toolCallBundle.calls.length;
-    bundleEl.find(".tool-bundle-label").text(count + " Tool Call" + (count !== 1 ? "s" : ""));
+    updateToolBundleLabel();
 
     // Add icon to the icon strip (only if unique)
     const iconHtml = getToolIconHtml(call.name);
@@ -1850,7 +1863,7 @@
     const formattedArgs = formatArgs(call.arguments);
     const hasArgs = formattedArgs && formattedArgs.trim() !== "{}";
     const itemHtml = `
-      <div class="tool-bundle-item pending" data-index="${count - 1}">
+      <div class="tool-bundle-item pending" data-index="${toolCallBundle.calls.length - 1}">
         <div class="tool-bundle-item-header">
           <span class="tool-bundle-item-icon">${iconHtml}</span>
           <span class="tool-bundle-item-name">${escapeHtml(call.name)}</span>
@@ -1897,8 +1910,7 @@
 
     // Update the bundle summary
     const bundleEl = $(toolCallBundle.element);
-    const count = toolCallBundle.calls.length;
-    bundleEl.find(".tool-bundle-label").text(count + " Tool Call" + (count !== 1 ? "s" : ""));
+    updateToolBundleLabel();
 
     // Add thinking icon to the icon strip (only if unique)
     const iconHtml = getToolIconHtml("Thinking");
@@ -1913,7 +1925,7 @@
     // Add item to the details section (already complete, no arguments shown)
     const truncatedContent = truncateText(content.trim(), 1000);
     const itemHtml = `
-      <div class="tool-bundle-item complete thinking-item" data-index="${count - 1}">
+      <div class="tool-bundle-item complete thinking-item" data-index="${toolCallBundle.calls.length - 1}">
         <div class="tool-bundle-item-header">
           <span class="tool-bundle-item-icon">${iconHtml}</span>
           <span class="tool-bundle-item-name">Thinking</span>
@@ -3981,6 +3993,12 @@
     // Clear tool call tracking to prevent cross-task deduplication issues
     renderedToolCalls.clear();
     lastFinalizedContent = "";
+    // Reset streaming state to prevent stale content leaking into next session
+    accumulatedReasoning = "";
+    toolCallBundle.element = null;
+    toolCallBundle.calls = [];
+    toolCallBundle.expanded = false;
+    toolCallBundle.iconNames = new Set();
   }
 
   // Scroll to bottom of chat
