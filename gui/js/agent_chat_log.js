@@ -1630,6 +1630,25 @@
   let streamingType = null;
   let streamingItemId = null; // Track by itemId for Codex app-server
   let lastFinalizedContent = ""; // Track last finalized content to prevent duplicates
+  let renderedToolCalls = new Map(); // toolKey -> count of streamed tool calls awaiting ChatLogUpdate
+
+  function markToolCallRendered(toolKey) {
+    if (!toolKey) return;
+    const count = renderedToolCalls.get(toolKey) || 0;
+    renderedToolCalls.set(toolKey, count + 1);
+  }
+
+  function shouldSkipToolCall(toolKey) {
+    if (!toolKey) return false;
+    const count = renderedToolCalls.get(toolKey);
+    if (!count) return false;
+    if (count <= 1) {
+      renderedToolCalls.delete(toolKey);
+    } else {
+      renderedToolCalls.set(toolKey, count - 1);
+    }
+    return true;
+  }
 
   // Tool call bundle state - groups consecutive tool calls into collapsible bundle
   let toolCallBundle = {
@@ -1801,9 +1820,12 @@
         updateStatus("Thinking...", "running");
         break;
 
-      case "tool_call":
+      case "tool_call": {
         // Finalize any existing streaming message first
         finalizeStreamingMessage();
+        // Track this tool call to prevent duplicates from ChatLogUpdate
+        const streamToolKey = getToolCallKey(update.name, update.arguments);
+        markToolCallRendered(streamToolKey);
         // Add the tool call to the current bundle
         addToToolBundle({
           name: update.name,
@@ -1811,6 +1833,7 @@
         });
         updateStatus("Running: " + (update.name || "tool"), "running");
         break;
+      }
 
       case "tool_return":
         // Try to merge into bundle first, then fall back to individual tool calls
@@ -2645,6 +2668,13 @@
       const toolArgs = message.tool_call
         ? message.tool_call.arguments
         : message.arguments || "";
+
+      // Skip duplicate tool calls (already rendered via streaming)
+      const toolKey = getToolCallKey(toolName, toolArgs);
+      if (shouldSkipToolCall(toolKey)) {
+        console.log("[ChatLog] Skipping duplicate tool call:", toolName);
+        return;
+      }
 
       // Skip bundling for AskUserQuestion (interactive UI)
       if (toolName.toLowerCase() === "askuserquestion") {
@@ -3571,6 +3601,9 @@
     container.empty();
     container.append('<div class="chat-empty">No messages yet</div>');
     resetDiffCount();
+    // Clear tool call tracking to prevent cross-task deduplication issues
+    renderedToolCalls.clear();
+    lastFinalizedContent = "";
   }
 
   // Scroll to bottom of chat
@@ -3612,6 +3645,39 @@
       }
     }
     return JSON.stringify(args, null, 2);
+  }
+
+  function stableStringify(value) {
+    if (value === null || typeof value !== "object") {
+      return JSON.stringify(value);
+    }
+    if (Array.isArray(value)) {
+      return "[" + value.map(stableStringify).join(",") + "]";
+    }
+    const keys = Object.keys(value).sort();
+    const entries = keys.map((key) => {
+      return `${JSON.stringify(key)}:${stableStringify(value[key])}`;
+    });
+    return "{" + entries.join(",") + "}";
+  }
+
+  function normalizeToolCallArgs(args) {
+    if (args === null || typeof args === "undefined") return "";
+    if (typeof args === "string") {
+      const trimmed = args.trim();
+      if (!trimmed) return "";
+      try {
+        return stableStringify(JSON.parse(trimmed));
+      } catch (e) {
+        return trimmed;
+      }
+    }
+    return stableStringify(args);
+  }
+
+  function getToolCallKey(toolName, toolArgs) {
+    const name = (toolName || "").toString();
+    return `${name}:${normalizeToolCallArgs(toolArgs)}`;
   }
 
   // Truncate long text
