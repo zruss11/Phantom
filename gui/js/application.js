@@ -678,6 +678,7 @@ function renderCodexAccounts() {
       emailSpan.dataset.email = account.email;
       emailSpan.dataset.redacted = redactEmail(account.email);
       emailSpan.dataset.accountId = account.id;
+      emailSpan.textContent = emailSpan.dataset.redacted;
 
       const toggleBtn = document.createElement("button");
       toggleBtn.type = "button";
@@ -771,7 +772,7 @@ function toggleCodexEmailVisibility(accountId) {
       toggleBtn.title = "Hide email";
     }
   } else {
-    emailNode.textContent = "";
+    emailNode.textContent = emailNode.dataset.redacted || "";
     emailNode.classList.add("redacted");
     if (toggleBtn) {
       toggleBtn.dataset.visible = "false";
