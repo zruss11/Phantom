@@ -652,59 +652,142 @@ function renderCodexAccounts() {
   if (!codexAccounts.length) {
     const empty = document.createElement("div");
     empty.className = "text-muted small";
-    empty.textContent = "No Codex accounts yet.";
+    empty.style.cssText = "padding: 8px 0; opacity: 0.6;";
+    empty.textContent = "No Codex accounts yet. Add or import one to get started.";
     container.appendChild(empty);
     return;
   }
 
   codexAccounts.forEach((account) => {
     const row = document.createElement("div");
-    row.className =
-      "codex-account-row" + (account.isActive ? " active" : "");
+    row.className = "codex-account-row" + (account.isActive ? " active" : "");
 
     const meta = document.createElement("div");
     meta.className = "codex-account-meta";
+
     const label = document.createElement("div");
     label.className = "codex-account-label";
-    label.textContent = account.label || "Codex Account";
+
+    // Show redacted email with toggle, or fallback to label
+    if (account.email) {
+      const emailWrapper = document.createElement("span");
+      emailWrapper.className = "codex-email-wrapper";
+
+      const emailSpan = document.createElement("span");
+      emailSpan.className = "codex-email redacted";
+      emailSpan.dataset.email = account.email;
+      emailSpan.dataset.redacted = redactEmail(account.email);
+      emailSpan.dataset.accountId = account.id;
+
+      const toggleBtn = document.createElement("button");
+      toggleBtn.type = "button";
+      toggleBtn.className = "codex-email-toggle";
+      toggleBtn.dataset.toggleCodexEmail = account.id;
+      toggleBtn.title = "Show email";
+      toggleBtn.innerHTML = `
+        <svg class="eye-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path class="eye-open" d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+          <circle class="eye-open" cx="12" cy="12" r="3"></circle>
+          <path class="eye-closed" d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" style="display:none"></path>
+          <line class="eye-closed" x1="1" y1="1" x2="23" y2="23" style="display:none"></line>
+        </svg>
+      `;
+
+      emailWrapper.appendChild(emailSpan);
+      emailWrapper.appendChild(toggleBtn);
+      label.appendChild(emailWrapper);
+    } else {
+      label.textContent = account.label || "Codex Account";
+    }
+
     const sub = document.createElement("div");
     sub.className = "codex-account-sub";
-    const plan = account.planType ? ` · ${account.planType}` : "";
-    const status = account.authenticated ? "Connected" : "Not connected";
-    sub.textContent = `${status}${plan}`;
+
+    const statusSpan = document.createElement("span");
+    statusSpan.className = account.authenticated ? "status-connected" : "status-disconnected";
+    statusSpan.textContent = account.authenticated ? "Connected" : "Not connected";
+    sub.appendChild(statusSpan);
+
+    if (account.planType) {
+      const planBadge = document.createElement("span");
+      planBadge.className = "plan-badge";
+      planBadge.textContent = account.planType;
+      sub.appendChild(planBadge);
+    }
+
     meta.appendChild(label);
     meta.appendChild(sub);
 
     const actions = document.createElement("div");
     actions.className = "codex-account-actions";
 
-    const activateBtn = document.createElement("button");
-    activateBtn.className = "btn btn-xs btn-outline-secondary";
-    activateBtn.textContent = account.isActive ? "Active" : "Activate";
-    activateBtn.disabled = account.isActive;
-    activateBtn.dataset.codexAccountAction = "activate";
-    activateBtn.dataset.accountId = account.id;
+    if (account.isActive) {
+      const activeBadge = document.createElement("span");
+      activeBadge.className = "codex-account-badge";
+      activeBadge.textContent = "Active";
+      actions.appendChild(activeBadge);
+    } else {
+      const activateBtn = document.createElement("button");
+      activateBtn.className = "btn btn-activate";
+      activateBtn.textContent = "Activate";
+      activateBtn.dataset.codexAccountAction = "activate";
+      activateBtn.dataset.accountId = account.id;
+      actions.appendChild(activateBtn);
+    }
 
     const loginBtn = document.createElement("button");
-    loginBtn.className = "btn btn-xs btn-brand";
+    loginBtn.className = "btn btn-login";
     loginBtn.textContent = account.authenticated ? "Relogin" : "Login";
     loginBtn.dataset.codexAccountAction = "login";
     loginBtn.dataset.accountId = account.id;
+    actions.appendChild(loginBtn);
 
     const deleteBtn = document.createElement("button");
-    deleteBtn.className = "btn btn-xs btn-outline-danger";
+    deleteBtn.className = "btn btn-remove";
     deleteBtn.textContent = "Remove";
     deleteBtn.dataset.codexAccountAction = "delete";
     deleteBtn.dataset.accountId = account.id;
-
-    actions.appendChild(activateBtn);
-    actions.appendChild(loginBtn);
     actions.appendChild(deleteBtn);
+
     row.appendChild(meta);
     row.appendChild(actions);
     container.appendChild(row);
   });
 }
+
+// Toggle Codex account email visibility
+function toggleCodexEmailVisibility(accountId) {
+  const emailNode = document.querySelector(`.codex-email[data-account-id="${accountId}"]`);
+  const toggleBtn = document.querySelector(`[data-toggle-codex-email="${accountId}"]`);
+  if (!emailNode) return;
+
+  const isRedacted = emailNode.classList.contains("redacted");
+
+  if (isRedacted) {
+    emailNode.textContent = emailNode.dataset.email || "";
+    emailNode.classList.remove("redacted");
+    if (toggleBtn) {
+      toggleBtn.dataset.visible = "true";
+      toggleBtn.title = "Hide email";
+    }
+  } else {
+    emailNode.textContent = "";
+    emailNode.classList.add("redacted");
+    if (toggleBtn) {
+      toggleBtn.dataset.visible = "false";
+      toggleBtn.title = "Show email";
+    }
+  }
+}
+
+// Setup Codex email toggle handlers
+document.addEventListener("click", (e) => {
+  const toggleBtn = e.target.closest("[data-toggle-codex-email]");
+  if (toggleBtn) {
+    const accountId = toggleBtn.dataset.toggleCodexEmail;
+    toggleCodexEmailVisibility(accountId);
+  }
+});
 
 function updateCodexAuthUI() {
   const state = codexAuthState;
@@ -723,23 +806,6 @@ function updateCodexAuthUI() {
     }
   });
 
-  // Update email display (with redaction)
-  document
-    .querySelectorAll('[data-auth-email-wrapper="codex"]')
-    .forEach((wrapper) => {
-      const emailNode = wrapper.querySelector('[data-auth-email="codex"]');
-      if (state.authenticated && state.email) {
-        emailNode.dataset.email = state.email;
-        emailNode.dataset.redacted = redactEmail(state.email);
-        emailNode.classList.add("redacted");
-        wrapper.hidden = false;
-      } else {
-        emailNode.dataset.email = "";
-        emailNode.dataset.redacted = "";
-        emailNode.textContent = "";
-        wrapper.hidden = true;
-      }
-    });
 
   // Update login buttons
   document
@@ -1239,34 +1305,32 @@ document.querySelectorAll("[data-codex-account-add]").forEach((button) => {
   button.addEventListener("click", async (event) => {
     event.preventDefault();
     try {
-      const account = await ipcRenderer.invoke("createCodexAccount");
-      if (account && account.id) {
-        await ipcRenderer.invoke("setActiveCodexAccount", account.id);
-        activeCodexAccountId = account.id;
-        sendNotification("Codex account added", "green");
-        await loadCodexAccounts();
-      }
-    } catch (err) {
-      console.warn("[Harness] createCodexAccount failed", err);
-      sendNotification("Failed to add Codex account", "red");
-    }
-  });
-});
+      // Smart add: first try to import existing ~/.codex, fall back to creating new
+      let account = null;
+      let imported = false;
 
-document.querySelectorAll("[data-codex-account-import]").forEach((button) => {
-  button.addEventListener("click", async (event) => {
-    event.preventDefault();
-    try {
-      const account = await ipcRenderer.invoke("importCodexAccount");
+      // Try importing ~/.codex first (will fail if already registered or doesn't exist)
+      try {
+        account = await ipcRenderer.invoke("importCodexAccount");
+        imported = true;
+      } catch (importErr) {
+        // Import failed (already registered or doesn't exist), create new account
+        console.log("[Harness] Import failed, creating new account:", importErr);
+        account = await ipcRenderer.invoke("createCodexAccount");
+      }
+
       if (account && account.id) {
         await ipcRenderer.invoke("setActiveCodexAccount", account.id);
         activeCodexAccountId = account.id;
-        sendNotification("Codex account imported", "green");
+        sendNotification(
+          imported ? "Existing Codex account imported" : "New Codex account created",
+          "green"
+        );
         await loadCodexAccounts();
       }
     } catch (err) {
-      console.warn("[Harness] importCodexAccount failed", err);
-      sendNotification("Failed to import Codex account", "red");
+      console.warn("[Harness] add Codex account failed", err);
+      sendNotification("Failed to add Codex account: " + (err.message || err), "red");
     }
   });
 });
