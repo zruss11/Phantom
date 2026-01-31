@@ -869,6 +869,31 @@ fn settings_path() -> Result<PathBuf, String> {
 // NOTE: codex_accounts_root() was removed to avoid copying Codex data into app storage.
 // Codex homes are now referenced directly at their original paths (e.g., ~/.codex).
 
+/// Returns the app-managed root directory for Phantom Harness data.
+fn app_managed_root() -> Result<PathBuf, String> {
+    let base = dirs::config_dir().ok_or_else(|| "config dir unavailable".to_string())?;
+    Ok(base.join("phantom-harness"))
+}
+
+/// Check if a path is within the app-managed sandbox.
+/// Returns true only if the path is a descendant of the app-managed root directory.
+fn is_within_app_sandbox(path: &std::path::Path) -> bool {
+    let Ok(app_root) = app_managed_root() else {
+        return false;
+    };
+    // Canonicalize both paths to resolve symlinks and get absolute paths
+    let Ok(canonical_path) = path.canonicalize() else {
+        // If path doesn't exist or can't be canonicalized, check the parent
+        // or use the path as-is for prefix comparison
+        return path.starts_with(&app_root);
+    };
+    let Ok(canonical_root) = app_root.canonicalize() else {
+        // If app root doesn't exist yet, use non-canonical comparison
+        return path.starts_with(&app_root);
+    };
+    canonical_path.starts_with(&canonical_root)
+}
+
 fn default_codex_home() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".codex"))
 }
@@ -5668,6 +5693,9 @@ async fn codex_accounts_list_internal(
             resolve_codex_account_home(&conn, Some(active.as_str()))
         };
         set_process_codex_home(active_home.as_deref());
+    } else {
+        // Clear stale process env when no active account
+        set_process_codex_home(None);
     }
 
     Ok(summaries)
@@ -5853,33 +5881,35 @@ async fn run_codex_login_for_home(
 
     println!("[Codex Login] Process spawned successfully");
 
-    let stderr = child.stderr.take();
-    if let Some(stderr) = stderr {
-        let mut lines = BufReader::new(stderr).lines();
-        let mut opened = false;
-        while let Ok(Some(line)) = lines.next_line().await {
-            println!("[Codex Login] stderr line: {}", line);
-            if opened {
-                continue;
-            }
-            for token in line.split_whitespace() {
-                if token.starts_with("https://") {
-                    println!("[Codex Login] Found URL: {}", token);
-                    if validate_oauth_url(token) {
-                        println!("[Codex Login] URL validated, opening browser");
-                        use tauri_plugin_opener::OpenerExt;
-                        match app_handle.opener().open_url(token, None::<&str>) {
-                            Ok(_) => println!("[Codex Login] Browser opened successfully"),
-                            Err(e) => println!("[Codex Login] Failed to open browser: {:?}", e),
+    // Spawn a background task to read stderr and open the browser when a URL is found
+    if let Some(stderr) = child.stderr.take() {
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            let mut opened = false;
+            while let Ok(Some(line)) = lines.next_line().await {
+                println!("[Codex Login] stderr line: {}", line);
+                if opened {
+                    continue;
+                }
+                for token in line.split_whitespace() {
+                    if token.starts_with("https://") {
+                        println!("[Codex Login] Found URL: {}", token);
+                        if validate_oauth_url(token) {
+                            println!("[Codex Login] URL validated, opening browser");
+                            use tauri_plugin_opener::OpenerExt;
+                            match app_handle.opener().open_url(token, None::<&str>) {
+                                Ok(_) => println!("[Codex Login] Browser opened successfully"),
+                                Err(e) => println!("[Codex Login] Failed to open browser: {:?}", e),
+                            }
+                            opened = true;
+                            break;
+                        } else {
+                            println!("[Codex Login] URL failed validation");
                         }
-                        opened = true;
-                        break;
-                    } else {
-                        println!("[Codex Login] URL failed validation");
                     }
                 }
             }
-        }
+        });
     }
 
     let result = timeout(Duration::from_secs(300), child.wait()).await;
@@ -5984,13 +6014,31 @@ async fn switch_running_codex_tasks(
         let (client, session_id, _used_session_load) =
             reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, true).await?;
 
+        // Build a history-wrapped "Continue" prompt so the new session has context.
+        // Since we skipped session/load, we must inject history explicitly.
+        let resume_prompt = {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let messages = db::get_message_records(&conn, &task_id).map_err(|e| e.to_string())?;
+            if !messages.is_empty() {
+                let (history, _) = db::compact_history(&messages, task.prompt.as_deref(), 100_000);
+                Some(format_message_with_history(&history, "Continue"))
+            } else if let Some(ref prompt) = task.prompt {
+                // No history yet, just use original prompt
+                Some(prompt.clone())
+            } else {
+                None
+            }
+        };
+
         {
             let mut handle = handle_ref.lock().await;
             handle.client = client.clone();
             handle.session_id = session_id.clone();
-            handle.pending_prompt = None;
-            // Mark that the next message needs history injection since we skipped session/load
-            // (Codex session/load would try to restore from the old account's session data)
+            // Set pending_prompt with history context so start_task can resume with full context.
+            // This is critical: without a pending_prompt, start_task will fail with "No prompt pending".
+            handle.pending_prompt = resume_prompt;
+            // Also mark for history injection in case send_message is called directly
+            // (e.g., if user sends a new message instead of resuming)
             handle.needs_history_injection = true;
         }
 
@@ -6058,6 +6106,13 @@ async fn codex_account_delete(
     // Default to NOT removing data since codex homes are now read-only references
     // to external directories (e.g., ~/.codex) that the user may want to preserve.
     if remove_data.unwrap_or(false) {
+        // Only allow deletion if the path is within the app-managed sandbox.
+        // This prevents accidental deletion of user-managed directories like ~/.codex.
+        if !is_within_app_sandbox(&codex_home) {
+            return Err(
+                "Refusing to delete Codex home; remove it manually if desired.".to_string(),
+            );
+        }
         let _ = std::fs::remove_dir_all(&codex_home);
     }
 

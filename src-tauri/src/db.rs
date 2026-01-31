@@ -887,7 +887,7 @@ pub fn update_codex_account_meta(
 ) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
     conn.execute(
-        "UPDATE codex_accounts SET email = ?1, plan_type = ?2, label = COALESCE(?3, label), updated_at = ?4 WHERE id = ?5",
+        "UPDATE codex_accounts SET email = COALESCE(?1, email), plan_type = COALESCE(?2, plan_type), label = COALESCE(?3, label), updated_at = ?4 WHERE id = ?5",
         params![email, plan_type, label, now, id],
     )?;
     Ok(())
