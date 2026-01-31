@@ -8,6 +8,8 @@ use std::path::PathBuf;
 pub struct TaskRecord {
     pub id: String,
     pub agent_id: String,
+    #[serde(rename = "codexAccountId")]
+    pub codex_account_id: Option<String>,
     pub model: String,
     pub prompt: Option<String>,
     pub project_path: Option<String>,
@@ -48,6 +50,19 @@ pub struct CachedMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexAccountRecord {
+    pub id: String,
+    pub label: Option<String>,
+    #[serde(rename = "codexHome")]
+    pub codex_home: String,
+    pub email: Option<String>,
+    #[serde(rename = "planType")]
+    pub plan_type: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentRecord {
     pub id: String,
     #[serde(rename = "fileName")]
@@ -79,6 +94,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         "CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
             agent_id TEXT NOT NULL,
+            codex_account_id TEXT,
             model TEXT NOT NULL,
             prompt TEXT,
             project_path TEXT,
@@ -114,6 +130,19 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             description TEXT,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY (agent_id, value)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS codex_accounts (
+            id TEXT PRIMARY KEY,
+            label TEXT,
+            codex_home TEXT NOT NULL,
+            email TEXT,
+            plan_type TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
         )",
         [],
     )?;
@@ -214,6 +243,9 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         .ok();
     // Add branch column for git branch name (may differ from folder after async rename)
     conn.execute("ALTER TABLE tasks ADD COLUMN branch TEXT", [])
+        .ok();
+    // Add codex_account_id column for Codex account routing (migration)
+    conn.execute("ALTER TABLE tasks ADD COLUMN codex_account_id TEXT", [])
         .ok();
 
     Ok(conn)
@@ -409,11 +441,12 @@ pub fn get_all_cached_modes(conn: &Connection) -> Result<Vec<(String, Vec<Cached
 
 pub fn insert_task(conn: &Connection, task: &TaskRecord) -> Result<()> {
     conn.execute(
-        "INSERT INTO tasks (id, agent_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO tasks (id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             task.id,
             task.agent_id,
+            task.codex_account_id,
             task.model,
             task.prompt,
             task.project_path,
@@ -493,6 +526,19 @@ pub fn update_task_agent_session_id(
     conn.execute(
         "UPDATE tasks SET agent_session_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![agent_session_id, now, id],
+    )?;
+    Ok(())
+}
+
+pub fn update_task_codex_account_id(
+    conn: &Connection,
+    id: &str,
+    codex_account_id: Option<&str>,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE tasks SET codex_account_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![codex_account_id, now, id],
     )?;
     Ok(())
 }
@@ -748,30 +794,108 @@ pub fn get_messages(conn: &Connection, task_id: &str) -> Result<Vec<serde_json::
 
 pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRecord>> {
     let mut stmt = conn.prepare(
-        "SELECT id, agent_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window
+        "SELECT id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window
          FROM tasks ORDER BY created_at DESC"
     )?;
     let tasks = stmt.query_map([], |row| {
         Ok(TaskRecord {
             id: row.get(0)?,
             agent_id: row.get(1)?,
-            model: row.get(2)?,
-            prompt: row.get(3)?,
-            project_path: row.get(4)?,
-            worktree_path: row.get(5)?,
-            branch: row.get(6)?,
-            status: row.get(7)?,
-            status_state: row.get(8)?,
-            cost: row.get(9)?,
-            created_at: row.get(10)?,
-            updated_at: row.get(11)?,
-            title_summary: row.get(12)?,
-            agent_session_id: row.get(13)?,
-            total_tokens: row.get(14)?,
-            context_window: row.get(15)?,
+            codex_account_id: row.get(2)?,
+            model: row.get(3)?,
+            prompt: row.get(4)?,
+            project_path: row.get(5)?,
+            worktree_path: row.get(6)?,
+            branch: row.get(7)?,
+            status: row.get(8)?,
+            status_state: row.get(9)?,
+            cost: row.get(10)?,
+            created_at: row.get(11)?,
+            updated_at: row.get(12)?,
+            title_summary: row.get(13)?,
+            agent_session_id: row.get(14)?,
+            total_tokens: row.get(15)?,
+            context_window: row.get(16)?,
         })
     })?;
     tasks.collect()
+}
+
+pub fn list_codex_accounts(conn: &Connection) -> Result<Vec<CodexAccountRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, label, codex_home, email, plan_type, created_at, updated_at
+         FROM codex_accounts ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(CodexAccountRecord {
+            id: row.get(0)?,
+            label: row.get(1)?,
+            codex_home: row.get(2)?,
+            email: row.get(3)?,
+            plan_type: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_codex_account(conn: &Connection, id: &str) -> Result<Option<CodexAccountRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, label, codex_home, email, plan_type, created_at, updated_at
+         FROM codex_accounts WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query(params![id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(CodexAccountRecord {
+            id: row.get(0)?,
+            label: row.get(1)?,
+            codex_home: row.get(2)?,
+            email: row.get(3)?,
+            plan_type: row.get(4)?,
+            created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn insert_codex_account(conn: &Connection, account: &CodexAccountRecord) -> Result<()> {
+    conn.execute(
+        "INSERT INTO codex_accounts (id, label, codex_home, email, plan_type, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            account.id,
+            account.label,
+            account.codex_home,
+            account.email,
+            account.plan_type,
+            account.created_at,
+            account.updated_at
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update_codex_account_meta(
+    conn: &Connection,
+    id: &str,
+    email: Option<&str>,
+    plan_type: Option<&str>,
+    label: Option<&str>,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE codex_accounts SET email = COALESCE(?1, email), plan_type = COALESCE(?2, plan_type), label = COALESCE(?3, label), updated_at = ?4 WHERE id = ?5",
+        params![email, plan_type, label, now, id],
+    )?;
+    Ok(())
+}
+
+pub fn delete_codex_account(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM codex_accounts WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 /// Get messages as structured MessageRecord for history formatting

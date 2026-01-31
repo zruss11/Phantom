@@ -479,11 +479,37 @@
             throw err;
           });
         }
+        if (channel === 'getCodexAccounts') {
+          return tauriInvoke('codex_accounts_list');
+        }
+        if (channel === 'createCodexAccount') {
+          // args[0] = label (optional), args[1] = codex_home (optional, generates ~/.codex-N if not provided)
+          return tauriInvoke('codex_account_create', {
+            label: args[0] || null,
+            codexHome: args[1] || null
+          });
+        }
+        if (channel === 'importCodexAccount') {
+          // args[0] = label (optional), args[1] = codex_home (optional, defaults to ~/.codex)
+          return tauriInvoke('codex_account_import', {
+            label: args[0] || null,
+            codexHome: args[1] || null
+          });
+        }
+        if (channel === 'loginCodexAccount') {
+          return tauriInvoke('codex_account_login', { accountId: args[0] });
+        }
+        if (channel === 'setActiveCodexAccount') {
+          return tauriInvoke('codex_account_set_active', { accountId: args[0] });
+        }
+        if (channel === 'deleteCodexAccount') {
+          return tauriInvoke('codex_account_delete', { accountId: args[0], removeData: args[1] });
+        }
         if (channel === 'codexLogout') {
           return tauriInvoke('codex_logout');
         }
         if (channel === 'checkCodexAuth') {
-          return tauriInvoke('check_codex_auth');
+          return tauriInvoke('check_codex_auth', { accountId: args[0] || null });
         }
         if (channel === 'claudeLogin') {
           return tauriInvoke('claude_login');
@@ -495,7 +521,7 @@
           return tauriInvoke('check_claude_auth');
         }
         if (channel === 'codexRateLimits') {
-          return tauriInvoke('codex_rate_limits');
+          return tauriInvoke('codex_rate_limits', { accountId: args[0] || null });
         }
         if (channel === 'claudeRateLimits') {
           return tauriInvoke('claude_rate_limits');
@@ -614,6 +640,42 @@
 
       return new Promise(function(resolve) {
         switch (channel) {
+          case 'getCodexAccounts':
+            resolve(mockData.codexAccounts || []);
+            break;
+          case 'createCodexAccount': {
+            var id = 'mock-codex-' + Date.now();
+            var record = { id: id, label: args[0] || 'Mock Codex', codexHome: '/mock/codex/' + id, email: null, planType: null, authenticated: false, isActive: false };
+            mockData.codexAccounts = (mockData.codexAccounts || []).concat([record]);
+            resolve(record);
+            break;
+          }
+          case 'importCodexAccount': {
+            var importId = 'mock-codex-' + Date.now();
+            var importRecord = { id: importId, label: args[0] || 'Imported Codex', codexHome: '/mock/codex/' + importId, email: null, planType: null, authenticated: true, isActive: true };
+            mockData.codexAccounts = (mockData.codexAccounts || []).concat([importRecord]);
+            resolve(importRecord);
+            break;
+          }
+          case 'loginCodexAccount':
+            mockData.codexAccounts = (mockData.codexAccounts || []).map(function(a) {
+              if (a.id === args[0]) {
+                return Object.assign({}, a, { authenticated: true, email: 'mock@example.com' });
+              }
+              return a;
+            });
+            resolve({ authenticated: true, method: 'chatgpt', expires_at: null, email: 'mock@example.com' });
+            break;
+          case 'setActiveCodexAccount':
+            mockData.codexAccounts = (mockData.codexAccounts || []).map(function(a) {
+              return Object.assign({}, a, { isActive: a.id === args[0] });
+            });
+            resolve(true);
+            break;
+          case 'deleteCodexAccount':
+            mockData.codexAccounts = (mockData.codexAccounts || []).filter(function(a) { return a.id !== args[0]; });
+            resolve(true);
+            break;
           case 'getAccountLists':
             resolve(mockData.accountLists);
             break;
