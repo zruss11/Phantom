@@ -97,7 +97,7 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     conn.execute("PRAGMA synchronous = NORMAL", [])?;
     conn.execute("PRAGMA temp_store = MEMORY", [])?;
     conn.execute("PRAGMA cache_size = -16000", [])?;
-    conn.execute("PRAGMA mmap_size = 268435456", [])?; // 256MB memory-mapped I/O
+    let _ = conn.execute("PRAGMA mmap_size = 268435456", []).ok(); // 256MB memory-mapped I/O
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
@@ -624,7 +624,7 @@ pub fn save_message(
 
 #[allow(dead_code)]
 pub fn save_message_attachments(
-    conn: &mut Connection,
+    conn: &Connection,
     task_id: &str,
     message_id: i64,
     attachments: &[AttachmentRecord],
@@ -633,9 +633,8 @@ pub fn save_message_attachments(
         return Ok(());
     }
     let now = chrono::Utc::now().timestamp();
-    let tx = conn.transaction()?;
     for attachment in attachments {
-        tx.execute(
+        conn.execute(
             "INSERT OR REPLACE INTO message_attachments
              (id, task_id, message_id, file_name, mime_type, relative_path, byte_size, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -651,7 +650,6 @@ pub fn save_message_attachments(
             ],
         )?;
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -1116,6 +1114,6 @@ pub fn optimize_and_shutdown(conn: &Connection) -> Result<()> {
     // Let SQLite analyze and optimize based on usage patterns
     conn.execute("PRAGMA optimize", [])?;
     // Merge WAL back into main database file
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)", [])?;
+    conn.execute("PRAGMA wal_checkpoint(PASSIVE)", [])?;
     Ok(())
 }

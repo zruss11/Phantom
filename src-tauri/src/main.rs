@@ -3967,22 +3967,7 @@ pub(crate) async fn start_task_internal(
     let chat_window_label = format!("chat-{}", task_id);
 
     // Persist user message before sending so it renders first in history
-    let message_id = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::save_message(
-            &conn,
-            &task_id,
-            "user_message",
-            Some(&prompt),
-            None,
-            None,
-            None,
-            None,
-            &user_timestamp,
-        )
-        .map_err(|e| e.to_string())?
-    };
-    if !attachments.is_empty() {
+    {
         let attachment_records: Vec<db::AttachmentRecord> = attachments
             .iter()
             .map(|att| db::AttachmentRecord {
@@ -3994,7 +3979,22 @@ pub(crate) async fn start_task_internal(
             })
             .collect();
         let mut conn = state.db.lock().map_err(|e| e.to_string())?;
-        let _ = db::save_message_attachments(&mut conn, &task_id, message_id, &attachment_records);
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let message_id = db::save_message(
+            &tx,
+            &task_id,
+            "user_message",
+            Some(&prompt),
+            None,
+            None,
+            None,
+            None,
+            &user_timestamp,
+        )
+        .map_err(|e| e.to_string())?;
+        db::save_message_attachments(&tx, &task_id, message_id, &attachment_records)
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
 
     // Build attachment info with data URLs for chat display
@@ -9329,8 +9329,9 @@ pub(crate) async fn send_chat_message_internal(
     // Persist user message before sending so reload ordering is correct
     {
         let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
         let message_id = db::save_message(
-            &conn,
+            &tx,
             &task_id,
             "user_message",
             Some(&message),
@@ -9341,7 +9342,9 @@ pub(crate) async fn send_chat_message_internal(
             &user_timestamp,
         )
         .map_err(|e| e.to_string())?;
-        let _ = db::save_message_attachments(&mut conn, &task_id, message_id, &attachments);
+        db::save_message_attachments(&tx, &task_id, message_id, &attachments)
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
 
     if from_discord {
