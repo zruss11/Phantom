@@ -6099,20 +6099,24 @@ async fn codex_account_delete(
         settings.active_codex_account_id.as_deref() == Some(account_id.as_str())
     };
 
+    // Default to NOT removing data since codex homes are now read-only references
+    // to external directories (e.g., ~/.codex) that the user may want to preserve.
+    // Validate the sandbox before deleting the account so state updates still occur.
+    let remove_data_requested = remove_data.unwrap_or(false);
+    let remove_data_allowed = remove_data_requested && is_within_app_sandbox(&codex_home);
+    if remove_data_requested && !remove_data_allowed {
+        println!(
+            "[Codex Account Delete] Refusing to delete Codex home outside sandbox: {}",
+            codex_home.display()
+        );
+    }
+
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::delete_codex_account(&conn, &account_id).map_err(|e| e.to_string())?;
     }
-    // Default to NOT removing data since codex homes are now read-only references
-    // to external directories (e.g., ~/.codex) that the user may want to preserve.
-    if remove_data.unwrap_or(false) {
-        // Only allow deletion if the path is within the app-managed sandbox.
-        // This prevents accidental deletion of user-managed directories like ~/.codex.
-        if !is_within_app_sandbox(&codex_home) {
-            return Err(
-                "Refusing to delete Codex home; remove it manually if desired.".to_string(),
-            );
-        }
+
+    if remove_data_allowed {
         let _ = std::fs::remove_dir_all(&codex_home);
     }
 
