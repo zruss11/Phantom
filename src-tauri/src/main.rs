@@ -6506,18 +6506,31 @@ async fn get_task_commit_timeline(
     // Determine compare reference
     let compare_mode = compare.as_deref().unwrap_or("main");
     let base_ref = match compare_mode {
-        "main" => get_primary_remote_branch(&repo_root).await.unwrap_or_else(|_| "main".to_string()),
-        "base" | "history" => get_merge_base(&repo_root).await.unwrap_or_else(|_| "HEAD~10".to_string()),
-        _ => "main".to_string(),
-    };
+        "main" => get_primary_remote_branch(&repo_root).await.ok(),
+        "base" | "history" => get_merge_base(&repo_root).await.ok(),
+        _ => None,
+    }
+    .filter(|base| !base.is_empty());
+    let base_label = base_ref
+        .clone()
+        .unwrap_or_else(|| compare_mode.to_string());
 
     // Get commits: git log --format="%h|%s|%an|%ar" merge-base..HEAD
-    let log_output = worktree::run_git_command(
-        &repo_root,
-        &["log", "--format=%h|%s|%an|%ar", &format!("{}..HEAD", base_ref)],
-    )
-    .await
-    .unwrap_or_default();
+    let log_output = if let Some(base_ref) = base_ref.as_deref() {
+        worktree::run_git_command(
+            &repo_root,
+            &["log", "--format=%h|%s|%an|%ar", &format!("{}..HEAD", base_ref)],
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        worktree::run_git_command(
+            &repo_root,
+            &["log", "--format=%h|%s|%an|%ar", "-n", "10", "HEAD"],
+        )
+        .await
+        .unwrap_or_default()
+    };
 
     let commits: Vec<ReviewCommit> = log_output
         .lines()
@@ -6539,7 +6552,7 @@ async fn get_task_commit_timeline(
 
     Ok(ReviewCommitTimeline {
         commits,
-        base_branch: base_ref,
+        base_branch: base_label,
         current_branch,
     })
 }
