@@ -1850,14 +1850,30 @@ impl AgentProcessClient {
         loop {
             // Claude can take a while to initialize in a large repo (context/plugins).
             // Don't hang forever, but give it a realistic window.
-            let next = timeout(Duration::from_secs(600), stdout_reader.next_line()).await;
-            let line = match next {
-                Ok(Ok(Some(l))) => l,
-                Ok(Ok(None)) => break,
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => {
+            // Also check for cancellation to support soft stop (same pattern as Codex path).
+            let line = tokio::select! {
+                _ = async {
+                    if let Some(token) = cancel_token {
+                        token.cancelled().await
+                    } else {
+                        std::future::pending::<()>().await
+                    }
+                } => {
+                    // Cancellation requested - kill child and exit gracefully
+                    eprintln!("[Harness] Generation cancelled by user, killing subprocess");
                     let _ = child.kill().await;
-                    return Err(anyhow::anyhow!("timeout waiting for claude output"));
+                    break;
+                }
+                next = timeout(Duration::from_secs(600), stdout_reader.next_line()) => {
+                    match next {
+                        Ok(Ok(Some(l))) => l,
+                        Ok(Ok(None)) => break,
+                        Ok(Err(e)) => return Err(e.into()),
+                        Err(_) => {
+                            let _ = child.kill().await;
+                            return Err(anyhow::anyhow!("timeout waiting for claude output"));
+                        }
+                    }
                 }
             };
 

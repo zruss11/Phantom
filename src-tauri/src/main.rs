@@ -4914,21 +4914,43 @@ async fn soft_stop_task(
 pub(crate) async fn soft_stop_task_internal(
     task_id: String,
     state: &AppState,
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
     println!("[Harness] soft_stop_task: task_id={}", task_id);
 
     // Get the session handle without removing it (session stays alive)
     let handle_ref = {
         let sessions = state.sessions.lock().await;
+        println!(
+            "[Harness] soft_stop_task: {} sessions in map, looking for {}",
+            sessions.len(),
+            task_id
+        );
         sessions.get(&task_id).cloned()
     };
 
     if let Some(handle_ref) = handle_ref {
         // Cancel the current generation
         let handle = handle_ref.lock().await;
+        let was_already_cancelled = handle.cancel_token.is_cancelled();
         handle.cancel_token.cancel();
-        println!("[Harness] Cancelled generation for task_id={}", task_id);
+        println!(
+            "[Harness] Cancelled generation for task_id={} (was_already_cancelled={})",
+            task_id, was_already_cancelled
+        );
+
+        // Emit a status update immediately so the UI reflects the stop
+        // (the streaming code will also emit when it detects cancellation)
+        let chat_window_label = format!(
+            "chat-{}",
+            task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
+        );
+        if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
+            let _ = chat_window.emit("ChatLogStatus", (&task_id, "Stopping...", "stopping"));
+        }
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("StatusUpdate", (&task_id, "Stopping...", "orange", "stopping"));
+        }
     } else {
         println!(
             "[Harness] soft_stop_task: no session found for task_id={}",

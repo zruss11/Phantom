@@ -1725,9 +1725,8 @@ function StartTask(id) {
 }
 
 function StopTask(id) {
-  // Use soft stop to cancel generation without killing the session
-  // This allows the in-flight response to complete and preserves the session for recovery
-  ipcRenderer.send("StopGeneration", id);
+  // Hard stop: fully terminates the session and marks task as stopped
+  ipcRenderer.send("StopTask", id);
   // UI update will be handled by StatusUpdate event from backend
 }
 
