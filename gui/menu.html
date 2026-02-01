@@ -1127,48 +1127,52 @@
         <div class="row no-gutters">
           <div class="col-12">
             <div class="card mt-4 mr-4 ml-4 review-header-card">
-              <div class="card-body pb-3">
-                <div class="container-fluid p-0">
-                  <div class="row no-gutters align-items-center">
-                    <div class="col-12 col-lg-4">
-                      <h5 class="mb-0 review-title">
-                        <i class="fal fa-code-merge mr-2"></i>
-                        Review Center
-                      </h5>
-                      <div class="review-subtitle text-muted">
-                        Inspect diffs and leave notes before merging.
-                      </div>
+              <div class="card-body">
+                <div class="review-header-content">
+                  <div class="review-header-title">
+                    <div class="review-icon-wrap">
+                      <i class="fal fa-code-merge"></i>
                     </div>
-                    <div class="col-12 col-lg-8 mt-3 mt-lg-0">
-                      <div class="review-controls">
-                        <div class="review-control">
-                          <label class="muted-label mb-1">Project</label>
-                          <div id="reviewProjectSelector" class="custom-dropdown-wrapper"></div>
-                        </div>
-                        <div class="review-control">
-                          <label class="muted-label mb-1">Task</label>
-                          <div id="reviewTaskSelector" class="custom-dropdown-wrapper"></div>
-                        </div>
-                        <div class="review-control">
-                          <label class="muted-label mb-1">Compare</label>
-                          <div class="review-toggle" id="reviewCompareToggle">
-                            <button type="button" class="review-toggle-btn active" data-compare="main">vs Main</button>
-                            <button type="button" class="review-toggle-btn" data-compare="base">vs Base</button>
-                            <button type="button" class="review-toggle-btn" data-compare="history">History</button>
-                          </div>
-                        </div>
-                        <div class="review-control review-control-actions">
-                          <label class="muted-label mb-1">Actions</label>
-                          <div class="review-header-actions">
-                            <button type="button" class="btn btn-default btn-sm btn-brand" id="reviewRefreshBtn">
-                              <i class="fal fa-sync-alt"></i> Refresh
-                            </button>
-                            <button type="button" class="btn btn-default btn-sm" id="reviewOpenWorktreeBtn" disabled>
-                              <i class="fal fa-folder-open"></i> Open
-                            </button>
-                          </div>
-                        </div>
-                      </div>
+                    <div class="review-title-text">
+                      <h5 class="review-title">Review Center</h5>
+                      <p class="review-subtitle">Inspect diffs and leave notes before merging</p>
+                    </div>
+                  </div>
+                  <div class="review-header-actions-right">
+                    <button type="button" class="review-icon-btn" id="reviewRefreshBtn" title="Refresh">
+                      <i class="fal fa-sync-alt"></i>
+                    </button>
+                    <button type="button" class="review-icon-btn" id="reviewOpenWorktreeBtn" disabled title="Open in Finder">
+                      <i class="fal fa-folder-open"></i>
+                    </button>
+                  </div>
+                </div>
+                <div class="review-controls-bar">
+                  <div class="review-selectors">
+                    <div class="review-selector-group">
+                      <label class="review-selector-label">Project</label>
+                      <div id="reviewProjectSelector" class="custom-dropdown-wrapper"></div>
+                    </div>
+                    <div class="review-selector-group review-selector-task">
+                      <label class="review-selector-label">Task</label>
+                      <div id="reviewTaskSelector" class="custom-dropdown-wrapper"></div>
+                    </div>
+                  </div>
+                  <div class="review-compare-section">
+                    <label class="review-selector-label">Compare</label>
+                    <div class="review-toggle-group" id="reviewCompareToggle">
+                      <button type="button" class="review-toggle-btn active" data-compare="main">
+                        <i class="fal fa-code-branch"></i>
+                        <span>vs Main</span>
+                      </button>
+                      <button type="button" class="review-toggle-btn" data-compare="base">
+                        <i class="fal fa-layer-group"></i>
+                        <span>vs Base</span>
+                      </button>
+                      <button type="button" class="review-toggle-btn" data-compare="history">
+                        <i class="fal fa-history"></i>
+                        <span>History</span>
+                      </button>
                     </div>
                   </div>
                 </div>
