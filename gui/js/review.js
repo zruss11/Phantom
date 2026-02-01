@@ -356,11 +356,13 @@
         : state.tasks;
 
       filteredTasks.forEach((task) => {
+        const taskId = getTaskId(task);
+        if (!taskId) return;
         const prompt = task.prompt || "";
         const truncatedPrompt =
           prompt.length > 50 ? prompt.substring(0, 50) + "..." : prompt;
         items.push({
-          value: task.id,
+          value: taskId,
           name: friendlyTaskName(task),
           description: truncatedPrompt,
         });
@@ -369,7 +371,10 @@
       if (reviewTaskDropdown) {
         reviewTaskDropdown.setOptions(items);
         // Reset selection if current task is not in filtered list
-        if (state.selectedTaskId && !filteredTasks.find((t) => t.id === state.selectedTaskId)) {
+        if (
+          state.selectedTaskId &&
+          !filteredTasks.find((t) => getTaskId(t) === state.selectedTaskId)
+        ) {
           reviewTaskDropdown.setValue("");
           state.selectedTaskId = null;
         }
@@ -379,9 +384,22 @@
     }
   }
 
+  function getTaskId(task) {
+    if (!task) return null;
+    const rawId =
+      task.id ??
+      task.ID ??
+      task.task_id ??
+      task.taskId ??
+      task.taskID ??
+      null;
+    if (rawId === null || rawId === undefined) return null;
+    return String(rawId);
+  }
+
   function findTask(taskId) {
     if (!taskId) return null;
-    return state.tasks.find((t) => t.id === taskId) || null;
+    return state.tasks.find((t) => getTaskId(t) === taskId) || null;
   }
 
   /**
@@ -405,7 +423,7 @@
    * Priority: title_summary > branch > short ID
    */
   function friendlyTaskName(task) {
-    const shortId = shortTaskId(task.id);
+    const shortId = shortTaskId(getTaskId(task));
     const title = task.title_summary || task.titleSummary;
     const branch = task.branch || task.branch_name;
 
@@ -589,7 +607,7 @@
       console.log("[Review] Approve clicked (TODO)");
     });
 
-    window.addEventListener("phantom:navigate", (event) => {
+    window.addEventListener("PhantomNavigate", (event) => {
       const pageId = event?.detail?.pageId;
       if (pageId !== "reviewPage") return;
       initReviewCenter();

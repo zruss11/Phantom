@@ -6321,8 +6321,14 @@ fn parse_unified_to_split(diff: &str) -> ReviewSplitDiff {
     let mut right: Vec<ReviewSplitLine> = Vec::new();
     let mut left_num: u32 = 0;
     let mut right_num: u32 = 0;
+    let mut in_binary_patch = false;
 
     for line in diff.lines() {
+        if line.starts_with("diff ") {
+            // New file diff resets any binary patch context.
+            in_binary_patch = false;
+            continue;
+        }
         if line.starts_with("@@") {
             // Parse hunk header: @@ -start,count +start,count @@
             if let Some(captures) = parse_hunk_header(line) {
@@ -6331,7 +6337,14 @@ fn parse_unified_to_split(diff: &str) -> ReviewSplitDiff {
             }
             continue;
         }
-        if line.starts_with("---") || line.starts_with("+++") || line.starts_with("diff ") || line.starts_with("index ") {
+        if line.starts_with("---") || line.starts_with("+++") || line.starts_with("index ") {
+            continue;
+        }
+        if line.starts_with("GIT binary patch") {
+            in_binary_patch = true;
+            continue;
+        }
+        if in_binary_patch || is_diff_metadata_line(line) {
             continue;
         }
 
@@ -6382,6 +6395,20 @@ fn parse_unified_to_split(diff: &str) -> ReviewSplitDiff {
     }
 
     ReviewSplitDiff { left, right }
+}
+
+fn is_diff_metadata_line(line: &str) -> bool {
+    line == "\\ No newline at end of file"
+        || line.starts_with("Binary files ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new mode ")
+        || line.starts_with("similarity index ")
+        || line.starts_with("rename from ")
+        || line.starts_with("rename to ")
+        || line.starts_with("literal ")
+        || line.starts_with("delta ")
 }
 
 /// Parse hunk header to extract line numbers.
@@ -6824,10 +6851,22 @@ async fn gather_code_review_context(project_path: String) -> Result<CodeReviewCo
         Ok(s) => s.trim().to_string(),
         Err(_) => {
             // Fallback: try without origin/ prefix
-            worktree::run_git_command(&path, &["merge-base", &base_branch, "HEAD"])
-                .await
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| "HEAD~10".to_string())
+            match worktree::run_git_command(&path, &["merge-base", &base_branch, "HEAD"]).await {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => {
+                    // Safe fallback for short histories: use root commit, then HEAD.
+                    let root_commit = worktree::run_git_command(
+                        &path,
+                        &["rev-list", "--max-parents=0", "HEAD"],
+                    )
+                    .await
+                    .ok()
+                    .and_then(|s| s.lines().next().map(|line| line.trim().to_string()))
+                    .filter(|s| !s.is_empty());
+
+                    root_commit.unwrap_or_else(|| "HEAD".to_string())
+                }
+            }
         }
     };
 
