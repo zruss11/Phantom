@@ -6542,18 +6542,22 @@ async fn get_task_commit_timeline(
         .clone()
         .unwrap_or_else(|| compare_mode.to_string());
 
-    // Get commits: git log --format="%h|%s|%an|%ar" merge-base..HEAD
+    // Get commits: git log --format="%h%x1f%s%x1f%an%x1f%ar" merge-base..HEAD
     let log_output = if let Some(base_ref) = base_ref.as_deref() {
         worktree::run_git_command(
             &repo_root,
-            &["log", "--format=%h|%s|%an|%ar", &format!("{}..HEAD", base_ref)],
+            &[
+                "log",
+                "--format=%h%x1f%s%x1f%an%x1f%ar",
+                &format!("{}..HEAD", base_ref),
+            ],
         )
         .await
         .unwrap_or_default()
     } else {
         worktree::run_git_command(
             &repo_root,
-            &["log", "--format=%h|%s|%an|%ar", "-n", "10", "HEAD"],
+            &["log", "--format=%h%x1f%s%x1f%an%x1f%ar", "-n", "10", "HEAD"],
         )
         .await
         .unwrap_or_default()
@@ -6563,7 +6567,7 @@ async fn get_task_commit_timeline(
         .lines()
         .filter(|line| !line.is_empty())
         .filter_map(|line| {
-            let parts: Vec<&str> = line.splitn(4, '|').collect();
+            let parts: Vec<&str> = line.splitn(4, '\x1f').collect();
             if parts.len() >= 4 {
                 Some(ReviewCommit {
                     hash: parts[0].to_string(),
