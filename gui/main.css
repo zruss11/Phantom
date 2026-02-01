@@ -4494,10 +4494,25 @@ input:checked + .slider:before {
 }
 
 .review-page .muted-label {
-  font-size: 12px;
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.5px;
   color: rgba(255, 255, 255, 0.55);
+}
+
+.review-page .form-control {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+}
+
+.review-page .form-control:focus {
+  background: rgba(0, 0, 0, 0.4);
+  border-color: rgba(247, 138, 151, 0.5);
+  box-shadow: 0 0 0 2px rgba(247, 138, 151, 0.1);
 }
 
 .review-page .review-controls {
@@ -4547,35 +4562,42 @@ input:checked + .slider:before {
   display: grid;
   grid-template-columns: 260px 1fr;
   gap: 16px;
-  padding: 0 16px;
-  height: calc(100vh - 240px);
-  min-height: 420px;
+  margin: 16px 1.5rem 0;
+  height: calc(100vh - 300px);
+  min-height: 380px;
 }
 
 .review-page .review-panel {
-  background: rgba(36, 30, 40, 0.9);
+  background: linear-gradient(
+    160deg,
+    rgba(18, 16, 20, 0.95),
+    rgba(34, 28, 36, 0.92)
+  );
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 16px;
   overflow: hidden;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
 }
 
 .review-page .review-panel-header {
-  padding: 12px 14px;
+  padding: 14px 16px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
   display: flex;
   align-items: center;
   justify-content: space-between;
+  font-family: "proxima_nova_ltsemibold", sans-serif;
   font-size: 13px;
-  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: rgba(255, 255, 255, 0.9);
 }
 
 .review-page .review-panel-body {
   flex: 1;
   min-height: 0;
-  padding: 8px 0;
+  padding: 0;
 }
 
 .review-page .review-badge {
@@ -4588,9 +4610,10 @@ input:checked + .slider:before {
 }
 
 .review-page .review-empty {
-  padding: 14px 14px;
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 12px;
+  padding: 16px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  font-style: italic;
 }
 
 .review-page .review-file-item {
@@ -4715,9 +4738,10 @@ input:checked + .slider:before {
 }
 
 .review-page .review-diff-placeholder {
-  padding: 18px 14px;
-  color: rgba(255, 255, 255, 0.55);
-  font-size: 12px;
+  padding: 16px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  font-style: italic;
 }
 
 .review-page .review-split-view {
@@ -4820,8 +4844,13 @@ input:checked + .slider:before {
 }
 
 .review-page .review-timeline-card {
-  background: rgba(36, 30, 40, 0.9);
+  background: linear-gradient(
+    160deg,
+    rgba(18, 16, 20, 0.95),
+    rgba(34, 28, 36, 0.92)
+  );
   border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
 }
 
 .review-page .review-timeline-header {
@@ -4865,7 +4894,11 @@ input:checked + .slider:before {
   .review-page .review-grid {
     grid-template-columns: 1fr;
     height: auto;
-    padding: 0 16px;
+    margin: 16px 1.5rem 0;
+  }
+
+  .review-page .review-files {
+    max-height: 200px;
   }
 }
 
