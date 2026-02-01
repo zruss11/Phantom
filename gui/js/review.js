@@ -13,6 +13,7 @@
     compareMode: "main",
     viewMode: "split",
     commits: [],
+    visibilityObserver: null,
   };
 
   // Custom dropdown instances
@@ -612,6 +613,28 @@
       if (pageId !== "reviewPage") return;
       initReviewCenter();
     });
+
+    watchReviewVisibility();
+  }
+
+  function watchReviewVisibility() {
+    const page = $("reviewPage");
+    if (!page || state.visibilityObserver) return;
+
+    state.visibilityObserver = new MutationObserver(() => {
+      if (!page.hasAttribute("hidden")) {
+        initReviewCenter();
+      }
+    });
+
+    state.visibilityObserver.observe(page, {
+      attributes: true,
+      attributeFilter: ["hidden"],
+    });
+
+    if (!page.hasAttribute("hidden")) {
+      initReviewCenter();
+    }
   }
 
   async function initReviewCenter() {
