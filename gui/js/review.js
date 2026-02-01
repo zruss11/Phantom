@@ -12,6 +12,9 @@
     viewMode: "split",
   };
 
+  // Custom dropdown instance for task selector
+  let reviewTaskDropdown = null;
+
   function $(id) {
     return document.getElementById(id);
   }
@@ -232,10 +235,23 @@
   }
 
   async function loadTasksIntoSelector() {
-    const selector = $("reviewTaskSelector");
-    if (!selector) return;
+    const container = $("reviewTaskSelector");
+    if (!container) return;
 
-    selector.innerHTML = '<option value="">Select a task...</option>';
+    // Initialize dropdown if not already done
+    if (!reviewTaskDropdown && window.CustomDropdown) {
+      reviewTaskDropdown = new window.CustomDropdown({
+        container: container,
+        items: [{ value: "", name: "Select a task...", description: "" }],
+        placeholder: "Select a task...",
+        defaultValue: "",
+        onChange: async function (value) {
+          state.selectedTaskId = value || null;
+          state.selectedFilePath = null;
+          await refreshFiles();
+        },
+      });
+    }
 
     if (!ipcRenderer) return;
 
@@ -243,16 +259,24 @@
       const tasks = await ipcRenderer.invoke("loadTasks");
       state.tasks = Array.isArray(tasks) ? tasks : [];
 
+      const items = [{ value: "", name: "Select a task...", description: "" }];
+
       state.tasks.forEach((task) => {
         const id = task.id;
         const branch = task.branch || task.branch_name || "";
-        const labelBits = [`Task #${id}`];
-        if (branch) labelBits.push(branch);
-        const opt = document.createElement("option");
-        opt.value = id;
-        opt.textContent = labelBits.join(" — ");
-        selector.appendChild(opt);
+        const prompt = task.prompt || "";
+        const truncatedPrompt =
+          prompt.length > 50 ? prompt.substring(0, 50) + "..." : prompt;
+        items.push({
+          value: id,
+          name: branch ? `#${id} — ${branch}` : `Task #${id}`,
+          description: truncatedPrompt,
+        });
       });
+
+      if (reviewTaskDropdown) {
+        reviewTaskDropdown.setOptions(items);
+      }
     } catch (err) {
       console.warn("[Review] loadTasks failed:", err);
     }
@@ -366,14 +390,7 @@
     if (state.eventsBound) return;
     state.eventsBound = true;
 
-    const selector = $("reviewTaskSelector");
-    if (selector) {
-      selector.addEventListener("change", async (e) => {
-        state.selectedTaskId = e.target.value || null;
-        state.selectedFilePath = null;
-        await refreshFiles();
-      });
-    }
+    // Note: Task selector events are handled by CustomDropdown's onChange callback
 
     const compareToggle = $("reviewCompareToggle");
     if (compareToggle) {

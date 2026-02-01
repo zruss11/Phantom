@@ -4515,6 +4515,43 @@ input:checked + .slider:before {
   box-shadow: 0 0 0 2px rgba(247, 138, 151, 0.1);
 }
 
+.review-page .custom-dropdown-trigger {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 13px;
+  padding: 6px 12px;
+  min-width: 200px;
+}
+
+.review-page .custom-dropdown-trigger:hover,
+.review-page .custom-dropdown-trigger.open {
+  background: rgba(0, 0, 0, 0.4);
+  border-color: rgba(247, 138, 151, 0.5);
+}
+
+.review-page .custom-dropdown-panel {
+  background: rgba(18, 16, 20, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.review-page .custom-dropdown-item {
+  padding: 8px 12px;
+}
+
+.review-page .custom-dropdown-item:hover,
+.review-page .custom-dropdown-item.focused {
+  background: rgba(247, 138, 151, 0.1);
+}
+
+.review-page .custom-dropdown-item.selected {
+  background: rgba(247, 138, 151, 0.15);
+  color: #f78a97;
+}
+
 .review-page .review-controls {
   display: grid;
   grid-template-columns: minmax(200px, 1fr) auto auto;
