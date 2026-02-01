@@ -346,8 +346,8 @@ impl EventHandler for DiscordEventHandler {
                                 .send_message(
                                     &ctx.http,
                                     CreateMessage::new().content(format!(
-                                        "Task started: `{}`. A thread will appear shortly.",
-                                        task_id
+                                        "Task `#{}` started. A thread will appear shortly.",
+                                        short_task_id(&task_id)
                                     )),
                                 )
                                 .await;
@@ -570,8 +570,8 @@ impl EventHandler for DiscordEventHandler {
                         .await;
                         let content = match result {
                             Ok(task_id) => format!(
-                                "Task started: `{}`. A thread will appear shortly.",
-                                task_id
+                                "Task `#{}` started. A thread will appear shortly.",
+                                short_task_id(&task_id)
                             ),
                             Err(err) => format!("Failed to create task: {}", err),
                         };
@@ -848,8 +848,8 @@ impl EventHandler for DiscordEventHandler {
                         .await;
                         let content = match result {
                             Ok(task_id) => format!(
-                                "Task started: `{}`. A thread will appear shortly.",
-                                task_id
+                                "Task `#{}` started. A thread will appear shortly.",
+                                short_task_id(&task_id)
                             ),
                             Err(err) => format!("Failed to create task: {}", err),
                         };
@@ -1027,6 +1027,13 @@ impl EventHandler for DiscordEventHandler {
             _ => {}
         }
     }
+}
+
+/// Extracts a short, friendly identifier from a full task ID.
+/// For IDs like "task-1769976653565-4bddf02d", returns "4bddf02d".
+fn short_task_id(full_id: &str) -> &str {
+    // Split by '-' and get the last part (UUID suffix)
+    full_id.rsplit('-').next().unwrap_or(full_id)
 }
 
 fn parse_user_input_answers(

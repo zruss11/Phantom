@@ -24,7 +24,7 @@ navLinks.click(function () {
   // Fire a navigation event so other modules can react without polling.
   try {
     window.dispatchEvent(
-      new CustomEvent("phantom:navigate", { detail: { pageId: page } }),
+      new CustomEvent("PhantomNavigate", { detail: { pageId: page } }),
     );
   } catch (e) {
     // ignore
@@ -66,7 +66,7 @@ function switchToPage(pageId) {
     // Fire a navigation event so other modules can react without polling.
     try {
       window.dispatchEvent(
-        new CustomEvent("phantom:navigate", { detail: { pageId: pageId } }),
+        new CustomEvent("PhantomNavigate", { detail: { pageId: pageId } }),
       );
     } catch (e) {
       // ignore

@@ -54,11 +54,11 @@
     on: function(channel, callback) {
       if (tauriEvents && typeof tauriEvents.listen === 'function') {
         tauriEvents.listen(channel, function(event) {
-          var payload = event && event.payload;
-          if (Array.isArray(payload)) {
-            callback.apply(null, [null].concat(payload));
-          } else if (payload !== undefined) {
-            callback(null, payload);
+          var eventPayload = event && event.payload;
+          if (Array.isArray(eventPayload)) {
+            callback.apply(null, [null].concat(eventPayload));
+          } else if (eventPayload !== undefined) {
+            callback(null, eventPayload);
           } else {
             callback(null);
           }
@@ -76,8 +76,8 @@
       console.log('[Tauri Bridge] Send: ' + channel, args);
       if (tauriInvoke) {
         if (channel === 'CreateAgentSession') {
-          var payload = args[0] || {};
-          var allowConcurrent = !!payload.multiCreate;
+          var createPayload = args[0] || {};
+          var allowConcurrent = !!createPayload.multiCreate;
           // Double-click protection using module-scoped flag (more reliable than DOM state)
           if (createSessionInProgress && !allowConcurrent) {
             console.log('[Tauri Bridge] CreateAgentSession already in progress, ignoring');
@@ -93,18 +93,18 @@
             btn.textContent = 'Creating...';
           }
 
-          tauriInvoke('create_agent_session', { payload: payload })
+          tauriInvoke('create_agent_session', { payload: createPayload })
             .then(function(result) {
               console.log('[Tauri Bridge] CreateAgentSession result:', result);
               var agentTask = {
                 ID: result.task_id,
-                agent: payload.agentId || 'codex',
-                model: payload.execModel || 'default',
+                agent: createPayload.agentId || 'codex',
+                model: createPayload.execModel || 'default',
                 Status: 'Ready',
                 statusState: 'idle',
                 cost: 0,
                 worktreePath: result.worktreePath || null,
-                projectPath: payload.projectPath || null
+                projectPath: createPayload.projectPath || null
               };
 
               // Emit AddTask event - handler will append to DOM
@@ -162,11 +162,11 @@
         case 'CreateAgentSession': {
           console.log('[Tauri Bridge] CreateAgentSession:', args[0]);
           var sessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-          var payload = args[0] || {};
+          var sessionPayload = args[0] || {};
           var agentTask = {
             ID: sessionId,
-            agent: payload.agentId || 'codex',
-            model: payload.execModel || 'default',
+            agent: sessionPayload.agentId || 'codex',
+            model: sessionPayload.execModel || 'default',
             Status: 'Initializing...',
             statusState: 'running',
             cost: 0,
@@ -535,6 +535,32 @@
         if (channel === 'getWorktreeDiffStats') {
           return tauriInvoke('get_task_diff_stats', { taskId: args[0] });
         }
+        if (channel === 'getTaskDiffFiles') {
+          var diffFilesPayload = args[0] || {};
+          return tauriInvoke('get_task_diff_files', {
+            taskId: diffFilesPayload.taskId,
+            compare: diffFilesPayload.compare || null
+          });
+        }
+        if (channel === 'getTaskFileDiff') {
+          var fileDiffPayload = args[0] || {};
+          return tauriInvoke('get_task_file_diff', {
+            taskId: fileDiffPayload.taskId,
+            filePath: fileDiffPayload.filePath,
+            compare: fileDiffPayload.compare || null,
+            view: fileDiffPayload.view || null
+          });
+        }
+        if (channel === 'getReviewProjects') {
+          return tauriInvoke('get_review_projects');
+        }
+        if (channel === 'getTaskCommitTimeline') {
+          var commitTimelinePayload = args[0] || {};
+          return tauriInvoke('get_task_commit_timeline', {
+            taskId: commitTimelinePayload.taskId,
+            compare: commitTimelinePayload.compare || null
+          });
+        }
         if (channel === 'dismissNotificationsForTask') {
           return tauriInvoke('dismiss_notifications_for_task', args[0] || {});
         }
@@ -563,7 +589,7 @@
         if (channel === 'getClaudeCommands') {
           return tauriInvoke('get_claude_commands', { projectPath: args[0] || null });
         }
-          // Mode commands
+        // Mode commands
         if (channel === 'getAgentModes') {
           return tauriInvoke('get_agent_modes', { agentId: args[0] });
         }
@@ -743,6 +769,20 @@
               diff: '--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,6 +10,8 @@ fn main() {\n     println!("Hello, world!");\n+    // New feature added\n+    do_something_cool();\n }',
               commit_log: 'abc1234 feat: add cool feature (Dev, 2 hours ago)\ndef5678 fix: minor bug fix (Dev, 1 day ago)',
               diff_truncated: false
+            });
+            break;
+          case 'getTaskDiffFiles':
+            resolve({
+              files: [
+                { path: 'src-tauri/src/main.rs', additions: 12, deletions: 3 },
+                { path: 'gui/menu.html', additions: 44, deletions: 0 },
+                { path: 'gui/js/review.js', additions: 120, deletions: 0 }
+              ]
+            });
+            break;
+          case 'getTaskFileDiff':
+            resolve({
+              diff: 'diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs\n@@ -1,3 +1,4 @@\n fn main() {\n-  println!("hello");\n+  println!("review");\n }\n'
             });
             break;
           case 'loadTasks':

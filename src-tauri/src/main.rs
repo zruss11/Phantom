@@ -7109,6 +7109,496 @@ async fn get_task_diff_stats(
     })
 }
 
+// Review Center - diff viewer with real git integration.
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewDiffFile {
+    path: String,
+    additions: u64,
+    deletions: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewDiffFilesResult {
+    files: Vec<ReviewDiffFile>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewSplitLine {
+    number: Option<u32>,
+    text: String,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewSplitDiff {
+    left: Vec<ReviewSplitLine>,
+    right: Vec<ReviewSplitLine>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewFileDiffResult {
+    diff: serde_json::Value,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewCommit {
+    hash: String,
+    subject: String,
+    author: String,
+    time_ago: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewCommitTimeline {
+    commits: Vec<ReviewCommit>,
+    base_branch: String,
+    current_branch: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewProject {
+    path: String,
+    name: String,
+    task_count: i64,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ReviewProjectsResult {
+    projects: Vec<ReviewProject>,
+}
+
+/// Get the merge-base between HEAD and main/master branch.
+async fn get_merge_base(repo_path: &std::path::PathBuf) -> Result<String, String> {
+    // Try main first, then master
+    for base_branch in &["main", "master"] {
+        let result = worktree::run_git_command(
+            repo_path,
+            &["merge-base", "HEAD", base_branch],
+        )
+        .await;
+        if let Ok(hash) = result {
+            if !hash.is_empty() {
+                return Ok(hash);
+            }
+        }
+    }
+    // Fallback: use first commit
+    worktree::run_git_command(repo_path, &["rev-list", "--max-parents=0", "HEAD"])
+        .await
+        .map(|s| s.lines().next().unwrap_or("").to_string())
+}
+
+/// Get the primary remote branch (origin/main or origin/master).
+async fn get_primary_remote_branch(repo_path: &std::path::PathBuf) -> Result<String, String> {
+    for branch in &["origin/main", "origin/master", "main", "master"] {
+        let result = worktree::run_git_command(
+            repo_path,
+            &["rev-parse", "--verify", branch],
+        )
+        .await;
+        if result.is_ok() {
+            return Ok(branch.to_string());
+        }
+    }
+    Err("No main/master branch found".to_string())
+}
+
+/// Parse unified diff into split view format.
+fn parse_unified_to_split(diff: &str) -> ReviewSplitDiff {
+    let mut left: Vec<ReviewSplitLine> = Vec::new();
+    let mut right: Vec<ReviewSplitLine> = Vec::new();
+    let mut left_num: u32 = 0;
+    let mut right_num: u32 = 0;
+    let mut in_binary_patch = false;
+
+    for line in diff.lines() {
+        if line.starts_with("diff ") {
+            // New file diff resets any binary patch context.
+            in_binary_patch = false;
+            continue;
+        }
+        if line.starts_with("@@") {
+            // Parse hunk header: @@ -start,count +start,count @@
+            if let Some(captures) = parse_hunk_header(line) {
+                left_num = captures.0.saturating_sub(1);
+                right_num = captures.1.saturating_sub(1);
+            }
+            continue;
+        }
+        if line.starts_with("---") || line.starts_with("+++") || line.starts_with("index ") {
+            continue;
+        }
+        if line.starts_with("GIT binary patch") {
+            in_binary_patch = true;
+            continue;
+        }
+        if in_binary_patch || is_diff_metadata_line(line) {
+            continue;
+        }
+
+        if line.starts_with('-') {
+            left_num += 1;
+            left.push(ReviewSplitLine {
+                number: Some(left_num),
+                text: line.get(1..).unwrap_or("").to_string(),
+                kind: Some("del".to_string()),
+            });
+            right.push(ReviewSplitLine {
+                number: None,
+                text: String::new(),
+                kind: Some("del".to_string()),
+            });
+        } else if line.starts_with('+') {
+            right_num += 1;
+            left.push(ReviewSplitLine {
+                number: None,
+                text: String::new(),
+                kind: Some("add".to_string()),
+            });
+            right.push(ReviewSplitLine {
+                number: Some(right_num),
+                text: line.get(1..).unwrap_or("").to_string(),
+                kind: Some("add".to_string()),
+            });
+        } else {
+            // Context line (starts with space or is empty)
+            left_num += 1;
+            right_num += 1;
+            let text = if line.starts_with(' ') {
+                line.get(1..).unwrap_or("").to_string()
+            } else {
+                line.to_string()
+            };
+            left.push(ReviewSplitLine {
+                number: Some(left_num),
+                text: text.clone(),
+                kind: None,
+            });
+            right.push(ReviewSplitLine {
+                number: Some(right_num),
+                text,
+                kind: None,
+            });
+        }
+    }
+
+    ReviewSplitDiff { left, right }
+}
+
+fn is_diff_metadata_line(line: &str) -> bool {
+    line == "\\ No newline at end of file"
+        || line.starts_with("Binary files ")
+        || line.starts_with("new file mode ")
+        || line.starts_with("deleted file mode ")
+        || line.starts_with("old mode ")
+        || line.starts_with("new mode ")
+        || line.starts_with("similarity index ")
+        || line.starts_with("rename from ")
+        || line.starts_with("rename to ")
+        || line.starts_with("literal ")
+        || line.starts_with("delta ")
+}
+
+/// Parse hunk header to extract line numbers.
+fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
+    // Format: @@ -old_start[,old_count] +new_start[,new_count] @@
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let old_part = parts.get(1)?;
+    let new_part = parts.get(2)?;
+
+    let old_start = old_part
+        .trim_start_matches('-')
+        .split(',')
+        .next()?
+        .parse::<u32>()
+        .ok()?;
+    let new_start = new_part
+        .trim_start_matches('+')
+        .split(',')
+        .next()?
+        .parse::<u32>()
+        .ok()?;
+
+    Some((old_start, new_start))
+}
+
+/// Truncate diff output if too large.
+fn truncate_diff(diff: &str, max_bytes: usize) -> String {
+    if diff.len() <= max_bytes {
+        return diff.to_string();
+    }
+    let mut safe_len = max_bytes.min(diff.len());
+    while safe_len > 0 && !diff.is_char_boundary(safe_len) {
+        safe_len -= 1;
+    }
+    let truncated = &diff[..safe_len];
+    // Find last complete line
+    if let Some(last_newline) = truncated.rfind('\n') {
+        let omitted = diff.len().saturating_sub(last_newline + 1);
+        format!(
+            "{}\n\n... (diff truncated, {} bytes omitted)",
+            &truncated[..last_newline],
+            omitted
+        )
+    } else {
+        let omitted = diff.len().saturating_sub(safe_len);
+        format!(
+            "{}\n\n... (diff truncated, {} bytes omitted)",
+            truncated,
+            omitted
+        )
+    }
+}
+
+#[tauri::command]
+async fn get_review_projects(
+    state: State<'_, AppState>,
+) -> Result<ReviewProjectsResult, String> {
+    let tasks = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::list_tasks(&conn).map_err(|e| e.to_string())?
+    };
+
+    // Collect unique project paths with counts
+    // Consider both project_path and worktree_path for task grouping
+    let mut path_counts: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+    for task in &tasks {
+        // Use project_path if available, otherwise fall back to worktree_path
+        let path = task.project_path.as_ref().or(task.worktree_path.as_ref());
+        if let Some(path) = path {
+            *path_counts.entry(path.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let projects: Vec<ReviewProject> = path_counts
+        .into_iter()
+        .map(|(path, count)| {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&path)
+                .to_string();
+            ReviewProject {
+                path: path.clone(),
+                name,
+                task_count: count,
+            }
+        })
+        .collect();
+
+    Ok(ReviewProjectsResult { projects })
+}
+
+#[tauri::command]
+async fn get_task_commit_timeline(
+    task_id: String,
+    compare: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ReviewCommitTimeline, String> {
+    let task = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
+        tasks.into_iter().find(|t| t.id == task_id)
+    };
+
+    let task = task.ok_or_else(|| "Task not found".to_string())?;
+    let repo_path = task
+        .worktree_path
+        .or(task.project_path)
+        .ok_or_else(|| "Task has no path".to_string())?;
+
+    let repo = std::path::PathBuf::from(&repo_path);
+    let repo_root = resolve_repo_root(&repo).await.unwrap_or(repo.clone());
+
+    // Get current branch
+    let current_branch = worktree::current_branch(&repo_root)
+        .await
+        .unwrap_or_else(|_| "HEAD".to_string());
+
+    // Determine compare reference
+    let compare_mode = compare.as_deref().unwrap_or("main");
+    let base_ref = match compare_mode {
+        "main" => get_primary_remote_branch(&repo_root).await.ok(),
+        "base" | "history" => get_merge_base(&repo_root).await.ok(),
+        _ => None,
+    }
+    .filter(|base| !base.is_empty());
+    let base_label = base_ref
+        .clone()
+        .unwrap_or_else(|| compare_mode.to_string());
+
+    // Get commits: git log --format="%h%x1f%s%x1f%an%x1f%ar" merge-base..HEAD
+    let log_output = if let Some(base_ref) = base_ref.as_deref() {
+        worktree::run_git_command(
+            &repo_root,
+            &[
+                "log",
+                "--format=%h%x1f%s%x1f%an%x1f%ar",
+                &format!("{}..HEAD", base_ref),
+            ],
+        )
+        .await
+        .unwrap_or_default()
+    } else {
+        worktree::run_git_command(
+            &repo_root,
+            &["log", "--format=%h%x1f%s%x1f%an%x1f%ar", "-n", "10", "HEAD"],
+        )
+        .await
+        .unwrap_or_default()
+    };
+
+    let commits: Vec<ReviewCommit> = log_output
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.splitn(4, '\x1f').collect();
+            if parts.len() >= 4 {
+                Some(ReviewCommit {
+                    hash: parts[0].to_string(),
+                    subject: parts[1].to_string(),
+                    author: parts[2].to_string(),
+                    time_ago: parts[3].to_string(),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(ReviewCommitTimeline {
+        commits,
+        base_branch: base_label,
+        current_branch,
+    })
+}
+
+#[tauri::command]
+async fn get_task_diff_files(
+    task_id: String,
+    compare: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ReviewDiffFilesResult, String> {
+    let task = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
+        tasks.into_iter().find(|t| t.id == task_id)
+    };
+
+    let task = match task {
+        Some(t) => t,
+        None => return Ok(ReviewDiffFilesResult { files: Vec::new() }),
+    };
+
+    let repo_path = match task.worktree_path.or(task.project_path) {
+        Some(p) => p,
+        None => return Ok(ReviewDiffFilesResult { files: Vec::new() }),
+    };
+
+    let repo = std::path::PathBuf::from(&repo_path);
+    let repo_root = resolve_repo_root(&repo).await.unwrap_or(repo);
+
+    // Determine compare reference based on mode
+    let compare_mode = compare.as_deref().unwrap_or("main");
+    let base_ref = match compare_mode {
+        "main" => get_primary_remote_branch(&repo_root).await.unwrap_or_else(|_| "main".to_string()),
+        "base" | "history" => get_merge_base(&repo_root).await.unwrap_or_else(|_| "HEAD".to_string()),
+        _ => "main".to_string(),
+    };
+
+    // Run git diff --numstat base..HEAD
+    let numstat = worktree::run_git_command(
+        &repo_root,
+        &["diff", "--numstat", &format!("{}..HEAD", base_ref)],
+    )
+    .await
+    .unwrap_or_default();
+
+    let files: Vec<ReviewDiffFile> = numstat
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 3 {
+                let additions = parts[0].parse::<u64>().unwrap_or(0);
+                let deletions = parts[1].parse::<u64>().unwrap_or(0);
+                let path = parts[2].to_string();
+                Some(ReviewDiffFile {
+                    path,
+                    additions,
+                    deletions,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(ReviewDiffFilesResult { files })
+}
+
+#[tauri::command]
+async fn get_task_file_diff(
+    task_id: String,
+    file_path: String,
+    compare: Option<String>,
+    view: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ReviewFileDiffResult, String> {
+    let task = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tasks = db::list_tasks(&conn).map_err(|e| e.to_string())?;
+        tasks.into_iter().find(|t| t.id == task_id)
+    };
+
+    let task = task.ok_or_else(|| "Task not found".to_string())?;
+    let repo_path = task
+        .worktree_path
+        .or(task.project_path)
+        .ok_or_else(|| "Task has no path".to_string())?;
+
+    let repo = std::path::PathBuf::from(&repo_path);
+    let repo_root = resolve_repo_root(&repo).await.unwrap_or(repo);
+
+    // Determine compare reference based on mode
+    let compare_mode = compare.as_deref().unwrap_or("main");
+    let base_ref = match compare_mode {
+        "main" => get_primary_remote_branch(&repo_root).await.unwrap_or_else(|_| "main".to_string()),
+        "base" | "history" => get_merge_base(&repo_root).await.unwrap_or_else(|_| "HEAD".to_string()),
+        _ => "main".to_string(),
+    };
+
+    let view_mode = view.unwrap_or_else(|| "split".to_string());
+
+    // Get the diff for this specific file
+    let diff_output = worktree::run_git_command(
+        &repo_root,
+        &["diff", &base_ref, "HEAD", "--", &file_path],
+    )
+    .await
+    .unwrap_or_default();
+
+    // Truncate if too large (500KB limit)
+    let diff = truncate_diff(&diff_output, 500_000);
+
+    if view_mode == "unified" {
+        return Ok(ReviewFileDiffResult {
+            diff: serde_json::Value::String(diff),
+        });
+    }
+
+    // Parse into split view
+    let split = parse_unified_to_split(&diff);
+    Ok(ReviewFileDiffResult {
+        diff: serde_json::to_value(split).unwrap_or_else(|_| serde_json::json!({})),
+    })
+}
+
 #[tauri::command]
 async fn delete_task(
     task_id: String,
@@ -7255,10 +7745,22 @@ async fn gather_code_review_context(project_path: String) -> Result<CodeReviewCo
         Ok(s) => s.trim().to_string(),
         Err(_) => {
             // Fallback: try without origin/ prefix
-            worktree::run_git_command(&path, &["merge-base", &base_branch, "HEAD"])
-                .await
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| "HEAD~10".to_string())
+            match worktree::run_git_command(&path, &["merge-base", &base_branch, "HEAD"]).await {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => {
+                    // Safe fallback for short histories: use root commit, then HEAD.
+                    let root_commit = worktree::run_git_command(
+                        &path,
+                        &["rev-list", "--max-parents=0", "HEAD"],
+                    )
+                    .await
+                    .ok()
+                    .and_then(|s| s.lines().next().map(|line| line.trim().to_string()))
+                    .filter(|s| !s.is_empty());
+
+                    root_commit.unwrap_or_else(|| "HEAD".to_string())
+                }
+            }
         }
     };
 
@@ -9830,6 +10332,10 @@ fn main() {
             load_tasks,
             check_task_uncommitted_changes,
             get_task_diff_stats,
+            get_review_projects,
+            get_task_commit_timeline,
+            get_task_diff_files,
+            get_task_file_diff,
             delete_task,
             get_task_history,
             open_task_directory,

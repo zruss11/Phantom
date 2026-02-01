@@ -69,6 +69,11 @@
                 <i class="fal fa-clipboard-check"></i> Analytics
               </a>
             </li>
+            <li class="nav-item">
+              <a class="nav-link" data-page="reviewPage">
+                <i class="fal fa-code-merge"></i> Review
+              </a>
+            </li>
           </ul>
           <ul class="navbar-nav ml-auto">
             <li class="nav-item mt-2 mr-0">
@@ -1084,6 +1089,127 @@
           </div>
         </div>
       </section>
+
+      <!--Review Center-->
+      <section id="reviewPage" class="review-page page container-fluid" hidden>
+        <div class="row no-gutters">
+          <div class="col-12">
+            <div class="card mt-4 mr-4 ml-4 review-header-card">
+              <div class="card-body">
+                <div class="review-header-content">
+                  <div class="review-header-title">
+                    <div class="review-icon-wrap">
+                      <i class="fal fa-code-merge"></i>
+                    </div>
+                    <div class="review-title-text">
+                      <h5 class="review-title">Review Center</h5>
+                      <p class="review-subtitle">Inspect diffs and leave notes before merging</p>
+                    </div>
+                  </div>
+                  <div class="review-header-actions-right">
+                    <button type="button" class="review-icon-btn" id="reviewRefreshBtn" title="Refresh">
+                      <i class="fal fa-sync-alt"></i>
+                    </button>
+                    <button type="button" class="review-icon-btn" id="reviewOpenWorktreeBtn" disabled title="Open in Finder">
+                      <i class="fal fa-folder-open"></i>
+                    </button>
+                  </div>
+                </div>
+                <div class="review-controls-bar">
+                  <div class="review-selectors">
+                    <div class="review-selector-group">
+                      <label class="review-selector-label">Project</label>
+                      <div id="reviewProjectSelector" class="custom-dropdown-wrapper"></div>
+                    </div>
+                    <div class="review-selector-group review-selector-task">
+                      <label class="review-selector-label">Task</label>
+                      <div id="reviewTaskSelector" class="custom-dropdown-wrapper"></div>
+                    </div>
+                  </div>
+                  <div class="review-compare-section">
+                    <label class="review-selector-label">Compare</label>
+                    <div class="review-toggle-group" id="reviewCompareToggle">
+                      <button type="button" class="review-toggle-btn active" data-compare="main">
+                        <i class="fal fa-code-branch"></i>
+                        <span>vs Main</span>
+                      </button>
+                      <button type="button" class="review-toggle-btn" data-compare="base">
+                        <i class="fal fa-layer-group"></i>
+                        <span>vs Base</span>
+                      </button>
+                      <button type="button" class="review-toggle-btn" data-compare="history">
+                        <i class="fal fa-history"></i>
+                        <span>History</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-12">
+            <div class="review-grid">
+              <div class="review-panel review-files">
+                <div class="review-panel-header">
+                  <span>Changed files</span>
+                  <span class="review-badge" id="reviewFileCount">0</span>
+                </div>
+                <div class="review-panel-body scrollable" id="reviewFileList">
+                  <div class="review-empty" id="reviewFilesEmpty">
+                    Select a task to load diffs.
+                  </div>
+                </div>
+              </div>
+
+              <div class="review-panel review-diff">
+                <div class="review-panel-header review-diff-header">
+                  <div class="review-diff-path" id="reviewDiffPath">
+                    <i class="fal fa-file-code"></i>
+                    <span>Select a file</span>
+                  </div>
+                  <div class="review-diff-actions">
+                    <button type="button" class="review-action-btn" data-view="unified" id="reviewUnifiedBtn">
+                      <i class="fal fa-compress-alt"></i> Unified
+                    </button>
+                    <button type="button" class="review-action-btn active" data-view="split" id="reviewSplitBtn">
+                      <i class="fal fa-columns"></i> Split
+                    </button>
+                    <button type="button" class="review-action-btn" id="reviewCommentBtn" disabled>
+                      <i class="fal fa-comment-plus"></i> Comment
+                    </button>
+                    <button type="button" class="review-action-btn review-approve" id="reviewApproveBtn" disabled>
+                      <i class="fal fa-check"></i> Approve
+                    </button>
+                  </div>
+                </div>
+
+                <div class="review-diff-body" id="reviewDiffBody">
+                  <div class="review-diff-placeholder">No diff loaded.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-12">
+            <div class="card mt-2 mr-4 mb-4 ml-4 review-timeline-card">
+              <div class="card-body">
+                <div class="review-timeline-header">
+                  <div class="review-timeline-title">
+                    <i class="fal fa-code-commit"></i>
+                    Commit timeline
+                  </div>
+                  <div class="review-timeline-meta" id="reviewTimelineMeta">0 commits · 0 comments</div>
+                </div>
+                <div class="review-timeline-track" id="reviewTimelineTrack">
+                  <div class="review-empty">Timeline coming soon.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!--Settings Page-->
       <section
         id="settingsPage"
@@ -1609,6 +1735,7 @@
     <script src="js/slash-commands-data.js"></script>
     <script src="js/slash-commands.js"></script>
     <script src="js/custom-dropdown.js"></script>
+    <script src="js/review.js"></script>
     <script src="js/application.js"></script>
 
     <script src="js/vendor/jquery.color-2.1.2.min.js"></script>
