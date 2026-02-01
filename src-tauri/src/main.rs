@@ -6415,19 +6415,25 @@ fn truncate_diff(diff: &str, max_bytes: usize) -> String {
     if diff.len() <= max_bytes {
         return diff.to_string();
     }
-    let truncated = &diff[..max_bytes];
+    let mut safe_len = max_bytes.min(diff.len());
+    while safe_len > 0 && !diff.is_char_boundary(safe_len) {
+        safe_len -= 1;
+    }
+    let truncated = &diff[..safe_len];
     // Find last complete line
     if let Some(last_newline) = truncated.rfind('\n') {
+        let omitted = diff.len().saturating_sub(last_newline + 1);
         format!(
             "{}\n\n... (diff truncated, {} bytes omitted)",
             &truncated[..last_newline],
-            diff.len() - last_newline
+            omitted
         )
     } else {
+        let omitted = diff.len().saturating_sub(safe_len);
         format!(
             "{}\n\n... (diff truncated, {} bytes omitted)",
             truncated,
-            diff.len() - max_bytes
+            omitted
         )
     }
 }
