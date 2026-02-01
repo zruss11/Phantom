@@ -549,7 +549,7 @@
     if (!path) return;
 
     // Follow existing bridge pattern (send, not invoke).
-    ipcRenderer.send("OpenTaskDirectory", path, null);
+    ipcRenderer.send("OpenTaskDirectory", path, "finder");
   }
 
   function bindEvents() {
