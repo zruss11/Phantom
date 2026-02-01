@@ -3,6 +3,7 @@ use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
@@ -90,6 +91,11 @@ pub struct MessageRecord {
 
 pub fn init_db(path: &PathBuf) -> Result<Connection> {
     let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.execute("PRAGMA journal_mode = WAL", [])?;
+    conn.execute("PRAGMA synchronous = NORMAL", [])?;
+    conn.execute("PRAGMA temp_store = MEMORY", [])?;
+    conn.execute("PRAGMA cache_size = -16000", [])?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
@@ -214,6 +220,25 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             channel_id INTEGER NOT NULL,
             created_at INTEGER NOT NULL
         )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_messages_task_id_id ON messages(task_id, id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_message_attachments_task_id_message_id
+         ON message_attachments(task_id, message_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pending_attachments_task_id_created_at
+         ON pending_attachments(task_id, created_at)",
         [],
     )?;
 
