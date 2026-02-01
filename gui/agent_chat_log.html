@@ -3136,10 +3136,10 @@
         display: none;
         position: absolute;
         top: calc(100% + 8px);
-        left: 0;
-        right: auto;
+        right: 0;
+        left: auto;
         width: min(480px, calc(100vw - 32px));
-        max-height: 320px;
+        max-height: min(320px, calc(100vh - 120px));
         overflow-y: auto;
         background: linear-gradient(180deg, rgba(36, 26, 32, 0.98), rgba(24, 16, 22, 0.98));
         border: 1px solid rgba(247, 138, 151, 0.35);
