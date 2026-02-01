@@ -278,9 +278,7 @@ fn get_codex_auth() -> Result<(String, Option<String>), String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .map(|value| PathBuf::from(value).join("auth.json"))
-        .or_else(|| {
-            dirs::home_dir().map(|home| home.join(".codex").join("auth.json"))
-        })
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex").join("auth.json")))
         .ok_or("No home dir")?;
 
     let content = std::fs::read_to_string(&auth_path)
@@ -351,6 +349,17 @@ fn extract_pr_summary(text: &str) -> Option<String> {
     }
 
     let normalized: Vec<String> = words.iter().map(|word| normalize_token(word)).collect();
+    let mut context_indices = Vec::new();
+    for (idx, token) in normalized.iter().enumerate() {
+        if matches!(token.as_str(), "opened" | "created") {
+            context_indices.push(idx);
+        }
+    }
+    if context_indices.is_empty() {
+        return None;
+    }
+
+    let mut best_match: Option<(usize, bool, String)> = None;
 
     for (idx, word) in words.iter().enumerate() {
         if let Some(pr_part) = word.strip_prefix("https://github.com/") {
@@ -360,14 +369,28 @@ fn extract_pr_summary(text: &str) -> Option<String> {
                     .chars()
                     .take_while(|c| c.is_ascii_digit())
                     .collect();
-                if !pr_number.is_empty() && has_opened_created_context(&normalized, idx) {
-                    return Some(format!("PR #{} opened", pr_number));
+                if pr_number.is_empty() {
+                    continue;
+                }
+                if let Some((distance, before)) =
+                    best_opened_created_distance(&context_indices, idx)
+                {
+                    let should_replace = match best_match {
+                        None => true,
+                        Some((best_distance, best_before, _)) => {
+                            distance < best_distance
+                                || (distance == best_distance && before && !best_before)
+                        }
+                    };
+                    if should_replace {
+                        best_match = Some((distance, before, pr_number));
+                    }
                 }
             }
         }
     }
 
-    None
+    best_match.map(|(_, _, pr_number)| format!("PR #{} opened", pr_number))
 }
 
 fn normalize_token(word: &str) -> String {
@@ -375,18 +398,34 @@ fn normalize_token(word: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn has_opened_created_context(tokens: &[String], url_index: usize) -> bool {
+fn best_opened_created_distance(
+    context_indices: &[usize],
+    url_index: usize,
+) -> Option<(usize, bool)> {
     const WINDOW: usize = 4;
-    let start = url_index.saturating_sub(WINDOW);
-    let end = (url_index + WINDOW + 1).min(tokens.len());
-
-    for token in &tokens[start..end] {
-        if matches!(token.as_str(), "opened" | "created") {
-            return true;
+    let mut best: Option<(usize, bool)> = None;
+    for idx in context_indices {
+        let distance = if *idx > url_index {
+            *idx - url_index
+        } else {
+            url_index - *idx
+        };
+        if distance > WINDOW {
+            continue;
+        }
+        let before = *idx <= url_index;
+        let should_replace = match best {
+            None => true,
+            Some((best_distance, best_before)) => {
+                distance < best_distance || (distance == best_distance && before && !best_before)
+            }
+        };
+        if should_replace {
+            best = Some((distance, before));
         }
     }
 
-    false
+    best
 }
 
 /// Clean up LLM response (remove quotes, trim whitespace)
