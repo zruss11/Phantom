@@ -134,7 +134,7 @@ Or build from source:
 
 ```bash
 # Clone the repo
-git https://github.com/zruss11/Phantom
+git clone https://github.com/zruss11/Phantom
 cd Phantom
 
 # Install dependencies and build
@@ -148,6 +148,46 @@ cargo tauri build
 3. **Select an agent** — Click the logo of the agent you want to use
 4. **Write your prompt** — Tell it what to build
 5. **Hit Create Task** — Watch the magic happen
+
+---
+
+## Development
+
+To run Phantom in development mode, you need to start a local web server for the GUI and then run Tauri.
+
+### 1. Start the GUI server
+
+The frontend needs to be served on port 8000. Open a terminal and run:
+
+```bash
+# Using Python (built-in)
+cd gui
+python3 -m http.server 8000
+
+# Or using Node.js
+npx serve gui -l 8000
+```
+
+Keep this running in the background.
+
+### 2. Start Tauri dev mode
+
+In a separate terminal:
+
+```bash
+cd src-tauri
+cargo tauri dev
+```
+
+This will compile the Rust backend and open the app with hot-reload enabled. Changes to the GUI files will reflect immediately; Rust changes trigger a recompile.
+
+### Building for Production
+
+```bash
+cargo tauri build
+```
+
+The built app will be in `src-tauri/target/release/bundle/`.
 
 ---
 
