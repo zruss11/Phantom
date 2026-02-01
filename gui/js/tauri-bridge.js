@@ -525,6 +525,16 @@
             view: payload.view || null
           });
         }
+        if (channel === 'getReviewProjects') {
+          return tauriInvoke('get_review_projects');
+        }
+        if (channel === 'getTaskCommitTimeline') {
+          var payload = args[0] || {};
+          return tauriInvoke('get_task_commit_timeline', {
+            taskId: payload.taskId,
+            compare: payload.compare || null
+          });
+        }
         if (channel === 'dismissNotificationsForTask') {
           return tauriInvoke('dismiss_notifications_for_task', args[0] || {});
         }

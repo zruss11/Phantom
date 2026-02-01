@@ -4917,6 +4917,76 @@ input:checked + .slider:before {
 
 .review-page .review-timeline-track {
   min-height: 36px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.review-page .review-timeline-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.review-page .review-timeline-item:last-child {
+  border-bottom: none;
+}
+
+.review-page .review-timeline-dot {
+  width: 10px;
+  height: 10px;
+  min-width: 10px;
+  border-radius: 50%;
+  background: #f78a97;
+  margin-top: 5px;
+}
+
+.review-page .review-timeline-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.review-page .review-commit-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.review-page .review-commit-hash {
+  font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+  font-size: 12px;
+  color: #f78a97;
+  background: rgba(247, 138, 151, 0.1);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.review-page .review-commit-subject {
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.review-page .review-commit-meta {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  margin-top: 3px;
+}
+
+.review-page .review-commit-author {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.review-page .review-timeline-empty {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  padding: 12px 0;
 }
 
 @media (max-width: 991px) {

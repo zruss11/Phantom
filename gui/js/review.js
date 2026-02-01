@@ -6,13 +6,17 @@
     initialized: false,
     eventsBound: false,
     tasks: [],
+    projects: [],
+    selectedProjectPath: null,
     selectedTaskId: null,
     selectedFilePath: null,
     compareMode: "main",
     viewMode: "split",
+    commits: [],
   };
 
-  // Custom dropdown instance for task selector
+  // Custom dropdown instances
+  let reviewProjectDropdown = null;
   let reviewTaskDropdown = null;
 
   function $(id) {
@@ -58,7 +62,7 @@
     if (!safeFiles.length) {
       if (empty) {
         empty.textContent = state.selectedTaskId
-          ? "No changed files found (diff wiring TODO)."
+          ? "No changed files found."
           : "Select a task to load diffs.";
         list.appendChild(empty);
       } else {
@@ -136,6 +140,11 @@
     const leftLines = Array.isArray(diff?.left) ? diff.left : [];
     const rightLines = Array.isArray(diff?.right) ? diff.right : [];
 
+    if (!leftLines.length && !rightLines.length) {
+      body.innerHTML = '<div class="review-diff-placeholder">No changes in this file.</div>';
+      return;
+    }
+
     const container = document.createElement("div");
     container.className = "review-split-view";
 
@@ -188,6 +197,11 @@
     const body = $("reviewDiffBody");
     if (!body) return;
 
+    if (!diffText || !diffText.trim()) {
+      body.innerHTML = '<div class="review-diff-placeholder">No changes in this file.</div>';
+      return;
+    }
+
     const wrap = document.createElement("div");
     wrap.className = "review-unified-view";
     wrap.innerHTML = `<pre>${escapeHtml(diffText || "")}</pre>`;
@@ -195,43 +209,113 @@
     body.appendChild(wrap);
   }
 
-  function mockFiles() {
-    return [
-      { path: "src-tauri/src/main.rs", additions: 12, deletions: 3 },
-      { path: "gui/menu.html", additions: 44, deletions: 0 },
-      { path: "gui/js/review.js", additions: 120, deletions: 0 },
-    ];
+  function renderCommitTimeline(timeline) {
+    const track = $("reviewTimelineTrack");
+    const meta = $("reviewTimelineMeta");
+
+    if (!track) return;
+
+    const commits = Array.isArray(timeline?.commits) ? timeline.commits : [];
+    state.commits = commits;
+
+    // Update meta text
+    if (meta) {
+      const base = timeline?.base_branch || "main";
+      const current = timeline?.current_branch || "HEAD";
+      meta.textContent = `${commits.length} commit${commits.length !== 1 ? "s" : ""} · ${current} vs ${base}`;
+    }
+
+    track.innerHTML = "";
+
+    if (!commits.length) {
+      track.innerHTML = '<div class="review-timeline-empty">No commits found since base branch.</div>';
+      return;
+    }
+
+    commits.forEach((commit) => {
+      const item = document.createElement("div");
+      item.className = "review-timeline-item";
+
+      const dot = document.createElement("div");
+      dot.className = "review-timeline-dot";
+
+      const content = document.createElement("div");
+      content.className = "review-timeline-content";
+
+      const row = document.createElement("div");
+      row.className = "review-commit-row";
+
+      const hash = document.createElement("span");
+      hash.className = "review-commit-hash";
+      hash.textContent = commit.hash || "";
+
+      const subject = document.createElement("span");
+      subject.className = "review-commit-subject";
+      subject.textContent = commit.subject || "";
+      subject.title = commit.subject || "";
+
+      row.appendChild(hash);
+      row.appendChild(subject);
+
+      const commitMeta = document.createElement("div");
+      commitMeta.className = "review-commit-meta";
+      commitMeta.innerHTML = `<span class="review-commit-author">${escapeHtml(commit.author || "")}</span> · ${escapeHtml(commit.time_ago || "")}`;
+
+      content.appendChild(row);
+      content.appendChild(commitMeta);
+
+      item.appendChild(dot);
+      item.appendChild(content);
+
+      track.appendChild(item);
+    });
   }
 
-  function mockDiff() {
-    return {
-      unified:
-        "diff --git a/src-tauri/src/main.rs b/src-tauri/src/main.rs\n" +
-        "index 0000000..1111111 100644\n" +
-        "--- a/src-tauri/src/main.rs\n" +
-        "+++ b/src-tauri/src/main.rs\n" +
-        "@@ -1,3 +1,7 @@\n" +
-        "+// TODO(review): wire actual git diff rendering\n" +
-        "+// Placeholder diff so the UI can be exercised\n" +
-        " fn main() {\n" +
-        "   println!(\"hello\");\n" +
-        "+  println!(\"review center\");\n" +
-        " }\n",
-      split: {
-        left: [
-          { number: 1, text: "fn main() {", type: "" },
-          { number: 2, text: "  println!(\"hello\");", type: "" },
-          { number: 3, text: "}", type: "" },
-        ],
-        right: [
-          { number: 1, text: "// TODO(review): wire actual git diff rendering", type: "add" },
-          { number: 2, text: "fn main() {", type: "" },
-          { number: 3, text: "  println!(\"hello\");", type: "" },
-          { number: 4, text: "  println!(\"review center\");", type: "add" },
-          { number: 5, text: "}", type: "" },
-        ],
-      },
-    };
+  async function loadProjectsIntoSelector() {
+    const container = $("reviewProjectSelector");
+    if (!container) return;
+
+    // Initialize dropdown if not already done
+    if (!reviewProjectDropdown && window.CustomDropdown) {
+      reviewProjectDropdown = new window.CustomDropdown({
+        container: container,
+        items: [{ value: "", name: "All projects", description: "" }],
+        placeholder: "All projects",
+        defaultValue: "",
+        onChange: async function (value) {
+          state.selectedProjectPath = value || null;
+          state.selectedTaskId = null;
+          state.selectedFilePath = null;
+          await loadTasksIntoSelector();
+          renderFiles([]);
+          renderDiffPlaceholder();
+          renderCommitTimeline({ commits: [] });
+        },
+      });
+    }
+
+    if (!ipcRenderer) return;
+
+    try {
+      const result = await ipcRenderer.invoke("getReviewProjects");
+      state.projects = Array.isArray(result?.projects) ? result.projects : [];
+
+      const items = [{ value: "", name: "All projects", description: "" }];
+
+      state.projects.forEach((project) => {
+        items.push({
+          value: project.path,
+          name: project.name || project.path,
+          description: `${project.task_count} task${project.task_count !== 1 ? "s" : ""}`,
+        });
+      });
+
+      if (reviewProjectDropdown) {
+        reviewProjectDropdown.setOptions(items);
+      }
+    } catch (err) {
+      console.warn("[Review] getReviewProjects failed:", err);
+    }
   }
 
   async function loadTasksIntoSelector() {
@@ -249,6 +333,7 @@
           state.selectedTaskId = value || null;
           state.selectedFilePath = null;
           await refreshFiles();
+          await refreshCommitTimeline();
         },
       });
     }
@@ -261,21 +346,33 @@
 
       const items = [{ value: "", name: "Select a task...", description: "" }];
 
-      state.tasks.forEach((task) => {
-        const id = task.id;
-        const branch = task.branch || task.branch_name || "";
+      // Filter by selected project if one is chosen
+      // Consider both project_path and worktree_path (use project_path if available, else worktree_path)
+      const filteredTasks = state.selectedProjectPath
+        ? state.tasks.filter((t) => {
+            const taskPath = t.project_path || t.projectPath || t.worktree_path || t.worktreePath;
+            return taskPath === state.selectedProjectPath;
+          })
+        : state.tasks;
+
+      filteredTasks.forEach((task) => {
         const prompt = task.prompt || "";
         const truncatedPrompt =
           prompt.length > 50 ? prompt.substring(0, 50) + "..." : prompt;
         items.push({
-          value: id,
-          name: branch ? `#${id} — ${branch}` : `Task #${id}`,
+          value: task.id,
+          name: friendlyTaskName(task),
           description: truncatedPrompt,
         });
       });
 
       if (reviewTaskDropdown) {
         reviewTaskDropdown.setOptions(items);
+        // Reset selection if current task is not in filtered list
+        if (state.selectedTaskId && !filteredTasks.find((t) => t.id === state.selectedTaskId)) {
+          reviewTaskDropdown.setValue("");
+          state.selectedTaskId = null;
+        }
       }
     } catch (err) {
       console.warn("[Review] loadTasks failed:", err);
@@ -285,6 +382,58 @@
   function findTask(taskId) {
     if (!taskId) return null;
     return state.tasks.find((t) => t.id === taskId) || null;
+  }
+
+  /**
+   * Extract a short, friendly ID from a full task ID.
+   * "task-1769976653565-4bddf02d" → "4bddf02d"
+   */
+  function shortTaskId(fullId) {
+    if (!fullId) return "";
+    // Task IDs are formatted as: task-{timestamp}-{uuid_prefix}
+    const parts = fullId.split("-");
+    if (parts.length >= 3) {
+      // Return the uuid prefix (last part)
+      return parts[parts.length - 1];
+    }
+    // Fallback: return last 8 chars
+    return fullId.slice(-8);
+  }
+
+  /**
+   * Get a friendly display name for a task.
+   * Priority: title_summary > branch > short ID
+   */
+  function friendlyTaskName(task) {
+    const shortId = shortTaskId(task.id);
+    const title = task.title_summary || task.titleSummary;
+    const branch = task.branch || task.branch_name;
+
+    if (title) {
+      return `#${shortId} — ${title}`;
+    }
+    if (branch) {
+      return `#${shortId} — ${branch}`;
+    }
+    return `Task #${shortId}`;
+  }
+
+  async function refreshCommitTimeline() {
+    if (!state.selectedTaskId || !ipcRenderer) {
+      renderCommitTimeline({ commits: [] });
+      return;
+    }
+
+    try {
+      const result = await ipcRenderer.invoke("getTaskCommitTimeline", {
+        taskId: state.selectedTaskId,
+        compare: state.compareMode,
+      });
+      renderCommitTimeline(result || { commits: [] });
+    } catch (err) {
+      console.warn("[Review] getTaskCommitTimeline failed:", err);
+      renderCommitTimeline({ commits: [] });
+    }
   }
 
   async function refreshFiles() {
@@ -302,7 +451,7 @@
     setDisabled("reviewOpenWorktreeBtn", !path);
 
     if (!ipcRenderer) {
-      renderFiles(mockFiles());
+      renderFiles([]);
       return;
     }
 
@@ -312,10 +461,10 @@
         compare: state.compareMode,
       });
       const files = Array.isArray(result?.files) ? result.files : [];
-      renderFiles(files.length ? files : mockFiles());
+      renderFiles(files);
     } catch (err) {
       console.warn("[Review] getTaskDiffFiles failed:", err);
-      renderFiles(mockFiles());
+      renderFiles([]);
     }
 
     state.selectedFilePath = null;
@@ -337,11 +486,10 @@
     }
 
     if (!ipcRenderer) {
-      const fallback = mockDiff();
       if (state.viewMode === "unified") {
-        renderUnifiedDiff(fallback.unified);
+        renderUnifiedDiff("");
       } else {
-        renderSplitDiff(fallback.split);
+        renderSplitDiff({ left: [], right: [] });
       }
       return;
     }
@@ -355,17 +503,16 @@
       });
 
       if (state.viewMode === "unified") {
-        renderUnifiedDiff(result?.diff || mockDiff().unified);
+        renderUnifiedDiff(result?.diff || "");
       } else {
-        renderSplitDiff(result?.diff || mockDiff().split);
+        renderSplitDiff(result?.diff || { left: [], right: [] });
       }
     } catch (err) {
       console.warn("[Review] getTaskFileDiff failed:", err);
-      const fallback = mockDiff();
       if (state.viewMode === "unified") {
-        renderUnifiedDiff(fallback.unified);
+        renderUnifiedDiff("");
       } else {
-        renderSplitDiff(fallback.split);
+        renderSplitDiff({ left: [], right: [] });
       }
     }
   }
@@ -390,7 +537,7 @@
     if (state.eventsBound) return;
     state.eventsBound = true;
 
-    // Note: Task selector events are handled by CustomDropdown's onChange callback
+    // Note: Selector events are handled by CustomDropdown's onChange callbacks
 
     const compareToggle = $("reviewCompareToggle");
     if (compareToggle) {
@@ -402,6 +549,7 @@
         state.compareMode = mode;
         setActiveButton(compareToggle, btn);
         await refreshFiles();
+        await refreshCommitTimeline();
       });
     }
 
@@ -424,8 +572,10 @@
     splitBtn?.addEventListener("click", () => setViewMode("split"));
 
     $("reviewRefreshBtn")?.addEventListener("click", async () => {
+      await loadProjectsIntoSelector();
       await loadTasksIntoSelector();
       await refreshFiles();
+      await refreshCommitTimeline();
     });
 
     $("reviewOpenWorktreeBtn")?.addEventListener("click", openSelectedWorktree);
@@ -450,9 +600,11 @@
     if (state.initialized) return;
     state.initialized = true;
 
+    await loadProjectsIntoSelector();
     await loadTasksIntoSelector();
     renderFiles([]);
     renderDiffPlaceholder();
+    renderCommitTimeline({ commits: [] });
   }
 
   // Boot: bind events early so navigation works, but only initialize once.
