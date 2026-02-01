@@ -2506,7 +2506,7 @@ fn save_modes_to_cache(
     agent_id: &str,
     modes: &[ModeOption],
 ) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
     let cached_modes: Vec<db::CachedMode> = modes
         .iter()
         .map(|m| db::CachedMode {
@@ -2515,7 +2515,7 @@ fn save_modes_to_cache(
             description: m.description.clone(),
         })
         .collect();
-    db::save_cached_modes(&conn, agent_id, &cached_modes)
+    db::save_cached_modes(&mut conn, agent_id, &cached_modes)
         .map_err(|e| format!("Failed to cache modes: {}", e))?;
     println!("[Harness] Cached {} modes for {}", modes.len(), agent_id);
     Ok(())
@@ -2860,7 +2860,7 @@ fn save_models_to_cache(
     agent_id: &str,
     models: &[ModelOption],
 ) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
     let cached_models: Vec<db::CachedModel> = models
         .iter()
         .map(|m| db::CachedModel {
@@ -2869,7 +2869,7 @@ fn save_models_to_cache(
             description: m.description.clone(),
         })
         .collect();
-    db::save_cached_models(&conn, agent_id, &cached_models)
+    db::save_cached_models(&mut conn, agent_id, &cached_models)
         .map_err(|e| format!("Failed to cache models: {}", e))?;
     println!("[Harness] Cached {} models for {}", models.len(), agent_id);
     Ok(())
@@ -3993,8 +3993,8 @@ pub(crate) async fn start_task_internal(
                 byte_size: 0,
             })
             .collect();
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let _ = db::save_message_attachments(&conn, &task_id, message_id, &attachment_records);
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        let _ = db::save_message_attachments(&mut conn, &task_id, message_id, &attachment_records);
     }
 
     // Build attachment info with data URLs for chat display
@@ -9328,7 +9328,7 @@ pub(crate) async fn send_chat_message_internal(
 
     // Persist user message before sending so reload ordering is correct
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
         let message_id = db::save_message(
             &conn,
             &task_id,
@@ -9341,7 +9341,7 @@ pub(crate) async fn send_chat_message_internal(
             &user_timestamp,
         )
         .map_err(|e| e.to_string())?;
-        let _ = db::save_message_attachments(&conn, &task_id, message_id, &attachments);
+        let _ = db::save_message_attachments(&mut conn, &task_id, message_id, &attachments);
     }
 
     if from_discord {
@@ -10032,8 +10032,8 @@ async fn save_attachment(
     };
 
     // Save to database
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::save_pending_attachments(&conn, &payload.task_id, &[attachment.clone()])
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::save_pending_attachments(&mut conn, &payload.task_id, &[attachment.clone()])
         .map_err(|e| format!("Failed to save attachment record: {}", e))?;
 
     println!(
@@ -10296,6 +10296,14 @@ fn main() {
             }
             if label != "main" {
                 return;
+            }
+            // Optimize database on shutdown
+            if let Some(state) = window.try_state::<AppState>() {
+                if let Ok(conn) = state.db.lock() {
+                    if let Err(e) = crate::db::optimize_and_shutdown(&conn) {
+                        eprintln!("[Harness] DB shutdown optimization failed: {e}");
+                    }
+                }
             }
             let app = window.app_handle();
             for (label, win) in app.webview_windows() {
