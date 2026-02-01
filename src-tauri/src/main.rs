@@ -1039,10 +1039,7 @@ fn auth_env_for(
     }
     if agent_id == "codex" {
         if let Some(home) = codex_home {
-            env.push((
-                "CODEX_HOME".to_string(),
-                home.to_string_lossy().to_string(),
-            ));
+            env.push(("CODEX_HOME".to_string(), home.to_string_lossy().to_string()));
         }
     }
     if agent_id != "codex" {
@@ -3808,16 +3805,19 @@ pub(crate) async fn start_task_internal(
         );
         emit_status("Reconnecting...", "yellow", "running")?;
 
-        let (client, session_id, used_session_load) =
-            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false).await {
-                Ok(result) => result,
-                Err(e) => {
-                    let error_msg = format!("Failed to reconnect: {}", e);
-                    println!("[Harness] start_task reconnect error: {}", error_msg);
-                    emit_status(&error_msg, "red", "error")?;
-                    return Err(error_msg);
-                }
-            };
+        let (client, session_id, used_session_load) = match reconnect_session_with_context(
+            agent, &task, &cwd, &env, &state.db, false,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                let error_msg = format!("Failed to reconnect: {}", e);
+                println!("[Harness] start_task reconnect error: {}", error_msg);
+                emit_status(&error_msg, "red", "error")?;
+                return Err(error_msg);
+            }
+        };
 
         let model = task.model.clone();
         let resume_prompt = if task.status == "Stopped" {
@@ -4444,8 +4444,7 @@ pub(crate) async fn start_task_internal(
                             let codex_home = PathBuf::from(&next_account.codex_home);
                             {
                                 let mut settings = state.settings.lock().await;
-                                settings.active_codex_account_id =
-                                    Some(next_account.id.clone());
+                                settings.active_codex_account_id = Some(next_account.id.clone());
                                 persist_settings(&settings)?;
                             }
                             set_process_codex_home(Some(&codex_home));
@@ -4462,7 +4461,10 @@ pub(crate) async fn start_task_internal(
                                 Some(a) => a,
                                 None => {
                                     let (formatted_error, _) = format_agent_error(&error_str);
-                                    return Err(format!("session/prompt failed: {}", formatted_error));
+                                    return Err(format!(
+                                        "session/prompt failed: {}",
+                                        formatted_error
+                                    ));
                                 }
                             };
                             let cwd = resolve_task_cwd(&task)?;
@@ -4471,25 +4473,20 @@ pub(crate) async fn start_task_internal(
                                 auth_env_for(&task.agent_id, &settings, Some(&codex_home));
                             let allow_missing =
                                 settings.codex_auth_method.as_deref() == Some("chatgpt");
-                            let env = match build_env(&agent.required_env, &overrides, allow_missing)
-                            {
-                                Ok(e) => e,
-                                Err(e) => {
-                                    return Err(format!(
-                                        "Reconnection failed - auth error: {}",
-                                        e
-                                    ));
-                                }
-                            };
+                            let env =
+                                match build_env(&agent.required_env, &overrides, allow_missing) {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        return Err(format!(
+                                            "Reconnection failed - auth error: {}",
+                                            e
+                                        ));
+                                    }
+                                };
 
                             let (new_client, new_session_id, _used_session_load) =
                                 reconnect_session_with_context(
-                                    agent,
-                                    &task,
-                                    &cwd,
-                                    &env,
-                                    &state.db,
-                                    true,
+                                    agent, &task, &cwd, &env, &state.db, true,
                                 )
                                 .await?;
 
@@ -4511,8 +4508,11 @@ pub(crate) async fn start_task_internal(
                                     }
                                 }
                                 if !messages.is_empty() {
-                                    let (history, _) =
-                                        db::compact_history(&messages, task.prompt.as_deref(), 100_000);
+                                    let (history, _) = db::compact_history(
+                                        &messages,
+                                        task.prompt.as_deref(),
+                                        100_000,
+                                    );
                                     Some(history)
                                 } else {
                                     None
@@ -4603,7 +4603,8 @@ pub(crate) async fn start_task_internal(
                     };
 
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false).await
+                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false)
+                        .await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(
@@ -4949,7 +4950,10 @@ pub(crate) async fn soft_stop_task_internal(
             let _ = chat_window.emit("ChatLogStatus", (&task_id, "Stopping...", "stopping"));
         }
         if let Some(main_window) = app.get_webview_window("main") {
-            let _ = main_window.emit("StatusUpdate", (&task_id, "Stopping...", "orange", "stopping"));
+            let _ = main_window.emit(
+                "StatusUpdate",
+                (&task_id, "Stopping...", "orange", "stopping"),
+            );
         }
     } else {
         println!(
@@ -5561,7 +5565,10 @@ fn codex_account_label(account: &db::CodexAccountRecord) -> String {
     if let Some(email) = account.email.as_ref().filter(|e| !e.trim().is_empty()) {
         return email.trim().to_string();
     }
-    format!("Codex Account {}", account.id.split('-').next().unwrap_or("unknown"))
+    format!(
+        "Codex Account {}",
+        account.id.split('-').next().unwrap_or("unknown")
+    )
 }
 
 fn is_codex_rate_limit_error(error: &str) -> bool {
@@ -5673,12 +5680,13 @@ async fn codex_accounts_list_internal(
     let mut summaries = Vec::with_capacity(accounts.len());
     for account in accounts.iter_mut() {
         let codex_home = PathBuf::from(&account.codex_home);
-        let auth_status = read_codex_auth_status_from_home(&codex_home).unwrap_or(CodexAuthStatus {
-            authenticated: false,
-            method: None,
-            expires_at: None,
-            email: None,
-        });
+        let auth_status =
+            read_codex_auth_status_from_home(&codex_home).unwrap_or(CodexAuthStatus {
+                authenticated: false,
+                method: None,
+                expires_at: None,
+                email: None,
+            });
         if let Some(meta) = read_codex_account_meta(&codex_home) {
             if meta.email != account.email || meta.plan_type != account.plan_type {
                 let label = if account.label.is_none() {
@@ -5724,7 +5732,9 @@ async fn codex_accounts_list_internal(
 }
 
 #[tauri::command]
-async fn codex_accounts_list(state: State<'_, AppState>) -> Result<Vec<CodexAccountSummary>, String> {
+async fn codex_accounts_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<CodexAccountSummary>, String> {
     codex_accounts_list_internal(state.inner()).await
 }
 
@@ -5759,7 +5769,11 @@ async fn codex_account_create(
     // Create the directory if it doesn't exist
     if !codex_home_path.exists() {
         std::fs::create_dir_all(&codex_home_path).map_err(|e| {
-            format!("Failed to create Codex home directory {}: {}", codex_home_path.display(), e)
+            format!(
+                "Failed to create Codex home directory {}: {}",
+                codex_home_path.display(),
+                e
+            )
         })?;
     }
 
@@ -6146,7 +6160,8 @@ async fn codex_account_delete(
         let accounts = codex_accounts_list_internal(state.inner()).await?;
         if let Some(active) = accounts.iter().find(|a| a.is_active) {
             let codex_home = PathBuf::from(&active.codex_home);
-            let _ = switch_running_codex_tasks(state.inner(), app.clone(), &active.id, &codex_home).await;
+            let _ = switch_running_codex_tasks(state.inner(), app.clone(), &active.id, &codex_home)
+                .await;
         }
     }
     emit_codex_accounts_updated(&app);
@@ -6415,7 +6430,9 @@ async fn codex_logout(state: State<'_, AppState>) -> Result<(), String> {
     if let Some(home) = active_home.as_ref() {
         command.env("CODEX_HOME", home);
     }
-    command.status().await
+    command
+        .status()
+        .await
         .map_err(|e| format!("logout failed: {}", e))?;
 
     let mut settings = state.settings.lock().await;
@@ -7195,11 +7212,8 @@ struct ReviewProjectsResult {
 async fn get_merge_base(repo_path: &std::path::PathBuf) -> Result<String, String> {
     // Try main first, then master
     for base_branch in &["main", "master"] {
-        let result = worktree::run_git_command(
-            repo_path,
-            &["merge-base", "HEAD", base_branch],
-        )
-        .await;
+        let result =
+            worktree::run_git_command(repo_path, &["merge-base", "HEAD", base_branch]).await;
         if let Ok(hash) = result {
             if !hash.is_empty() {
                 return Ok(hash);
@@ -7215,11 +7229,7 @@ async fn get_merge_base(repo_path: &std::path::PathBuf) -> Result<String, String
 /// Get the primary remote branch (origin/main or origin/master).
 async fn get_primary_remote_branch(repo_path: &std::path::PathBuf) -> Result<String, String> {
     for branch in &["origin/main", "origin/master", "main", "master"] {
-        let result = worktree::run_git_command(
-            repo_path,
-            &["rev-parse", "--verify", branch],
-        )
-        .await;
+        let result = worktree::run_git_command(repo_path, &["rev-parse", "--verify", branch]).await;
         if result.is_ok() {
             return Ok(branch.to_string());
         }
@@ -7371,16 +7381,13 @@ fn truncate_diff(diff: &str, max_bytes: usize) -> String {
         let omitted = diff.len().saturating_sub(safe_len);
         format!(
             "{}\n\n... (diff truncated, {} bytes omitted)",
-            truncated,
-            omitted
+            truncated, omitted
         )
     }
 }
 
 #[tauri::command]
-async fn get_review_projects(
-    state: State<'_, AppState>,
-) -> Result<ReviewProjectsResult, String> {
+async fn get_review_projects(state: State<'_, AppState>) -> Result<ReviewProjectsResult, String> {
     let tasks = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::list_tasks(&conn).map_err(|e| e.to_string())?
@@ -7450,9 +7457,7 @@ async fn get_task_commit_timeline(
         _ => None,
     }
     .filter(|base| !base.is_empty());
-    let base_label = base_ref
-        .clone()
-        .unwrap_or_else(|| compare_mode.to_string());
+    let base_label = base_ref.clone().unwrap_or_else(|| compare_mode.to_string());
 
     // Get commits: git log --format="%h%x1f%s%x1f%an%x1f%ar" merge-base..HEAD
     let log_output = if let Some(base_ref) = base_ref.as_deref() {
@@ -7528,8 +7533,12 @@ async fn get_task_diff_files(
     // Determine compare reference based on mode
     let compare_mode = compare.as_deref().unwrap_or("main");
     let base_ref = match compare_mode {
-        "main" => get_primary_remote_branch(&repo_root).await.unwrap_or_else(|_| "main".to_string()),
-        "base" | "history" => get_merge_base(&repo_root).await.unwrap_or_else(|_| "HEAD".to_string()),
+        "main" => get_primary_remote_branch(&repo_root)
+            .await
+            .unwrap_or_else(|_| "main".to_string()),
+        "base" | "history" => get_merge_base(&repo_root)
+            .await
+            .unwrap_or_else(|_| "HEAD".to_string()),
         _ => "main".to_string(),
     };
 
@@ -7590,20 +7599,22 @@ async fn get_task_file_diff(
     // Determine compare reference based on mode
     let compare_mode = compare.as_deref().unwrap_or("main");
     let base_ref = match compare_mode {
-        "main" => get_primary_remote_branch(&repo_root).await.unwrap_or_else(|_| "main".to_string()),
-        "base" | "history" => get_merge_base(&repo_root).await.unwrap_or_else(|_| "HEAD".to_string()),
+        "main" => get_primary_remote_branch(&repo_root)
+            .await
+            .unwrap_or_else(|_| "main".to_string()),
+        "base" | "history" => get_merge_base(&repo_root)
+            .await
+            .unwrap_or_else(|_| "HEAD".to_string()),
         _ => "main".to_string(),
     };
 
     let view_mode = view.unwrap_or_else(|| "split".to_string());
 
     // Get the diff for this specific file
-    let diff_output = worktree::run_git_command(
-        &repo_root,
-        &["diff", &base_ref, "HEAD", "--", &file_path],
-    )
-    .await
-    .unwrap_or_default();
+    let diff_output =
+        worktree::run_git_command(&repo_root, &["diff", &base_ref, "HEAD", "--", &file_path])
+            .await
+            .unwrap_or_default();
 
     // Truncate if too large (500KB limit)
     let diff = truncate_diff(&diff_output, 500_000);
@@ -7771,14 +7782,12 @@ async fn gather_code_review_context(project_path: String) -> Result<CodeReviewCo
                 Ok(s) => s.trim().to_string(),
                 Err(_) => {
                     // Safe fallback for short histories: use root commit, then HEAD.
-                    let root_commit = worktree::run_git_command(
-                        &path,
-                        &["rev-list", "--max-parents=0", "HEAD"],
-                    )
-                    .await
-                    .ok()
-                    .and_then(|s| s.lines().next().map(|line| line.trim().to_string()))
-                    .filter(|s| !s.is_empty());
+                    let root_commit =
+                        worktree::run_git_command(&path, &["rev-list", "--max-parents=0", "HEAD"])
+                            .await
+                            .ok()
+                            .and_then(|s| s.lines().next().map(|line| line.trim().to_string()))
+                            .filter(|s| !s.is_empty());
 
                     root_commit.unwrap_or_else(|| "HEAD".to_string())
                 }
@@ -8915,18 +8924,21 @@ pub(crate) async fn send_chat_message_internal(
             let _ = window.emit("ChatLogStatus", (&task_id, "Reconnecting...", "running"));
         }
 
-        let (client, session_id, used_session_load) =
-            match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false).await {
-                Ok(result) => result,
-                Err(e) => {
-                    let error_msg = format!("Failed to reconnect: {}", e);
-                    println!("[Harness] send_chat_message error: {}", error_msg);
-                    if let Some(window) = app.get_webview_window(&window_label) {
-                        let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
-                    }
-                    return Err(error_msg);
+        let (client, session_id, used_session_load) = match reconnect_session_with_context(
+            agent, &task, &cwd, &env, &state.db, false,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(e) => {
+                let error_msg = format!("Failed to reconnect: {}", e);
+                println!("[Harness] send_chat_message error: {}", error_msg);
+                if let Some(window) = app.get_webview_window(&window_label) {
+                    let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
                 }
-            };
+                return Err(error_msg);
+            }
+        };
 
         let model = task.model.clone();
 
@@ -9005,7 +9017,15 @@ pub(crate) async fn send_chat_message_internal(
     };
 
     let user_timestamp = chrono::Utc::now().to_rfc3339();
-    let (agent_id, model, client, session_id, effective_message, cancel_token, needs_history_injection) = {
+    let (
+        agent_id,
+        model,
+        client,
+        session_id,
+        effective_message,
+        cancel_token,
+        needs_history_injection,
+    ) = {
         let mut handle = handle_ref.lock().await;
         let needs_history = handle.needs_history_injection;
         // Clear the flag - history will be injected on this message
@@ -9033,10 +9053,13 @@ pub(crate) async fn send_chat_message_internal(
     };
     // If the session was reconnected without session/load (e.g., after account switch),
     // wrap the message with conversation history so the agent has context
-    let mut effective_message = if needs_history_injection && !effective_message.contains("[User's new message]") {
+    let mut effective_message = if needs_history_injection
+        && !effective_message.contains("[User's new message]")
+    {
         let history_opt = {
             let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let messages_db = db::get_message_records(&conn, &task_id).map_err(|e| e.to_string())?;
+            let messages_db =
+                db::get_message_records(&conn, &task_id).map_err(|e| e.to_string())?;
             if !messages_db.is_empty() {
                 let (history, _) = db::compact_history(&messages_db, None, 100_000);
                 Some(history)
@@ -9406,8 +9429,7 @@ pub(crate) async fn send_chat_message_internal(
                             let codex_home = PathBuf::from(&next_account.codex_home);
                             {
                                 let mut settings = state.settings.lock().await;
-                                settings.active_codex_account_id =
-                                    Some(next_account.id.clone());
+                                settings.active_codex_account_id = Some(next_account.id.clone());
                                 persist_settings(&settings)?;
                             }
                             set_process_codex_home(Some(&codex_home));
@@ -9439,30 +9461,26 @@ pub(crate) async fn send_chat_message_internal(
                                 auth_env_for(&task.agent_id, &settings, Some(&codex_home));
                             let allow_missing =
                                 settings.codex_auth_method.as_deref() == Some("chatgpt");
-                            let env = match build_env(&agent.required_env, &overrides, allow_missing)
-                            {
-                                Ok(e) => e,
-                                Err(e) => {
-                                    let error_msg =
-                                        format!("Reconnection failed - auth error: {}", e);
-                                    if let Some(window) = app.get_webview_window(&window_label) {
-                                        let _ = window.emit(
-                                            "ChatLogStatus",
-                                            (&task_id, &error_msg, "error"),
-                                        );
+                            let env =
+                                match build_env(&agent.required_env, &overrides, allow_missing) {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        let error_msg =
+                                            format!("Reconnection failed - auth error: {}", e);
+                                        if let Some(window) = app.get_webview_window(&window_label)
+                                        {
+                                            let _ = window.emit(
+                                                "ChatLogStatus",
+                                                (&task_id, &error_msg, "error"),
+                                            );
+                                        }
+                                        return Err(error_msg);
                                     }
-                                    return Err(error_msg);
-                                }
-                            };
+                                };
 
                             let (new_client, new_session_id, _used_session_load) =
                                 reconnect_session_with_context(
-                                    agent,
-                                    &task,
-                                    &cwd,
-                                    &env,
-                                    &state.db,
-                                    true,
+                                    agent, &task, &cwd, &env, &state.db, true,
                                 )
                                 .await?;
 
@@ -9484,8 +9502,11 @@ pub(crate) async fn send_chat_message_internal(
                                     }
                                 }
                                 if !messages.is_empty() {
-                                    let (history, _) =
-                                        db::compact_history(&messages, task.prompt.as_deref(), 100_000);
+                                    let (history, _) = db::compact_history(
+                                        &messages,
+                                        task.prompt.as_deref(),
+                                        100_000,
+                                    );
                                     Some(history)
                                 } else {
                                     None
@@ -9503,7 +9524,11 @@ pub(crate) async fn send_chat_message_internal(
                             if let Some(window) = app.get_webview_window(&window_label) {
                                 let _ = window.emit(
                                     "ChatLogStatus",
-                                    (&task_id, "Rate limit reached, switched account. Retrying...", "running"),
+                                    (
+                                        &task_id,
+                                        "Rate limit reached, switched account. Retrying...",
+                                        "running",
+                                    ),
                                 );
                             }
                             continue;
@@ -9597,7 +9622,8 @@ pub(crate) async fn send_chat_message_internal(
                     };
 
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false).await
+                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false)
+                        .await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(

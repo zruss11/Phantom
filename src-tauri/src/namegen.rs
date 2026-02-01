@@ -302,9 +302,7 @@ fn get_codex_auth() -> Result<(String, Option<String>), String> {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .map(|value| PathBuf::from(value).join("auth.json"))
-        .or_else(|| {
-            dirs::home_dir().map(|home| home.join(".codex").join("auth.json"))
-        })
+        .or_else(|| dirs::home_dir().map(|home| home.join(".codex").join("auth.json")))
         .ok_or("No home dir")?;
 
     let content = std::fs::read_to_string(&auth_path)

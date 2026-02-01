@@ -92,7 +92,8 @@ pub struct MessageRecord {
 pub fn init_db(path: &PathBuf) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
-    conn.execute("PRAGMA journal_mode = WAL", [])?;
+    // PRAGMAs that return results - use query_row to consume them
+    let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()));
     conn.execute("PRAGMA synchronous = NORMAL", [])?;
     conn.execute("PRAGMA temp_store = MEMORY", [])?;
     conn.execute("PRAGMA cache_size = -16000", [])?;
