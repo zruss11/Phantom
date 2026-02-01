@@ -963,6 +963,263 @@ textarea {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
 
+.accounts-page .codex-accounts {
+  margin-bottom: 20px;
+  padding-top: 4px;
+}
+
+.accounts-page .codex-accounts-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.accounts-page .codex-accounts-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.accounts-page .codex-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: rgba(247, 138, 151, 0.12);
+  border: 1px solid rgba(247, 138, 151, 0.25);
+  color: rgba(255, 255, 255, 0.8);
+  transition: all 0.2s ease;
+}
+
+.accounts-page .codex-add-btn:hover {
+  background: rgba(247, 138, 151, 0.2);
+  border-color: rgba(247, 138, 151, 0.4);
+  color: #fff;
+}
+
+.accounts-page .codex-add-btn svg {
+  opacity: 0.7;
+}
+
+.accounts-page .codex-accounts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.accounts-page .codex-account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: linear-gradient(
+    145deg,
+    rgba(18, 16, 20, 0.6),
+    rgba(12, 10, 14, 0.7)
+  );
+  transition: all 0.2s ease;
+}
+
+.accounts-page .codex-account-row:hover {
+  background: linear-gradient(
+    145deg,
+    rgba(24, 20, 26, 0.7),
+    rgba(16, 14, 18, 0.8)
+  );
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.accounts-page .codex-account-row.active {
+  border-color: rgba(247, 138, 151, 0.4);
+  background: linear-gradient(
+    145deg,
+    rgba(92, 46, 61, 0.25),
+    rgba(18, 16, 20, 0.7)
+  );
+  box-shadow: 0 0 0 1px rgba(247, 138, 151, 0.15),
+              inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.accounts-page .codex-account-row.active:hover {
+  border-color: rgba(247, 138, 151, 0.5);
+}
+
+.accounts-page .codex-account-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.accounts-page .codex-account-label {
+  font-weight: 600;
+  font-size: 13px;
+  color: #ffffff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.accounts-page .codex-email-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.accounts-page .codex-email {
+  font-weight: 600;
+  font-size: 13px;
+  color: #ffffff;
+}
+
+.accounts-page .codex-email.redacted::before {
+  content: attr(data-redacted);
+  letter-spacing: 1px;
+}
+
+.accounts-page .codex-email.redacted {
+  font-size: 0;
+}
+
+.accounts-page .codex-email:not(.redacted) {
+  font-size: 13px;
+}
+
+.accounts-page .codex-email-toggle {
+  background: none;
+  border: none;
+  padding: 2px;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.4);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.2s;
+  flex-shrink: 0;
+}
+
+.accounts-page .codex-email-toggle:hover {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.accounts-page .codex-email-toggle .eye-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.accounts-page .codex-email-toggle[data-visible="true"] .eye-open {
+  display: none;
+}
+
+.accounts-page .codex-email-toggle[data-visible="true"] .eye-closed {
+  display: inline !important;
+}
+
+.accounts-page .codex-account-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.accounts-page .codex-account-sub .status-connected {
+  color: #51cf66;
+}
+
+.accounts-page .codex-account-sub .status-disconnected {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.accounts-page .codex-account-sub .plan-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(247, 138, 151, 0.15);
+  color: rgba(247, 138, 151, 0.9);
+}
+
+.accounts-page .codex-account-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.accounts-page .codex-account-badge {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: rgba(81, 207, 102, 0.12);
+  color: rgba(81, 207, 102, 0.9);
+  border: 1px solid rgba(81, 207, 102, 0.2);
+}
+
+.accounts-page .codex-account-actions .btn-activate {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.6);
+  transition: all 0.2s ease;
+}
+
+.accounts-page .codex-account-actions .btn-activate:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+.accounts-page .codex-account-actions .btn-login {
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, rgba(92, 46, 61, 0.8), rgba(72, 36, 51, 0.9));
+  border: 1px solid rgba(247, 138, 151, 0.3);
+  color: #fff;
+  transition: all 0.2s ease;
+}
+
+.accounts-page .codex-account-actions .btn-login:hover {
+  background: linear-gradient(135deg, rgba(112, 56, 71, 0.9), rgba(92, 46, 61, 1));
+  border-color: rgba(247, 138, 151, 0.5);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(247, 138, 151, 0.2);
+}
+
+.accounts-page .codex-account-actions .btn-remove {
+  font-size: 11px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  background: transparent;
+  border: 1px solid rgba(255, 107, 107, 0.25);
+  color: rgba(255, 107, 107, 0.7);
+  transition: all 0.2s ease;
+}
+
+.accounts-page .codex-account-actions .btn-remove:hover {
+  background: rgba(255, 107, 107, 0.1);
+  border-color: rgba(255, 107, 107, 0.5);
+  color: #ff6b6b;
+}
+
 .accounts-page .auth-card-header {
   display: flex;
   align-items: center;
