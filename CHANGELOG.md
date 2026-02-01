@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.2 - 2026-02-01
+
+### Bugfixes
+- Fixed database initialization crash on PRAGMA journal_mode returning results.
+
 ## v1.0.1 - 2026-01-29
 
 ### Features
