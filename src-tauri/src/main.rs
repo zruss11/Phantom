@@ -2708,20 +2708,19 @@ async fn start_claude_oauth_internal(state: &AppState) -> Result<ClaudeOauthStar
     let oauth_state_handle = state.claude_oauth_state.clone();
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(300)).await;
-        let mut child_to_kill = None;
-        {
+        let child_to_kill = {
             let mut oauth_state = oauth_state_handle.lock().await;
             if oauth_state.watchdog_id != watchdog_id {
                 return;
             }
             if oauth_state.child.is_some() {
-                child_to_kill = oauth_state.child.take();
                 oauth_state.url = None;
                 oauth_state.starting = false;
+                oauth_state.child.take()
             } else {
                 return;
             }
-        }
+        };
         if let Some(mut child) = child_to_kill {
             let _ = child.kill().await;
         }
@@ -7373,7 +7372,7 @@ async fn check_claude_auth_internal() -> Result<ClaudeAuthStatus, String> {
                 return Ok(ClaudeAuthStatus {
                     authenticated: true,
                     method: Some("oauth".to_string()),
-                    expires_at: Some(expires_at),
+                    expires_at: Some(expires_at.to_string()),
                     email: None,
                 });
             }
