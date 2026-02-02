@@ -7354,13 +7354,18 @@ async fn check_claude_auth_internal() -> Result<ClaudeAuthStatus, String> {
         }
     }
 
-    if fetch_claude_oauth_tokens().is_some() {
-        return Ok(ClaudeAuthStatus {
-            authenticated: true,
-            method: Some("oauth".to_string()),
-            expires_at: None,
-            email: None,
-        });
+    if let Some(tokens) = fetch_claude_oauth_tokens() {
+        if let Some(expires_at) = tokens.expires_at {
+            let now = chrono::Utc::now().timestamp();
+            if expires_at > now + TOKEN_EXPIRY_BUFFER_SECS {
+                return Ok(ClaudeAuthStatus {
+                    authenticated: true,
+                    method: Some("oauth".to_string()),
+                    expires_at: Some(expires_at),
+                    email: None,
+                });
+            }
+        }
     }
 
     Ok(ClaudeAuthStatus {
