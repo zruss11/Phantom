@@ -30,6 +30,49 @@ pub struct TokenUsageInfo {
     pub model_context_window: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentCliKind {
+    Claude,
+    Codex,
+    Amp,
+    Droid,
+    OpenCode,
+    Other,
+}
+
+impl AgentCliKind {
+    pub fn from_command(command: &str) -> Self {
+        let cmd = Path::new(command)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(command);
+        match cmd {
+            "claude" | "claude-container" => AgentCliKind::Claude,
+            "codex" => AgentCliKind::Codex,
+            "amp" => AgentCliKind::Amp,
+            "droid" => AgentCliKind::Droid,
+            "opencode" => AgentCliKind::OpenCode,
+            _ => AgentCliKind::Other,
+        }
+    }
+
+    fn is_claude(&self) -> bool {
+        matches!(self, AgentCliKind::Claude)
+    }
+
+    fn is_amp(&self) -> bool {
+        matches!(self, AgentCliKind::Amp)
+    }
+
+    fn is_droid(&self) -> bool {
+        matches!(self, AgentCliKind::Droid)
+    }
+
+    fn is_opencode(&self) -> bool {
+        matches!(self, AgentCliKind::OpenCode)
+    }
+}
+
 /// Minimal JSON-RPC transport for Codex `app-server`.
 ///
 /// Codex app-server speaks JSON-RPC 2.0 over stdio (one JSON object per line).
@@ -1021,6 +1064,7 @@ pub struct AgentProcessClient {
     args: Vec<String>,
     env: Vec<(String, String)>,
     cwd: PathBuf,
+    cli_kind: AgentCliKind,
     model: std::sync::Mutex<Option<String>>,
     reasoning_effort: std::sync::Mutex<Option<String>>,
     permission_mode: std::sync::Mutex<Option<String>>,
@@ -1232,6 +1276,7 @@ impl AgentProcessClient {
         args: &[String],
         cwd: &Path,
         env: &[(String, String)],
+        cli_kind: AgentCliKind,
     ) -> Result<Self> {
         // Codex uses the JSON-RPC app-server protocol (not stream-json prompts).
         let codex_app_server = if std::path::Path::new(command)
@@ -1266,6 +1311,7 @@ impl AgentProcessClient {
             args: args.to_vec(),
             env: env.to_vec(),
             cwd: cwd.to_path_buf(),
+            cli_kind,
             model: std::sync::Mutex::new(None),
             reasoning_effort: std::sync::Mutex::new(None),
             permission_mode: std::sync::Mutex::new(None),
@@ -1587,14 +1633,11 @@ impl AgentProcessClient {
         let mut cmd = Command::new(&self.command);
         let mut args = self.args.clone();
 
+        let cli_kind = self.cli_kind;
         // Not every CLI supports Phantom's stream-json parsing.
         // For terminal-first CLIs (e.g. opencode), we stream raw stdout instead.
         // Note: Amp uses --stream-json (in config args), not --output-format stream-json.
-        let cmd_name = std::path::Path::new(&self.command)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&self.command);
-        if cmd_name != "opencode" && cmd_name != "amp" {
+        if !cli_kind.is_opencode() && !cli_kind.is_amp() {
             ensure_output_format(&mut args);
         }
 
@@ -1612,14 +1655,14 @@ impl AgentProcessClient {
 
         if let Some(model) = model.as_ref() {
             // Only pass model flags when we know the CLI supports them.
-            if cmd_name == "opencode" {
+            if cli_kind.is_opencode() {
                 // OpenCode expects provider/model (e.g. anthropic/claude-3-5-sonnet).
                 // Skip if phantom is using a placeholder/default.
                 if model != "default" {
                     args.push("--model".to_string());
                     args.push(model.to_string());
                 }
-            } else if cmd_name != "amp" {
+            } else if !cli_kind.is_amp() {
                 args.push("--model".to_string());
                 args.push(model.to_string());
             }
@@ -1628,18 +1671,18 @@ impl AgentProcessClient {
         if !session_id.is_empty() && !session_id.starts_with("local-") {
             // Note: OpenCode's --session flag must come AFTER the `run` subcommand,
             // so we handle it in the opencode-specific block below.
-            if cmd_name == "amp" {
+            if cli_kind.is_amp() {
                 // Amp uses `amp threads continue` for resuming a thread.
                 // The session_id IS the thread reference (e.g., "T-7f395a45...")
                 // We insert "threads continue" subcommands, and the prompt will be added via --execute later
                 args.insert(0, "threads".to_string());
                 args.insert(1, "continue".to_string());
                 eprintln!("[Harness][Amp] resuming thread: {}", session_id);
-            } else if cmd_name == "droid" {
+            } else if cli_kind.is_droid() {
                 // Factory Droid uses -s/--session-id for session continuation
                 args.push("-s".to_string());
                 args.push(session_id.to_string());
-            } else if cmd_name != "opencode" {
+            } else if !cli_kind.is_opencode() {
                 // Most other CLIs we wrap use `--resume`.
                 args.push("--resume".to_string());
                 args.push(session_id.to_string());
@@ -1650,13 +1693,13 @@ impl AgentProcessClient {
             // Claude Code CLI can block waiting for interactive permission prompts.
             // Until we fully support permission request/response in the UI for the native CLI path,
             // default to a non-interactive permission mode.
-            if cmd_name == "amp" {
+            if cli_kind.is_amp() {
                 // Amp uses --dangerously-allow-all for bypassing all permission checks
                 if mode == "bypassPermissions" {
                     args.push("--dangerously-allow-all".to_string());
                 }
                 // Note: Amp doesn't have granular permission modes like Claude
-            } else if cmd_name == "droid" {
+            } else if cli_kind.is_droid() {
                 // Factory Droid permission modes:
                 // - --skip-permissions-unsafe: Full bypass (for "bypassPermissions")
                 // - --auto <level>: Partial autonomy (low|medium|high)
@@ -1669,9 +1712,9 @@ impl AgentProcessClient {
                     args.push("--auto".to_string());
                     args.push("high".to_string());
                 }
-            } else if cmd_name != "opencode" {
+            } else if !cli_kind.is_opencode() {
                 // YOLO mode: always bypass permission prompts.
-                let effective_mode = if cmd_name == "claude" {
+                let effective_mode = if cli_kind.is_claude() {
                     "bypassPermissions".to_string()
                 } else {
                     mode.to_string()
@@ -1679,36 +1722,29 @@ impl AgentProcessClient {
                 args.push("--permission-mode".to_string());
                 args.push(effective_mode);
             }
-        } else if cmd_name == "droid" {
+        } else if cli_kind.is_droid() {
             // No permission mode set - default to --auto high for non-interactive operation
             args.push("--auto".to_string());
             args.push("high".to_string());
         }
 
         if let Some(agent_mode) = agent_mode.as_ref() {
-            if cmd_name == "opencode" {
+            if cli_kind.is_opencode() {
                 // OpenCode uses --agent <agent-name> for agent selection
                 // Agents: build, plan, general, explore
                 args.push("--agent".to_string());
                 args.push(agent_mode.to_string());
-            } else if cmd_name != "amp" {
+            } else if !cli_kind.is_amp() {
                 // Other CLIs (Claude) use --agent-mode
                 args.push("--agent-mode".to_string());
                 args.push(agent_mode.to_string());
             }
         }
 
-        // Claude Code CLI expects the prompt as a positional argument with --print for non-interactive output.
-        // It does NOT support a `--prompt` flag.
-        let cmd_name = std::path::Path::new(&self.command)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&self.command);
-
         // Keep temp image files alive until the subprocess completes.
         let mut temp_images: Vec<tempfile::TempPath> = Vec::new();
         let mut attachment_markdown = String::new();
-        if cmd_name == "claude" {
+        if cli_kind.is_claude() {
             let mut index = 1;
             for image in images {
                 if let Some(path) = write_image_temp(image)? {
@@ -1730,7 +1766,7 @@ impl AgentProcessClient {
                 }
             }
         }
-        if cmd_name == "claude" {
+        if cli_kind.is_claude() {
             args.push("--print".to_string());
             // Do not force --max-turns. Let Claude decide when it's done; we'll treat
             // a `type: result` event as terminal on our side.
@@ -1743,7 +1779,7 @@ impl AgentProcessClient {
                 prompt.push_str(&attachment_markdown);
             }
             args.push(prompt);
-        } else if cmd_name == "opencode" {
+        } else if cli_kind.is_opencode() {
             // Prefer the programmatic CLI surface (no TUI):
             // `opencode run --format json [--model X] [--agent Y] [--session <id>] <message...>`
             // Insert `run` at position 0 so it comes before any flags (--model, --agent)
@@ -1760,12 +1796,12 @@ impl AgentProcessClient {
 
             // prompt goes as positional "message.."
             args.push(content.to_string());
-        } else if cmd_name == "amp" {
+        } else if cli_kind.is_amp() {
             // Amp's programmatic mode: --execute "prompt" runs non-interactively
             // (--stream-json and --stream-json-thinking are already in config args)
             args.push("--execute".to_string());
             args.push(content.to_string());
-        } else if cmd_name == "droid" {
+        } else if cli_kind.is_droid() {
             // Factory Droid needs `exec` subcommand for non-interactive mode
             // Usage: droid exec [OPTIONS] [PROMPT]
             // Insert `exec` at the beginning (before other flags like --output-format)
@@ -1878,17 +1914,17 @@ impl AgentProcessClient {
             };
 
             // Always log Amp output for development/debugging (Amp is new integration)
-            if cmd_name == "amp" {
+            if cli_kind.is_amp() {
                 eprintln!("[Harness][Amp] stdout: {}", line);
             }
 
             // Always log Droid output for development/debugging (Droid is new integration)
-            if cmd_name == "droid" {
+            if cli_kind.is_droid() {
                 eprintln!("[Harness][Droid] stdout: {}", line);
             }
 
             // Always log OpenCode output for development/debugging
-            if cmd_name == "opencode" {
+            if cli_kind.is_opencode() {
                 eprintln!("[Harness][OpenCode] stdout: {}", line);
             }
 
@@ -1917,7 +1953,7 @@ impl AgentProcessClient {
                     observed_session_id = find_session_id(&value);
                 }
 
-                if cmd_name == "amp" {
+                if cli_kind.is_amp() {
                     // Amp emits NDJSON events with --stream-json. Parse them into our streaming updates.
                     for update in parse_amp_event(&value) {
                         // Maintain text buffers for final persistence
@@ -1934,7 +1970,7 @@ impl AgentProcessClient {
                         saw_result = true;
                         break;
                     }
-                } else if cmd_name == "droid" {
+                } else if cli_kind.is_droid() {
                     // Factory Droid emits NDJSON events with --output-format stream-json
                     for update in parse_droid_event(&value) {
                         // Maintain text buffers for final persistence
@@ -1948,7 +1984,7 @@ impl AgentProcessClient {
                         saw_result = true;
                         break;
                     }
-                } else if cmd_name == "opencode" {
+                } else if cli_kind.is_opencode() {
                     // OpenCode emits one JSON line per event. Convert events into our streaming updates.
                     for update in parse_opencode_event(&value) {
                         // maintain assistant_text buffer for final persistence
@@ -2132,12 +2168,7 @@ impl AgentProcessClient {
             }
         }
 
-        let cmd_basename = std::path::Path::new(&self.command)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&self.command);
-
-        if cmd_basename == "claude" {
+        if cli_kind.is_claude() {
             if current_assistant_text.contains("invalid_request_error")
                 && current_assistant_text.contains("tool_reference.tool_name")
             {
@@ -2156,7 +2187,7 @@ impl AgentProcessClient {
         }
 
         // Amp summary logging (always enabled for new integration debugging)
-        if cmd_basename == "amp" {
+        if cli_kind.is_amp() {
             eprintln!(
                 "[Harness][Amp] response summary: assistant_chars={} reasoning_chars={} messages={}",
                 current_assistant_text.len(),

@@ -18,8 +18,8 @@ use utils::{resolve_command_path, resolve_gh_binary, truncate_str};
 
 use chrono::TimeZone;
 use phantom_harness_backend::cli::{
-    AgentProcessClient, AvailableCommand, ImageContent, StreamingUpdate, TokenUsageInfo,
-    UserInputQuestion,
+    AgentCliKind, AgentProcessClient, AvailableCommand, ImageContent, StreamingUpdate,
+    TokenUsageInfo, UserInputQuestion,
 };
 use phantom_harness_backend::{
     apply_model_selection, get_agent_models as backend_get_agent_models,
@@ -48,6 +48,9 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
+
+#[cfg(unix)]
+use libc::{getegid, geteuid};
 
 use debug_http::start_debug_http;
 use mcp_server::{start_mcp_server, McpConfig};
@@ -78,6 +81,11 @@ const MODEL_PRICING: &[(&str, f64, f64)] = &[
     ("claude-3-sonnet", 3.00, 15.00),
     ("claude-3-haiku", 0.25, 1.25),
 ];
+
+const CLAUDE_DOCKER_IMAGE_DEFAULT: &str = "nezhar/claude-container:1.6.1";
+const CLAUDE_DOCKER_WORKDIR: &str = "/workspace";
+const CLAUDE_DOCKER_CONFIG_DIR: &str = "/claude";
+const CLAUDE_DOCKER_HOME: &str = "/home/claude";
 
 /// Calculate cost from token usage for a given model
 fn calculate_cost_from_usage(model: &str, usage: &TokenUsageInfo) -> f64 {
@@ -236,8 +244,8 @@ fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvail
     let mut map = HashMap::new();
     for agent in &config.agents {
         let command = resolve_agent_command(agent);
-        let available = command_exists(&command);
-        let error_message = if available {
+        let mut available = command_exists(&command);
+        let mut error_message = if available {
             None
         } else {
             Some(format!(
@@ -245,6 +253,17 @@ fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvail
                 agent.command, agent.command
             ))
         };
+        if !available && agent.id == "claude-code" {
+            let docker_available = command_exists("docker");
+            if docker_available {
+                available = true;
+                error_message = None;
+            } else {
+                error_message = Some(
+                    "Claude CLI not found and Docker is unavailable. Install Claude Code or Docker Desktop.".to_string(),
+                );
+            }
+        }
         if available {
             tracing::info!(
                 agent_id = %agent.id,
@@ -401,6 +420,9 @@ pub(crate) struct CreateAgentPayload {
     /// Codex mode (default, plan, pair-programming, execute)
     #[serde(rename = "codexMode", default)]
     pub(crate) codex_mode: Option<String>,
+    /// Claude Code runtime ("native" or "docker")
+    #[serde(rename = "claudeRuntime", default)]
+    pub(crate) claude_runtime: Option<String>,
     /// True when creating multiple agent sessions in one action
     #[serde(rename = "multiCreate", default)]
     pub(crate) multi_create: bool,
@@ -434,6 +456,8 @@ struct Settings {
     active_codex_account_id: Option<String>,
     #[serde(rename = "claudeAuthMethod")]
     claude_auth_method: Option<String>,
+    #[serde(rename = "claudeDockerImage")]
+    claude_docker_image: Option<String>,
     #[serde(rename = "agentNotificationsEnabled")]
     agent_notifications_enabled: Option<bool>,
     #[serde(rename = "agentNotificationStack")]
@@ -460,6 +484,8 @@ struct Settings {
     pub(crate) task_use_worktree: Option<bool>,
     #[serde(rename = "taskBaseBranch")]
     pub(crate) task_base_branch: Option<String>,
+    #[serde(rename = "taskClaudeRuntime")]
+    pub(crate) task_claude_runtime: Option<String>,
     #[serde(rename = "taskLastAgent")]
     pub(crate) task_last_agent: Option<String>,
     // Per-agent task selections stored as JSON object
@@ -497,6 +523,28 @@ pub(crate) struct PendingDiscordTask {
 pub(crate) enum MessageOrigin {
     Ui,
     Discord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeRuntime {
+    Native,
+    Docker,
+}
+
+impl ClaudeRuntime {
+    fn from_str(value: Option<&str>) -> Self {
+        match value {
+            Some("docker") => ClaudeRuntime::Docker,
+            _ => ClaudeRuntime::Native,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            ClaudeRuntime::Native => "native",
+            ClaudeRuntime::Docker => "docker",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -2233,6 +2281,179 @@ fn resolve_claude_command() -> String {
     "claude".to_string()
 }
 
+fn cli_kind_for_agent(agent_id: &str) -> AgentCliKind {
+    match agent_id {
+        "claude-code" => AgentCliKind::Claude,
+        "codex" => AgentCliKind::Codex,
+        "amp" => AgentCliKind::Amp,
+        "droid" | "factory-droid" => AgentCliKind::Droid,
+        "opencode" => AgentCliKind::OpenCode,
+        _ => AgentCliKind::Other,
+    }
+}
+
+fn claude_runtime_from_payload(payload: &CreateAgentPayload, settings: &Settings) -> ClaudeRuntime {
+    if payload.agent_id != "claude-code" {
+        return ClaudeRuntime::Native;
+    }
+    ClaudeRuntime::from_str(
+        payload
+            .claude_runtime
+            .as_deref()
+            .or(settings.task_claude_runtime.as_deref()),
+    )
+}
+
+fn claude_runtime_from_task(task: &db::TaskRecord, settings: &Settings) -> ClaudeRuntime {
+    if task.agent_id != "claude-code" {
+        return ClaudeRuntime::Native;
+    }
+    ClaudeRuntime::from_str(
+        task.claude_runtime
+            .as_deref()
+            .or(settings.task_claude_runtime.as_deref()),
+    )
+}
+
+fn container_workdir(workspace_root: &Path, cwd: &Path) -> String {
+    if let Ok(relative) = cwd.strip_prefix(workspace_root) {
+        if !relative.as_os_str().is_empty() {
+            let rel = relative.to_string_lossy().to_string();
+            return format!("{}/{}", CLAUDE_DOCKER_WORKDIR, rel);
+        }
+    }
+    CLAUDE_DOCKER_WORKDIR.to_string()
+}
+
+struct AgentSpawnSpec {
+    command: String,
+    args: Vec<String>,
+    cli_kind: AgentCliKind,
+}
+
+fn push_docker_env(
+    args: &mut Vec<String>,
+    env_keys: &mut HashSet<String>,
+    key: &str,
+    value: &str,
+) {
+    if env_keys.insert(key.to_string()) {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", key, value));
+    }
+}
+
+fn build_claude_docker_spawn_spec(
+    workspace_root: &Path,
+    cwd: &Path,
+    env: &[(String, String)],
+    settings: &Settings,
+    base_args: &[String],
+) -> Result<AgentSpawnSpec, String> {
+    let docker_command = resolve_command_path("docker")
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or("Docker CLI not found in PATH")?;
+
+    let image = settings
+        .claude_docker_image
+        .as_deref()
+        .unwrap_or(CLAUDE_DOCKER_IMAGE_DEFAULT);
+
+    let mut args: Vec<String> = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-i".to_string(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+        "--cap-add".to_string(),
+        "CHOWN".to_string(),
+        "--cap-add".to_string(),
+        "SETUID".to_string(),
+        "--cap-add".to_string(),
+        "SETGID".to_string(),
+    ];
+
+    let mut env_keys: HashSet<String> = HashSet::new();
+
+    #[cfg(unix)]
+    let uid = unsafe { geteuid() };
+    #[cfg(unix)]
+    let gid = unsafe { getegid() };
+    #[cfg(not(unix))]
+    let uid = 1000;
+    #[cfg(not(unix))]
+    let gid = 1000;
+    push_docker_env(&mut args, &mut env_keys, "USER_UID", &uid.to_string());
+    push_docker_env(&mut args, &mut env_keys, "USER_GID", &gid.to_string());
+    push_docker_env(
+        &mut args,
+        &mut env_keys,
+        "CLAUDE_CONFIG_DIR",
+        CLAUDE_DOCKER_CONFIG_DIR,
+    );
+    push_docker_env(&mut args, &mut env_keys, "HOME", CLAUDE_DOCKER_HOME);
+
+    let tmpdir = std::env::var("TMPDIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    if !tmpdir.trim().is_empty() {
+        push_docker_env(&mut args, &mut env_keys, "TMPDIR", &tmpdir);
+        args.push("-v".to_string());
+        args.push(format!("{}:{}", tmpdir, tmpdir));
+    }
+
+    for (key, value) in env {
+        if key == "ANTHROPIC_API_KEY" {
+            push_docker_env(&mut args, &mut env_keys, key, value);
+        }
+    }
+
+    let workspace_root = std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    args.push("-v".to_string());
+    args.push(format!(
+        "{}:{}",
+        workspace_root.to_string_lossy(),
+        CLAUDE_DOCKER_WORKDIR
+    ));
+    args.push("-w".to_string());
+    args.push(container_workdir(&workspace_root, cwd));
+
+    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+    let host_claude_dir = home.join(".claude");
+    if let Err(err) = std::fs::create_dir_all(&host_claude_dir) {
+        return Err(format!("Failed to create ~/.claude directory: {}", err));
+    }
+    args.push("-v".to_string());
+    args.push(format!(
+        "{}:{}",
+        host_claude_dir.to_string_lossy(),
+        CLAUDE_DOCKER_CONFIG_DIR
+    ));
+
+    let host_claude_json = home.join(".claude.json");
+    if host_claude_json.exists() {
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{}/.claude.json",
+            host_claude_json.to_string_lossy(),
+            CLAUDE_DOCKER_HOME
+        ));
+    }
+
+    args.push(image.to_string());
+    args.push("claude".to_string());
+    args.extend(base_args.iter().cloned());
+
+    Ok(AgentSpawnSpec {
+        command: docker_command,
+        args,
+        cli_kind: AgentCliKind::Claude,
+    })
+}
+
 fn resolve_agent_command(agent: &AgentConfig) -> String {
     match agent.command.as_str() {
         "claude" => resolve_claude_command(),
@@ -2262,22 +2483,41 @@ fn validate_oauth_url(url: &str) -> bool {
     false
 }
 
+fn build_agent_spawn_spec(
+    agent: &AgentConfig,
+    workspace_root: &Path,
+    cwd: &Path,
+    env: &[(String, String)],
+    settings: &Settings,
+    claude_runtime: ClaudeRuntime,
+    base_args: &[String],
+) -> Result<AgentSpawnSpec, String> {
+    if agent.id == "claude-code" && claude_runtime == ClaudeRuntime::Docker {
+        return build_claude_docker_spawn_spec(workspace_root, cwd, env, settings, base_args);
+    }
+
+    Ok(AgentSpawnSpec {
+        command: resolve_agent_command(agent),
+        args: base_args.to_vec(),
+        cli_kind: cli_kind_for_agent(&agent.id),
+    })
+}
+
 async fn spawn_agent_client(
     agent: &AgentConfig,
     cwd: &Path,
     env: &[(String, String)],
-    args: &[String],
+    spawn_spec: AgentSpawnSpec,
 ) -> Result<Arc<AgentProcessClient>, String> {
-    let command = resolve_agent_command(agent);
-    match AgentProcessClient::spawn(&command, args, cwd, env).await {
+    match AgentProcessClient::spawn(&spawn_spec.command, &spawn_spec.args, cwd, env, spawn_spec.cli_kind).await {
         Ok(client) => {
-            tracing::info!(agent_id = %agent.id, command = %command, "Agent CLI spawned");
+            tracing::info!(agent_id = %agent.id, command = %spawn_spec.command, "Agent CLI spawned");
             Ok(Arc::new(client))
         }
         Err(err) => {
             tracing::error!(
                 agent_id = %agent.id,
-                command = %command,
+                command = %spawn_spec.command,
                 error = %err,
                 "Failed to spawn agent CLI"
             );
@@ -2298,12 +2538,29 @@ async fn reconnect_session_with_context(
     env: &[(String, String)],
     db: &Arc<StdMutex<rusqlite::Connection>>,
     force_history_injection: bool,
+    settings: &Settings,
+    claude_runtime: ClaudeRuntime,
 ) -> Result<(Arc<AgentProcessClient>, String, bool), String> {
     let cwd_str = cwd.to_string_lossy().to_string();
     let args = substitute_args(&agent.args, &cwd_str);
+    let workspace_root = task
+        .worktree_path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| task.project_path.as_ref().map(PathBuf::from))
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let spawn_spec = build_agent_spawn_spec(
+        agent,
+        &workspace_root,
+        cwd,
+        env,
+        settings,
+        claude_runtime,
+        &args,
+    )?;
 
     // Spawn and initialize Agent client
-    let client = spawn_agent_client(agent, cwd, env, &args).await?;
+    let client = spawn_agent_client(agent, cwd, env, spawn_spec).await?;
     let _capabilities = client
         .initialize("Phantom Harness", "0.1.0")
         .await
@@ -3184,7 +3441,18 @@ pub(crate) async fn create_agent_session_internal(
             ));
     let env = build_env(&agent.required_env, &overrides, allow_missing)?;
     let args = substitute_args(&agent.args, &cwd_str);
-    let client = spawn_agent_client(agent, &cwd, &env, &args)
+    let claude_runtime = claude_runtime_from_payload(&payload, &settings);
+    let workspace_root = worktree_path.as_ref().unwrap_or(&source_path);
+    let spawn_spec = build_agent_spawn_spec(
+        agent,
+        workspace_root,
+        &cwd,
+        &env,
+        &settings,
+        claude_runtime,
+        &args,
+    )?;
+    let client = spawn_agent_client(agent, &cwd, &env, spawn_spec)
         .await
         .map_err(|err| format!("spawn failed: {}", err))?;
     client
@@ -3354,6 +3622,11 @@ pub(crate) async fn create_agent_session_internal(
             agent_session_id: Some(session.session_id.clone()),
             total_tokens: None,
             context_window: None,
+            claude_runtime: if payload.agent_id == "claude-code" {
+                Some(claude_runtime.as_str().to_string())
+            } else {
+                None
+            },
         };
         db::insert_task(&conn, &task).map_err(|e| e.to_string())?;
     }
@@ -3660,6 +3933,7 @@ pub(crate) async fn create_task_from_discord(
         reasoning_effort,
         agent_mode,
         codex_mode,
+        claude_runtime: None,
         attachments: Vec::new(),
         multi_create: false,
     };
@@ -3862,8 +4136,16 @@ pub(crate) async fn start_task_internal(
         );
         emit_status("Reconnecting...", "yellow", "running")?;
 
+        let claude_runtime = claude_runtime_from_task(&task, &settings);
         let (client, session_id, used_session_load) = match reconnect_session_with_context(
-            agent, &task, &cwd, &env, &state.db, false,
+            agent,
+            &task,
+            &cwd,
+            &env,
+            &state.db,
+            false,
+            &settings,
+            claude_runtime,
         )
         .await
         {
@@ -4541,9 +4823,17 @@ pub(crate) async fn start_task_internal(
                                     }
                                 };
 
+                            let claude_runtime = claude_runtime_from_task(&task, &settings);
                             let (new_client, new_session_id, _used_session_load) =
                                 reconnect_session_with_context(
-                                    agent, &task, &cwd, &env, &state.db, true,
+                                    agent,
+                                    &task,
+                                    &cwd,
+                                    &env,
+                                    &state.db,
+                                    true,
+                                    &settings,
+                                    claude_runtime,
                                 )
                                 .await?;
 
@@ -4660,8 +4950,18 @@ pub(crate) async fn start_task_internal(
                     };
 
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false)
-                        .await
+                    let claude_runtime = claude_runtime_from_task(&task, &settings);
+                    match reconnect_session_with_context(
+                        agent,
+                        &task,
+                        &cwd,
+                        &env,
+                        &state.db,
+                        false,
+                        &settings,
+                        claude_runtime,
+                    )
+                    .await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(
@@ -6104,8 +6404,18 @@ async fn switch_running_codex_tasks(
         let overrides = auth_env_for(&task.agent_id, &settings, Some(codex_home));
         let allow_missing = settings.codex_auth_method.as_deref() == Some("chatgpt");
         let env = build_env(&agent.required_env, &overrides, allow_missing)?;
-        let (client, session_id, _used_session_load) =
-            reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, true).await?;
+        let claude_runtime = claude_runtime_from_task(&task, &settings);
+        let (client, session_id, _used_session_load) = reconnect_session_with_context(
+            agent,
+            &task,
+            &cwd,
+            &env,
+            &state.db,
+            true,
+            &settings,
+            claude_runtime,
+        )
+        .await?;
 
         // Build a history-wrapped "Continue" prompt so the new session has context.
         // Since we skipped session/load, we must inject history explicitly.
@@ -8981,8 +9291,16 @@ pub(crate) async fn send_chat_message_internal(
             let _ = window.emit("ChatLogStatus", (&task_id, "Reconnecting...", "running"));
         }
 
+        let claude_runtime = claude_runtime_from_task(&task, &settings);
         let (client, session_id, used_session_load) = match reconnect_session_with_context(
-            agent, &task, &cwd, &env, &state.db, false,
+            agent,
+            &task,
+            &cwd,
+            &env,
+            &state.db,
+            false,
+            &settings,
+            claude_runtime,
         )
         .await
         {
@@ -9538,9 +9856,17 @@ pub(crate) async fn send_chat_message_internal(
                                     }
                                 };
 
+                            let claude_runtime = claude_runtime_from_task(&task, &settings);
                             let (new_client, new_session_id, _used_session_load) =
                                 reconnect_session_with_context(
-                                    agent, &task, &cwd, &env, &state.db, true,
+                                    agent,
+                                    &task,
+                                    &cwd,
+                                    &env,
+                                    &state.db,
+                                    true,
+                                    &settings,
+                                    claude_runtime,
                                 )
                                 .await?;
 
@@ -9682,8 +10008,18 @@ pub(crate) async fn send_chat_message_internal(
                     };
 
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false)
-                        .await
+                    let claude_runtime = claude_runtime_from_task(&task, &settings);
+                    match reconnect_session_with_context(
+                        agent,
+                        &task,
+                        &cwd,
+                        &env,
+                        &state.db,
+                        false,
+                        &settings,
+                        claude_runtime,
+                    )
+                    .await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(

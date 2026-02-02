@@ -6,7 +6,7 @@ use rusqlite::Connection;
 use serde_json::json;
 
 use crate::db;
-use phantom_harness_backend::cli::AgentProcessClient;
+use phantom_harness_backend::cli::{AgentCliKind, AgentProcessClient};
 
 fn respond_json(mut stream: TcpStream, status: &str, body: serde_json::Value) {
     let body_str = body.to_string();
@@ -135,6 +135,7 @@ fn handle_request(stream: TcpStream, db_conn: Arc<StdMutex<Connection>>) {
                     &vec!["--output-format".to_string(), "stream-json".to_string()],
                     &cwd,
                     &[],
+                    AgentCliKind::Claude,
                 )
                 .await?;
                 client.session_set_mode("", "bypassPermissions").await?;

@@ -1,4 +1,4 @@
-use phantom_harness_backend::cli::AgentProcessClient;
+use phantom_harness_backend::cli::{AgentCliKind, AgentProcessClient};
 
 // Smoke test for Claude Code stream-json adapter.
 //
@@ -20,6 +20,7 @@ async fn claude_stream_smoke() {
         &vec!["--output-format".to_string(), "stream-json".to_string()],
         &cwd,
         &[],
+        AgentCliKind::Claude,
     )
     .await
     .expect("spawn");

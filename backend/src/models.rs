@@ -1,6 +1,6 @@
 use crate::cli::{
-    AgentProcessClient, AvailableMode, CodexModeInfo, ConfigOption, ConfigOptionValue, ModelInfo,
-    NewSessionResult,
+    AgentCliKind, AgentProcessClient, AvailableMode, CodexModeInfo, ConfigOption, ConfigOptionValue,
+    ModelInfo, NewSessionResult,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,7 @@ pub async fn get_agent_models(config: AgentLaunchConfig) -> Result<Vec<ModelOpti
         &config.args,
         Path::new(&config.cwd),
         &config.env,
+        AgentCliKind::from_command(&config.command),
     )
     .await?;
 
@@ -95,6 +96,7 @@ pub async fn get_codex_models(config: AgentLaunchConfig) -> Result<Vec<ModelOpti
         &["app-server".to_string()], // Override args to use app-server
         Path::new(&config.cwd),
         &config.env,
+        AgentCliKind::from_command(&config.command),
     )
     .await?;
 
@@ -121,6 +123,7 @@ pub async fn get_codex_models_enriched(
         &["app-server".to_string()],
         Path::new(&config.cwd),
         &config.env,
+        AgentCliKind::from_command(&config.command),
     )
     .await?;
 
@@ -244,6 +247,7 @@ pub async fn get_agent_modes(config: AgentLaunchConfig) -> Result<Vec<ModeOption
         &config.args,
         Path::new(&config.cwd),
         &config.env,
+        AgentCliKind::from_command(&config.command),
     )
     .await?;
 
@@ -262,6 +266,7 @@ pub async fn get_codex_modes(config: AgentLaunchConfig) -> Result<Vec<ModeOption
         &["app-server".to_string()], // Override args to use app-server
         Path::new(&config.cwd),
         &config.env,
+        AgentCliKind::from_command(&config.command),
     )
     .await?;
 

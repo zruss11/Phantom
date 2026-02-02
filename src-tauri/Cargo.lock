@@ -2875,6 +2875,7 @@ dependencies = [
  "dirs 5.0.1",
  "glob",
  "hyper 0.14.32",
+ "libc",
  "phantom_harness_backend",
  "portable-pty",
  "rand 0.8.5",

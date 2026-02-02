@@ -2355,6 +2355,12 @@ function restoreTaskSettings(settings) {
   if (settings.taskBaseBranch !== undefined) {
     pendingBaseBranchValue = settings.taskBaseBranch;
   }
+  if (settings.taskClaudeRuntime !== undefined) {
+    const runtimeToggle = document.getElementById("claudeDockerToggle");
+    if (runtimeToggle) {
+      runtimeToggle.checked = settings.taskClaudeRuntime === "docker";
+    }
+  }
 
   // Select last used agent if available
   if (settings.taskLastAgent) {
@@ -2410,6 +2416,11 @@ async function saveTaskSettingsCore(agentIdOverride) {
     taskBaseBranch: baseBranch,
     taskLastAgent: agentId,
     taskAgentModels: agentModels,
+    taskClaudeRuntime: (() => {
+      const runtimeToggle = document.getElementById("claudeDockerToggle");
+      if (!runtimeToggle) return "native";
+      return runtimeToggle.checked ? "docker" : "native";
+    })(),
   };
 
   const updated = Object.assign({}, currentSettings, taskSettings);
@@ -3319,6 +3330,12 @@ init();
       isRestoringSettings = false;
     }
 
+    // Show Claude runtime toggle only for Claude Code
+    const claudeRuntimeRow = document.getElementById("claudeDockerRow");
+    if (claudeRuntimeRow) {
+      claudeRuntimeRow.style.display = agentId === "claude-code" ? "" : "none";
+    }
+
     const models = await loadModels(agentId);
     if (activeAgentId !== agentId) {
       console.log("[Harness] Skipping stale model load for", agentId);
@@ -3551,6 +3568,11 @@ init();
         if (agentModeGroup) agentModeGroup.style.display = "none";
         if (reasoningEffortGroup) reasoningEffortGroup.style.display = "none";
       }
+
+      const claudeRuntimeRow = document.getElementById("claudeDockerRow");
+      if (claudeRuntimeRow) {
+        claudeRuntimeRow.style.display = initialAgentId === "claude-code" ? "" : "none";
+      }
     }
     hydrateModelsFromCache();
     ensureExecModelOptions();
@@ -3566,6 +3588,7 @@ init();
 
   // Save settings when toggles change
   $("#useWorktreeToggle").on("change", saveTaskSettings);
+  $("#claudeDockerToggle").on("change", saveTaskSettings);
 
   // Note: Permission mode, model, and agent mode dropdown changes are handled
   // by the onChange callbacks in initCustomDropdowns()
@@ -3641,6 +3664,9 @@ init();
       const permissionMode = agentsWithOwnPermissions.includes(agentId)
         ? "bypassPermissions"
         : (prefs.permissionMode || "default");
+      const claudeRuntime = agentId === "claude-code"
+        ? (document.getElementById("claudeDockerToggle")?.checked ? "docker" : "native")
+        : null;
 
       const payload = {
         agentId: agentId,
@@ -3655,6 +3681,7 @@ init();
         reasoningEffort: reasoningEffort !== "default" ? reasoningEffort : null,
         agentMode: agentMode,
         codexMode: codexMode !== "default" ? codexMode : null,
+        claudeRuntime: claudeRuntime,
         attachments: attachments.map((a) => ({
           id: a.id,
           relativePath: a.relativePath,

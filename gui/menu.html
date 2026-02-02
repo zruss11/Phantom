@@ -298,6 +298,34 @@
                         <div id="worktreeMultiHint" class="worktree-multi-hint text-muted" style="display: none;">
                           Multi-agent runs always use a worktree.
                         </div>
+                        <div class="setting-row" id="claudeDockerRow" style="display: none;">
+                          <div class="setting-label">
+                            Claude Runtime
+                          </div>
+                          <div
+                            class="toggle-buttons"
+                            data-toggle="claude-runtime"
+                          >
+                            <button
+                              class="toggle-button"
+                              type="button"
+                              data-value="false"
+                            >
+                              Native
+                            </button>
+                            <button
+                              class="toggle-button"
+                              type="button"
+                              data-value="true"
+                            >
+                              Docker
+                            </button>
+                            <input
+                              type="checkbox"
+                              id="claudeDockerToggle"
+                            />
+                          </div>
+                        </div>
                       </div>
                       <div class="form-group mb-0 mt-3">
                         <a
