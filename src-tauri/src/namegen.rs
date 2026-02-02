@@ -233,13 +233,12 @@ async fn generate_with_codex_backend(prompt: &str) -> Result<String, String> {
     Ok(extract_json_from_text(&text))
 }
 
-/// Extract the first complete JSON object from potentially wrapped text response.
+/// Extract the last complete JSON object from potentially wrapped text response.
 /// Models sometimes wrap JSON in markdown code blocks or extra text, or return
 /// multiple JSON objects (e.g., echoing examples from the prompt).
 fn extract_json_from_text(text: &str) -> String {
     let text = text.trim();
-
-    let mut last: Option<(usize, usize)> = None;
+    let mut last_json: Option<String> = None;
     let mut start: Option<usize> = None;
     let mut depth = 0;
     let mut in_string = false;
@@ -269,7 +268,13 @@ fn extract_json_from_text(text: &str) -> String {
                     depth -= 1;
                     if depth == 0 {
                         if let Some(start_idx) = start {
-                            last = Some((start_idx, idx));
+                            let candidate = &text[start_idx..=idx];
+                            if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate)
+                            {
+                                if value.is_object() {
+                                    last_json = Some(candidate.to_string());
+                                }
+                            }
                             start = None;
                         }
                     }
@@ -279,8 +284,8 @@ fn extract_json_from_text(text: &str) -> String {
         }
     }
 
-    if let Some((start_idx, end_idx)) = last {
-        return text[start_idx..=end_idx].to_string();
+    if let Some(json) = last_json {
+        return json;
     }
 
     text.to_string()
@@ -446,11 +451,16 @@ mod tests {
             r#"{"title":"Test","branchName":"feat/test"}"#
         );
 
-        // Test multiple JSON objects - should return the last one
+        // Test echoed prompt examples - should return the last JSON object
         assert_eq!(
             extract_json_from_text(
-                r#"{"title":"Fix Login Redirect Loop","branchName":"fix/login-redirect-loop"}
+                r#"Examples:
+{"title":"Fix Login Redirect Loop","branchName":"fix/login-redirect-loop"}
 {"title":"Add Workspace Home View","branchName":"feat/workspace-home"}
+
+Task:
+Update dependencies to latest versions.
+
 {"title":"Update Dependencies","branchName":"chore/update-deps"}"#
             ),
             r#"{"title":"Update Dependencies","branchName":"chore/update-deps"}"#

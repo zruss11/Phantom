@@ -514,6 +514,12 @@
         if (channel === 'claudeLogin') {
           return tauriInvoke('claude_login');
         }
+        if (channel === 'startClaudeOauth') {
+          return tauriInvoke('start_claude_oauth');
+        }
+        if (channel === 'cancelClaudeOauth') {
+          return tauriInvoke('cancel_claude_oauth');
+        }
         if (channel === 'claudeLogout') {
           return tauriInvoke('claude_logout');
         }
@@ -909,6 +915,15 @@
             break;
           case 'checkClaudeAuth':
             resolve({ authenticated: false, method: null, expires_at: null, email: null });
+            break;
+          case 'startClaudeOauth':
+            resolve({
+              url: 'https://console.anthropic.com/oauth/authorize',
+              alreadyAuthenticated: false
+            });
+            break;
+          case 'cancelClaudeOauth':
+            resolve();
             break;
           case 'claudeLogout':
             mockData.settings.claudeAuthMethod = null;

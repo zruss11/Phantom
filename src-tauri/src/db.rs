@@ -34,6 +34,9 @@ pub struct TaskRecord {
     /// Model context window size (for context indicator)
     #[serde(rename = "contextWindow")]
     pub context_window: Option<i64>,
+    /// Claude Code runtime ("native" or "docker")
+    #[serde(rename = "claudeRuntime")]
+    pub claude_runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -111,7 +114,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             status_state TEXT DEFAULT 'idle',
             cost REAL DEFAULT 0.0,
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            claude_runtime TEXT
         )",
         [],
     )?;
@@ -273,6 +277,9 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         .ok();
     // Add codex_account_id column for Codex account routing (migration)
     conn.execute("ALTER TABLE tasks ADD COLUMN codex_account_id TEXT", [])
+        .ok();
+    // Add claude_runtime column for Docker runtime support (migration)
+    conn.execute("ALTER TABLE tasks ADD COLUMN claude_runtime TEXT", [])
         .ok();
 
     Ok(conn)
@@ -472,8 +479,8 @@ pub fn get_all_cached_modes(conn: &Connection) -> Result<Vec<(String, Vec<Cached
 
 pub fn insert_task(conn: &Connection, task: &TaskRecord) -> Result<()> {
     conn.execute(
-        "INSERT INTO tasks (id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO tasks (id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             task.id,
             task.agent_id,
@@ -492,6 +499,7 @@ pub fn insert_task(conn: &Connection, task: &TaskRecord) -> Result<()> {
             task.agent_session_id,
             task.total_tokens,
             task.context_window,
+            task.claude_runtime,
         ],
     )?;
     Ok(())
@@ -827,7 +835,7 @@ pub fn get_messages(conn: &Connection, task_id: &str) -> Result<Vec<serde_json::
 
 pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRecord>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window
+        "SELECT id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime
          FROM tasks ORDER BY created_at DESC"
     )?;
     let tasks = stmt.query_map([], |row| {
@@ -849,6 +857,7 @@ pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRecord>> {
             agent_session_id: row.get(14)?,
             total_tokens: row.get(15)?,
             context_window: row.get(16)?,
+            claude_runtime: row.get(17)?,
         })
     })?;
     tasks.collect()

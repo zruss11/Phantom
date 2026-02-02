@@ -1,4 +1,4 @@
-use phantom_harness_backend::cli::{AgentProcessClient, StreamingUpdate};
+use phantom_harness_backend::cli::{AgentCliKind, AgentProcessClient, StreamingUpdate};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -12,6 +12,7 @@ async fn main() -> anyhow::Result<()> {
         &vec!["--output-format".to_string(), "stream-json".to_string()],
         &cwd,
         &[],
+        AgentCliKind::Claude,
     )
     .await?;
 

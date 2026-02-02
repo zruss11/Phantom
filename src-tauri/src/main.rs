@@ -14,12 +14,12 @@ mod utils;
 mod webhook;
 mod worktree;
 
-use utils::{resolve_command_path, resolve_gh_binary, truncate_str};
+use utils::{default_search_paths, resolve_command_path, resolve_gh_binary, truncate_str};
 
 use chrono::TimeZone;
 use phantom_harness_backend::cli::{
-    AgentProcessClient, AvailableCommand, ImageContent, StreamingUpdate, TokenUsageInfo,
-    UserInputQuestion,
+    AgentCliKind, AgentProcessClient, AvailableCommand, ImageContent, StreamingUpdate,
+    TokenUsageInfo, UserInputQuestion,
 };
 use phantom_harness_backend::{
     apply_model_selection, get_agent_models as backend_get_agent_models,
@@ -46,8 +46,11 @@ use tauri::{
 use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
+
+#[cfg(unix)]
+use libc::{getegid, geteuid};
 
 use debug_http::start_debug_http;
 use mcp_server::{start_mcp_server, McpConfig};
@@ -78,6 +81,11 @@ const MODEL_PRICING: &[(&str, f64, f64)] = &[
     ("claude-3-sonnet", 3.00, 15.00),
     ("claude-3-haiku", 0.25, 1.25),
 ];
+
+const CLAUDE_DOCKER_IMAGE_DEFAULT: &str = "nezhar/claude-container:1.6.1";
+const CLAUDE_DOCKER_WORKDIR: &str = "/workspace";
+const CLAUDE_DOCKER_HOME: &str = "/home/claude";
+const CLAUDE_DOCKER_CONFIG_DIR: &str = "/home/claude/.claude";
 
 /// Calculate cost from token usage for a given model
 fn calculate_cost_from_usage(model: &str, usage: &TokenUsageInfo) -> f64 {
@@ -236,8 +244,8 @@ fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvail
     let mut map = HashMap::new();
     for agent in &config.agents {
         let command = resolve_agent_command(agent);
-        let available = command_exists(&command);
-        let error_message = if available {
+        let mut available = command_exists(&command);
+        let mut error_message = if available {
             None
         } else {
             Some(format!(
@@ -245,6 +253,17 @@ fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvail
                 agent.command, agent.command
             ))
         };
+        if !available && agent.id == "claude-code" {
+            let docker_available = command_exists("docker");
+            if docker_available {
+                available = true;
+                error_message = None;
+            } else {
+                error_message = Some(
+                    "Claude CLI not found and Docker is unavailable. Install Claude Code or Docker Desktop.".to_string(),
+                );
+            }
+        }
         if available {
             tracing::info!(
                 agent_id = %agent.id,
@@ -293,8 +312,17 @@ pub(crate) struct AppState {
     pending_discord_tasks: Arc<Mutex<HashMap<String, PendingDiscordTask>>>,
     codex_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
     claude_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
+    claude_oauth_state: Arc<Mutex<ClaudeOauthState>>,
     terminal_sessions: Arc<Mutex<HashMap<String, TerminalSession>>>,
     task_terminal_sessions: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[derive(Debug, Default)]
+struct ClaudeOauthState {
+    child: Option<tokio::process::Child>,
+    url: Option<String>,
+    starting: bool,
+    watchdog_id: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -401,6 +429,9 @@ pub(crate) struct CreateAgentPayload {
     /// Codex mode (default, plan, pair-programming, execute)
     #[serde(rename = "codexMode", default)]
     pub(crate) codex_mode: Option<String>,
+    /// Claude Code runtime ("native" or "docker")
+    #[serde(rename = "claudeRuntime", default)]
+    pub(crate) claude_runtime: Option<String>,
     /// True when creating multiple agent sessions in one action
     #[serde(rename = "multiCreate", default)]
     pub(crate) multi_create: bool,
@@ -434,6 +465,8 @@ struct Settings {
     active_codex_account_id: Option<String>,
     #[serde(rename = "claudeAuthMethod")]
     claude_auth_method: Option<String>,
+    #[serde(rename = "claudeDockerImage")]
+    claude_docker_image: Option<String>,
     #[serde(rename = "agentNotificationsEnabled")]
     agent_notifications_enabled: Option<bool>,
     #[serde(rename = "agentNotificationStack")]
@@ -460,6 +493,8 @@ struct Settings {
     pub(crate) task_use_worktree: Option<bool>,
     #[serde(rename = "taskBaseBranch")]
     pub(crate) task_base_branch: Option<String>,
+    #[serde(rename = "taskClaudeRuntime")]
+    pub(crate) task_claude_runtime: Option<String>,
     #[serde(rename = "taskLastAgent")]
     pub(crate) task_last_agent: Option<String>,
     // Per-agent task selections stored as JSON object
@@ -497,6 +532,28 @@ pub(crate) struct PendingDiscordTask {
 pub(crate) enum MessageOrigin {
     Ui,
     Discord,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeRuntime {
+    Native,
+    Docker,
+}
+
+impl ClaudeRuntime {
+    fn from_str(value: Option<&str>) -> Self {
+        match value {
+            Some("docker") => ClaudeRuntime::Docker,
+            _ => ClaudeRuntime::Native,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            ClaudeRuntime::Native => "native",
+            ClaudeRuntime::Docker => "docker",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -555,6 +612,13 @@ struct ClaudeAuthStatus {
     method: Option<String>,
     expires_at: Option<String>,
     email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeOauthStartResponse {
+    url: Option<String>,
+    already_authenticated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -939,6 +1003,11 @@ fn mcp_enabled(settings: &Settings) -> bool {
     settings.mcp_enabled.unwrap_or(true)
 }
 
+fn claude_credentials_write_enabled(settings: &Settings) -> bool {
+    let _ = settings;
+    true
+}
+
 fn db_path() -> Result<PathBuf, String> {
     let base = dirs::config_dir().ok_or_else(|| "config dir unavailable".to_string())?;
     let dir = base.join("phantom-harness");
@@ -1038,8 +1107,19 @@ fn auth_env_for(
     if let Some(value) = settings.openai_api_key.as_ref() {
         env.push(("OPENAI_API_KEY".to_string(), value.clone()));
     }
-    if let Some(value) = settings.anthropic_api_key.as_ref() {
-        env.push(("ANTHROPIC_API_KEY".to_string(), value.clone()));
+    if agent_id == "claude-code" {
+        // Prefer OAuth when configured; avoid passing API key which can override OAuth.
+        if settings.claude_auth_method.as_deref() != Some("oauth") {
+            if let Some(value) = settings.anthropic_api_key.as_ref() {
+                if !value.trim().is_empty() {
+                    env.push(("ANTHROPIC_API_KEY".to_string(), value.clone()));
+                }
+            }
+        }
+    } else if let Some(value) = settings.anthropic_api_key.as_ref() {
+        if !value.trim().is_empty() {
+            env.push(("ANTHROPIC_API_KEY".to_string(), value.clone()));
+        }
     }
     if agent_id == "codex" {
         if let Some(home) = codex_home {
@@ -2222,6 +2302,435 @@ fn resolve_claude_command() -> String {
     "claude".to_string()
 }
 
+fn cli_kind_for_agent(agent_id: &str) -> AgentCliKind {
+    match agent_id {
+        "claude-code" => AgentCliKind::Claude,
+        "codex" => AgentCliKind::Codex,
+        "amp" => AgentCliKind::Amp,
+        "droid" | "factory-droid" => AgentCliKind::Droid,
+        "opencode" => AgentCliKind::OpenCode,
+        _ => AgentCliKind::Other,
+    }
+}
+
+fn claude_runtime_from_payload(payload: &CreateAgentPayload, settings: &Settings) -> ClaudeRuntime {
+    if payload.agent_id != "claude-code" {
+        return ClaudeRuntime::Native;
+    }
+    ClaudeRuntime::from_str(
+        payload
+            .claude_runtime
+            .as_deref()
+            .or(settings.task_claude_runtime.as_deref()),
+    )
+}
+
+fn claude_runtime_from_task(task: &db::TaskRecord, settings: &Settings) -> ClaudeRuntime {
+    if task.agent_id != "claude-code" {
+        return ClaudeRuntime::Native;
+    }
+    ClaudeRuntime::from_str(
+        task.claude_runtime
+            .as_deref()
+            .or(settings.task_claude_runtime.as_deref()),
+    )
+}
+
+fn container_workdir(workspace_root: &Path, cwd: &Path) -> String {
+    if let Ok(relative) = cwd.strip_prefix(workspace_root) {
+        if !relative.as_os_str().is_empty() {
+            let rel = relative.to_string_lossy().to_string();
+            return format!("{}/{}", CLAUDE_DOCKER_WORKDIR, rel);
+        }
+    }
+    CLAUDE_DOCKER_WORKDIR.to_string()
+}
+
+struct AgentSpawnSpec {
+    command: String,
+    args: Vec<String>,
+    cli_kind: AgentCliKind,
+}
+
+struct ClaudeOauthSpawnSpec {
+    command: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
+fn push_docker_env(
+    args: &mut Vec<String>,
+    env_keys: &mut HashSet<String>,
+    key: &str,
+    value: &str,
+) {
+    if env_keys.insert(key.to_string()) {
+        args.push("-e".to_string());
+        args.push(format!("{}={}", key, value));
+    }
+}
+
+fn build_claude_docker_spawn_spec(
+    workspace_root: &Path,
+    cwd: &Path,
+    env: &[(String, String)],
+    settings: &Settings,
+    base_args: &[String],
+) -> Result<AgentSpawnSpec, String> {
+    let docker_command = resolve_command_path("docker")
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or("Docker CLI not found in PATH")?;
+
+    let image = settings
+        .claude_docker_image
+        .as_deref()
+        .unwrap_or(CLAUDE_DOCKER_IMAGE_DEFAULT);
+
+    let mut args: Vec<String> = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-i".to_string(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+        "--cap-add".to_string(),
+        "CHOWN".to_string(),
+        "--cap-add".to_string(),
+        "SETUID".to_string(),
+        "--cap-add".to_string(),
+        "SETGID".to_string(),
+    ];
+
+    let mut env_keys: HashSet<String> = HashSet::new();
+
+    #[cfg(unix)]
+    let uid = unsafe { geteuid() };
+    #[cfg(unix)]
+    let gid = unsafe { getegid() };
+    #[cfg(not(unix))]
+    let uid = 1000;
+    #[cfg(not(unix))]
+    let gid = 1000;
+    push_docker_env(&mut args, &mut env_keys, "USER_UID", &uid.to_string());
+    push_docker_env(&mut args, &mut env_keys, "USER_GID", &gid.to_string());
+    push_docker_env(
+        &mut args,
+        &mut env_keys,
+        "CLAUDE_CONFIG_DIR",
+        CLAUDE_DOCKER_CONFIG_DIR,
+    );
+    push_docker_env(&mut args, &mut env_keys, "HOME", CLAUDE_DOCKER_HOME);
+    if settings.claude_auth_method.as_deref() == Some("oauth") {
+        let _ = ensure_claude_credentials_file_opt_in(claude_credentials_write_enabled(settings));
+        if let Some(token) = get_claude_oauth_token() {
+            if !token.trim().is_empty() {
+                push_docker_env(&mut args, &mut env_keys, "CLAUDE_CODE_OAUTH_TOKEN", &token);
+            }
+        }
+    }
+
+    let tmpdir = std::env::var("TMPDIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
+    if !tmpdir.trim().is_empty() {
+        push_docker_env(&mut args, &mut env_keys, "TMPDIR", &tmpdir);
+        args.push("-v".to_string());
+        args.push(format!("{}:{}", tmpdir, tmpdir));
+    }
+
+    for (key, value) in env {
+        if key == "ANTHROPIC_API_KEY" {
+            push_docker_env(&mut args, &mut env_keys, key, value);
+        }
+    }
+
+    let workspace_root = std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    args.push("-v".to_string());
+    args.push(format!(
+        "{}:{}",
+        workspace_root.to_string_lossy(),
+        CLAUDE_DOCKER_WORKDIR
+    ));
+    args.push("-w".to_string());
+    args.push(container_workdir(&workspace_root, cwd));
+
+    let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+    let write_credentials = claude_credentials_write_enabled(settings);
+    let host_claude_dir = home.join(".claude");
+    if write_credentials {
+        if let Err(err) = std::fs::create_dir_all(&host_claude_dir) {
+            return Err(format!("Failed to create ~/.claude directory: {}", err));
+        }
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{}",
+            host_claude_dir.to_string_lossy(),
+            CLAUDE_DOCKER_CONFIG_DIR
+        ));
+    } else if host_claude_dir.exists() {
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{}:ro",
+            host_claude_dir.to_string_lossy(),
+            CLAUDE_DOCKER_CONFIG_DIR
+        ));
+    }
+
+    let host_claude_json = home.join(".claude.json");
+    if host_claude_json.exists() {
+        let mount_mode = if write_credentials { "" } else { ":ro" };
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{}/.claude.json{}",
+            host_claude_json.to_string_lossy(),
+            CLAUDE_DOCKER_HOME,
+            mount_mode
+        ));
+    }
+
+    args.push(image.to_string());
+    args.push("claude".to_string());
+    args.extend(base_args.iter().cloned());
+
+    Ok(AgentSpawnSpec {
+        command: docker_command,
+        args,
+        cli_kind: AgentCliKind::Claude,
+    })
+}
+
+fn build_claude_oauth_spawn_spec(settings: &Settings) -> Result<ClaudeOauthSpawnSpec, String> {
+    let claude_cmd = resolve_claude_command();
+    if command_exists(&claude_cmd) {
+        let mut env = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            let claude_dir = home.join(".claude");
+            env.push((
+                "CLAUDE_CONFIG_DIR".to_string(),
+                claude_dir.to_string_lossy().to_string(),
+            ));
+        }
+        return Ok(ClaudeOauthSpawnSpec {
+            command: claude_cmd,
+            args: vec!["setup-token".to_string()],
+            env,
+        });
+    }
+
+    let docker_command = resolve_command_path("docker")
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or("Docker CLI not found in PATH")?;
+
+    let image = settings
+        .claude_docker_image
+        .as_deref()
+        .unwrap_or(CLAUDE_DOCKER_IMAGE_DEFAULT);
+
+    let mut args: Vec<String> = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-i".to_string(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+        "--cap-add".to_string(),
+        "CHOWN".to_string(),
+        "--cap-add".to_string(),
+        "SETUID".to_string(),
+        "--cap-add".to_string(),
+        "SETGID".to_string(),
+    ];
+
+    args.push("-e".to_string());
+    args.push(format!("HOME={}", CLAUDE_DOCKER_HOME));
+    args.push("-e".to_string());
+    args.push(format!("CLAUDE_CONFIG_DIR={}", CLAUDE_DOCKER_CONFIG_DIR));
+
+    #[cfg(unix)]
+    {
+        let uid = unsafe { geteuid() };
+        let gid = unsafe { getegid() };
+        args.push("-e".to_string());
+        args.push(format!("USER_UID={}", uid));
+        args.push("-e".to_string());
+        args.push(format!("USER_GID={}", gid));
+    }
+
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        if !tmpdir.trim().is_empty() {
+            args.push("-e".to_string());
+            args.push(format!("TMPDIR={}", tmpdir));
+            args.push("-v".to_string());
+            args.push(format!("{tmpdir}:{tmpdir}"));
+        }
+    }
+
+    let home = dirs::home_dir().ok_or("Unable to resolve HOME for Claude OAuth")?;
+    let host_claude_dir = home.join(".claude");
+    if let Err(err) = std::fs::create_dir_all(&host_claude_dir) {
+        return Err(format!("Failed to create ~/.claude directory: {}", err));
+    }
+    args.push("-v".to_string());
+    args.push(format!(
+        "{}:{}",
+        host_claude_dir.to_string_lossy(),
+        CLAUDE_DOCKER_CONFIG_DIR
+    ));
+
+    let host_claude_json = home.join(".claude.json");
+    if host_claude_json.exists() {
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{}/.claude.json",
+            host_claude_json.to_string_lossy(),
+            CLAUDE_DOCKER_HOME
+        ));
+    }
+
+    args.push(image.to_string());
+    args.push("claude".to_string());
+    args.push("setup-token".to_string());
+
+    Ok(ClaudeOauthSpawnSpec {
+        command: docker_command,
+        args,
+        env: Vec::new(),
+    })
+}
+
+async fn start_claude_oauth_internal(state: &AppState) -> Result<ClaudeOauthStartResponse, String> {
+    let current_status = check_claude_auth_internal().await?;
+    if current_status.authenticated {
+        return Ok(ClaudeOauthStartResponse {
+            url: None,
+            already_authenticated: true,
+        });
+    }
+
+    let watchdog_id = {
+        let mut oauth_state = state.claude_oauth_state.lock().await;
+        cleanup_claude_oauth_state(&mut oauth_state);
+        if oauth_state.child.is_some() || oauth_state.starting {
+            if oauth_state.url.is_some() {
+                return Ok(ClaudeOauthStartResponse {
+                    url: oauth_state.url.clone(),
+                    already_authenticated: false,
+                });
+            }
+            return Err("Claude OAuth already in progress".to_string());
+        }
+        oauth_state.starting = true;
+        oauth_state.watchdog_id = oauth_state.watchdog_id.wrapping_add(1);
+        oauth_state.watchdog_id
+    };
+
+    let settings = state.settings.lock().await.clone();
+    let spawn_spec = match build_claude_oauth_spawn_spec(&settings) {
+        Ok(spec) => spec,
+        Err(err) => {
+            let mut oauth_state = state.claude_oauth_state.lock().await;
+            oauth_state.starting = false;
+            return Err(err);
+        }
+    };
+
+    let mut command = TokioCommand::new(&spawn_spec.command);
+    command
+        .args(&spawn_spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in spawn_spec.env {
+        command.env(key, value);
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let mut oauth_state = state.claude_oauth_state.lock().await;
+            oauth_state.starting = false;
+            return Err(format!("Failed to start Claude OAuth: {}", err));
+        }
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = tx.send(line);
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = tx.send(line);
+            }
+        });
+    }
+
+    let url_result = timeout(Duration::from_secs(20), async {
+        while let Some(line) = rx.recv().await {
+            if let Some(url) = extract_oauth_url(&line, validate_claude_oauth_url) {
+                return Ok(url);
+            }
+        }
+        Err("Claude OAuth URL not found".to_string())
+    })
+    .await
+    .map_err(|_| "Timed out waiting for Claude OAuth URL".to_string());
+
+    let url = match url_result {
+        Ok(Ok(url)) => url,
+        Ok(Err(err)) | Err(err) => {
+            let _ = child.kill().await;
+            let mut oauth_state = state.claude_oauth_state.lock().await;
+            oauth_state.starting = false;
+            return Err(err);
+        }
+    };
+
+    {
+        let mut oauth_state = state.claude_oauth_state.lock().await;
+        oauth_state.url = Some(url.clone());
+        oauth_state.child = Some(child);
+        oauth_state.starting = false;
+    }
+
+    let oauth_state_handle = state.claude_oauth_state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        let child_to_kill = {
+            let mut oauth_state = oauth_state_handle.lock().await;
+            if oauth_state.watchdog_id != watchdog_id {
+                return;
+            }
+            if oauth_state.child.is_some() {
+                oauth_state.url = None;
+                oauth_state.starting = false;
+                oauth_state.child.take()
+            } else {
+                return;
+            }
+        };
+        if let Some(mut child) = child_to_kill {
+            let _ = child.kill().await;
+        }
+    });
+
+    Ok(ClaudeOauthStartResponse {
+        url: Some(url),
+        already_authenticated: false,
+    })
+}
+
 fn resolve_agent_command(agent: &AgentConfig) -> String {
     match agent.command.as_str() {
         "claude" => resolve_claude_command(),
@@ -2251,22 +2760,82 @@ fn validate_oauth_url(url: &str) -> bool {
     false
 }
 
+/// Validate Claude OAuth URLs against known Anthropic/Claude domains
+fn validate_claude_oauth_url(url: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let allowed_domains = [
+            "console.anthropic.com",
+            "claude.ai",
+            "accounts.anthropic.com",
+            "auth.anthropic.com",
+        ];
+        if let Some(host) = parsed.host_str() {
+            return parsed.scheme() == "https"
+                && allowed_domains
+                    .iter()
+                    .any(|d| host == *d || host.ends_with(&format!(".{}", d)));
+        }
+    }
+    false
+}
+
+fn extract_oauth_url(line: &str, validator: fn(&str) -> bool) -> Option<String> {
+    for token in line.split_whitespace() {
+        let trimmed = token.trim_matches(|c: char| {
+            matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | '.' | ';')
+        });
+        if trimmed.starts_with("https://") && validator(trimmed) {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn cleanup_claude_oauth_state(state: &mut ClaudeOauthState) {
+    if let Some(child) = state.child.as_mut() {
+        if let Ok(Some(_)) = child.try_wait() {
+            state.child = None;
+            state.url = None;
+            state.starting = false;
+        }
+    }
+}
+
+fn build_agent_spawn_spec(
+    agent: &AgentConfig,
+    workspace_root: &Path,
+    cwd: &Path,
+    env: &[(String, String)],
+    settings: &Settings,
+    claude_runtime: ClaudeRuntime,
+    base_args: &[String],
+) -> Result<AgentSpawnSpec, String> {
+    if agent.id == "claude-code" && claude_runtime == ClaudeRuntime::Docker {
+        return build_claude_docker_spawn_spec(workspace_root, cwd, env, settings, base_args);
+    }
+
+    Ok(AgentSpawnSpec {
+        command: resolve_agent_command(agent),
+        args: base_args.to_vec(),
+        cli_kind: cli_kind_for_agent(&agent.id),
+    })
+}
+
 async fn spawn_agent_client(
     agent: &AgentConfig,
     cwd: &Path,
     env: &[(String, String)],
-    args: &[String],
+    spawn_spec: AgentSpawnSpec,
 ) -> Result<Arc<AgentProcessClient>, String> {
-    let command = resolve_agent_command(agent);
-    match AgentProcessClient::spawn(&command, args, cwd, env).await {
+    match AgentProcessClient::spawn(&spawn_spec.command, &spawn_spec.args, cwd, env, spawn_spec.cli_kind).await {
         Ok(client) => {
-            tracing::info!(agent_id = %agent.id, command = %command, "Agent CLI spawned");
+            tracing::info!(agent_id = %agent.id, command = %spawn_spec.command, "Agent CLI spawned");
             Ok(Arc::new(client))
         }
         Err(err) => {
             tracing::error!(
                 agent_id = %agent.id,
-                command = %command,
+                command = %spawn_spec.command,
                 error = %err,
                 "Failed to spawn agent CLI"
             );
@@ -2287,12 +2856,29 @@ async fn reconnect_session_with_context(
     env: &[(String, String)],
     db: &Arc<StdMutex<rusqlite::Connection>>,
     force_history_injection: bool,
+    settings: &Settings,
+    claude_runtime: ClaudeRuntime,
 ) -> Result<(Arc<AgentProcessClient>, String, bool), String> {
     let cwd_str = cwd.to_string_lossy().to_string();
     let args = substitute_args(&agent.args, &cwd_str);
+    let workspace_root = task
+        .worktree_path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| task.project_path.as_ref().map(PathBuf::from))
+        .unwrap_or_else(|| cwd.to_path_buf());
+    let spawn_spec = build_agent_spawn_spec(
+        agent,
+        &workspace_root,
+        cwd,
+        env,
+        settings,
+        claude_runtime,
+        &args,
+    )?;
 
     // Spawn and initialize Agent client
-    let client = spawn_agent_client(agent, cwd, env, &args).await?;
+    let client = spawn_agent_client(agent, cwd, env, spawn_spec).await?;
     let _capabilities = client
         .initialize("Phantom Harness", "0.1.0")
         .await
@@ -3173,7 +3759,18 @@ pub(crate) async fn create_agent_session_internal(
             ));
     let env = build_env(&agent.required_env, &overrides, allow_missing)?;
     let args = substitute_args(&agent.args, &cwd_str);
-    let client = spawn_agent_client(agent, &cwd, &env, &args)
+    let claude_runtime = claude_runtime_from_payload(&payload, &settings);
+    let workspace_root = worktree_path.as_ref().unwrap_or(&source_path);
+    let spawn_spec = build_agent_spawn_spec(
+        agent,
+        workspace_root,
+        &cwd,
+        &env,
+        &settings,
+        claude_runtime,
+        &args,
+    )?;
+    let client = spawn_agent_client(agent, &cwd, &env, spawn_spec)
         .await
         .map_err(|err| format!("spawn failed: {}", err))?;
     client
@@ -3343,6 +3940,11 @@ pub(crate) async fn create_agent_session_internal(
             agent_session_id: Some(session.session_id.clone()),
             total_tokens: None,
             context_window: None,
+            claude_runtime: if payload.agent_id == "claude-code" {
+                Some(claude_runtime.as_str().to_string())
+            } else {
+                None
+            },
         };
         db::insert_task(&conn, &task).map_err(|e| e.to_string())?;
     }
@@ -3649,6 +4251,7 @@ pub(crate) async fn create_task_from_discord(
         reasoning_effort,
         agent_mode,
         codex_mode,
+        claude_runtime: None,
         attachments: Vec::new(),
         multi_create: false,
     };
@@ -3851,8 +4454,16 @@ pub(crate) async fn start_task_internal(
         );
         emit_status("Reconnecting...", "yellow", "running")?;
 
+        let claude_runtime = claude_runtime_from_task(&task, &settings);
         let (client, session_id, used_session_load) = match reconnect_session_with_context(
-            agent, &task, &cwd, &env, &state.db, false,
+            agent,
+            &task,
+            &cwd,
+            &env,
+            &state.db,
+            false,
+            &settings,
+            claude_runtime,
         )
         .await
         {
@@ -4530,9 +5141,17 @@ pub(crate) async fn start_task_internal(
                                     }
                                 };
 
+                            let claude_runtime = claude_runtime_from_task(&task, &settings);
                             let (new_client, new_session_id, _used_session_load) =
                                 reconnect_session_with_context(
-                                    agent, &task, &cwd, &env, &state.db, true,
+                                    agent,
+                                    &task,
+                                    &cwd,
+                                    &env,
+                                    &state.db,
+                                    true,
+                                    &settings,
+                                    claude_runtime,
                                 )
                                 .await?;
 
@@ -4649,8 +5268,18 @@ pub(crate) async fn start_task_internal(
                     };
 
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false)
-                        .await
+                    let claude_runtime = claude_runtime_from_task(&task, &settings);
+                    match reconnect_session_with_context(
+                        agent,
+                        &task,
+                        &cwd,
+                        &env,
+                        &state.db,
+                        false,
+                        &settings,
+                        claude_runtime,
+                    )
+                    .await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(
@@ -6093,8 +6722,18 @@ async fn switch_running_codex_tasks(
         let overrides = auth_env_for(&task.agent_id, &settings, Some(codex_home));
         let allow_missing = settings.codex_auth_method.as_deref() == Some("chatgpt");
         let env = build_env(&agent.required_env, &overrides, allow_missing)?;
-        let (client, session_id, _used_session_load) =
-            reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, true).await?;
+        let claude_runtime = claude_runtime_from_task(&task, &settings);
+        let (client, session_id, _used_session_load) = reconnect_session_with_context(
+            agent,
+            &task,
+            &cwd,
+            &env,
+            &state.db,
+            true,
+            &settings,
+            claude_runtime,
+        )
+        .await?;
 
         // Build a history-wrapped "Continue" prompt so the new session has context.
         // Since we skipped session/load, we must inject history explicitly.
@@ -6236,58 +6875,70 @@ async fn codex_login(
 #[tauri::command]
 async fn claude_login(
     state: State<'_, AppState>,
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
 ) -> Result<ClaudeAuthStatus, String> {
-    let settings_handle = state.settings.clone();
-
-    // First check if already authenticated
-    let current_status = check_claude_auth().await?;
-    if current_status.authenticated {
-        // Already logged in, just update settings and return
-        let mut settings = settings_handle.lock().await;
-        settings.claude_auth_method = Some("oauth".to_string());
-        persist_settings(&settings)?;
-        return Ok(current_status);
+    let start = start_claude_oauth_internal(state.inner()).await?;
+    if start.already_authenticated {
+        let status = check_claude_auth_internal().await?;
+        if status.authenticated {
+            let write_credentials = {
+                let settings = state.settings.lock().await;
+                claude_credentials_write_enabled(&settings)
+            };
+            let _ = ensure_claude_credentials_file_opt_in(write_credentials);
+            let mut settings = state.settings.lock().await;
+            settings.claude_auth_method = Some("oauth".to_string());
+            persist_settings(&settings)?;
+        }
+        return Ok(status);
     }
 
-    let claude_cmd = resolve_claude_command();
+    let Some(url) = start.url.clone() else {
+        return Err("Claude OAuth URL unavailable".to_string());
+    };
 
-    // Open Terminal with claude setup-token for interactive login
-    // This allows the user to complete the OAuth flow in a visible terminal
-    let script = format!(
-        r#"tell application "Terminal"
-            do script "{} setup-token"
-        end tell"#,
-        claude_cmd.replace("\"", "\\\"")
-    );
+    use tauri_plugin_opener::OpenerExt;
+    let _ = app.opener().open_url(url, None::<&str>);
 
-    tokio::process::Command::new("osascript")
-        .args(["-e", &script])
-        .spawn()
-        .map_err(|err| format!("Failed to open Terminal: {}", err))?;
-
-    // Wait a bit then poll for auth status (user completes flow in terminal)
-    // Poll every 2 seconds for up to 5 minutes
     for _ in 0..150 {
         tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let status = check_claude_auth().await?;
+        let status = check_claude_auth_internal().await?;
         if status.authenticated {
-            // Update settings
-            let mut settings = settings_handle.lock().await;
+            let write_credentials = {
+                let settings = state.settings.lock().await;
+                claude_credentials_write_enabled(&settings)
+            };
+            let _ = ensure_claude_credentials_file_opt_in(write_credentials);
+            let mut settings = state.settings.lock().await;
             settings.claude_auth_method = Some("oauth".to_string());
             persist_settings(&settings)?;
             return Ok(status);
         }
     }
 
-    // Timeout - user didn't complete login
     Ok(ClaudeAuthStatus {
         authenticated: false,
         method: None,
         expires_at: None,
         email: None,
     })
+}
+
+#[tauri::command]
+async fn start_claude_oauth(state: State<'_, AppState>) -> Result<ClaudeOauthStartResponse, String> {
+    start_claude_oauth_internal(state.inner()).await
+}
+
+#[tauri::command]
+async fn cancel_claude_oauth(state: State<'_, AppState>) -> Result<(), String> {
+    let mut oauth_state = state.claude_oauth_state.lock().await;
+    cleanup_claude_oauth_state(&mut oauth_state);
+    if let Some(mut child) = oauth_state.child.take() {
+        let _ = child.kill().await;
+    }
+    oauth_state.url = None;
+    oauth_state.starting = false;
+    Ok(())
 }
 
 #[tauri::command]
@@ -6492,8 +7143,158 @@ fn get_claude_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude.json"))
 }
 
-#[tauri::command]
-async fn check_claude_auth() -> Result<ClaudeAuthStatus, String> {
+fn ensure_claude_credentials_file_opt_in(write_enabled: bool) -> Result<(), String> {
+    if !write_enabled {
+        return Ok(());
+    }
+    ensure_claude_credentials_file()
+}
+
+fn ensure_claude_credentials_file() -> Result<(), String> {
+    let Some(tokens) = fetch_claude_oauth_tokens() else {
+        return Ok(());
+    };
+    let home = dirs::home_dir().ok_or("Unable to resolve HOME for Claude credentials")?;
+    let claude_dir = home.join(".claude");
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| format!("Failed to create ~/.claude directory: {}", e))?;
+
+    let credentials_path = claude_dir.join(".credentials.json");
+    let mut scopes: Option<Vec<String>> = None;
+    let mut subscription_type: Option<String> = None;
+    let mut rate_limit_tier: Option<String> = None;
+    let parse_scopes = |value: &serde_json::Value| -> Option<Vec<String>> {
+        if let Some(list) = value.as_array() {
+            let scopes: Vec<String> = list
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect();
+            if scopes.is_empty() {
+                None
+            } else {
+                Some(scopes)
+            }
+        } else if let Some(value) = value.as_str() {
+            let scopes: Vec<String> = value
+                .split_whitespace()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            if scopes.is_empty() {
+                None
+            } else {
+                Some(scopes)
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Ok(existing) = std::fs::read_to_string(&credentials_path) {
+        if let Ok(existing_json) = serde_json::from_str::<serde_json::Value>(&existing) {
+            if let Some(access_token) = existing_json
+                .get("claudeAiOauth")
+                .and_then(|o| o.get("accessToken"))
+                .and_then(|v| v.as_str())
+            {
+                if access_token == tokens.access_token {
+                    if let Some(oauth) = existing_json.get("claudeAiOauth") {
+                        scopes = oauth.get("scopes").and_then(parse_scopes);
+                        subscription_type = oauth
+                            .get("subscriptionType")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        rate_limit_tier = oauth
+                            .get("rateLimitTier")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    let has_inference_scope = scopes
+                        .as_ref()
+                        .map(|list| list.iter().any(|scope| scope == "user:inference"))
+                        .unwrap_or(false);
+                    if has_inference_scope {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    if scopes.is_none() {
+        if let Some(config_path) = get_claude_config_path() {
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                if let Ok(config_json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(oauth) = config_json.get("oauthAccount") {
+                        scopes = oauth.get("scopes").and_then(parse_scopes).or(scopes);
+                        subscription_type = oauth
+                            .get("subscriptionType")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or(subscription_type);
+                        rate_limit_tier = oauth
+                            .get("rateLimitTier")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or(rate_limit_tier);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut scopes = scopes.unwrap_or_else(|| vec!["user:inference".to_string()]);
+    if !scopes.iter().any(|scope| scope == "user:inference") {
+        scopes.push("user:inference".to_string());
+    }
+    let scopes_json = serde_json::json!(scopes);
+
+    let mut oauth = serde_json::json!({
+        "accessToken": tokens.access_token,
+    });
+    if let Some(refresh_token) = tokens.refresh_token.clone() {
+        oauth["refreshToken"] = serde_json::json!(refresh_token);
+    }
+    if let Some(expires_at) = tokens.expires_at {
+        oauth["expiresAt"] = serde_json::json!(expires_at);
+    }
+    oauth["scopes"] = scopes_json.clone();
+    if let Some(subscription_type) = subscription_type.clone() {
+        oauth["subscriptionType"] = serde_json::json!(subscription_type);
+    }
+    if let Some(rate_limit_tier) = rate_limit_tier.clone() {
+        oauth["rateLimitTier"] = serde_json::json!(rate_limit_tier);
+    }
+
+    // Write both nested and flat formats for compatibility with different CLI builds.
+    let payload = serde_json::json!({
+        "claudeAiOauth": oauth,
+        "accessToken": tokens.access_token,
+        "refreshToken": tokens.refresh_token,
+        "expiresAt": tokens.expires_at,
+        "scopes": scopes_json,
+        "subscriptionType": subscription_type,
+        "rateLimitTier": rate_limit_tier,
+    });
+    let serialized =
+        serde_json::to_string(&payload).map_err(|e| format!("Failed to encode credentials: {}", e))?;
+
+    std::fs::write(&credentials_path, serialized)
+        .map_err(|e| format!("Failed to write credentials: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(mut perms) = std::fs::metadata(&credentials_path).map(|m| m.permissions()) {
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(&credentials_path, perms);
+        }
+    }
+
+    Ok(())
+}
+
+async fn check_claude_auth_internal() -> Result<ClaudeAuthStatus, String> {
     // Primary check: ~/.claude.json with oauthAccount
     if let Some(config_path) = get_claude_config_path() {
         if config_path.exists() {
@@ -6563,12 +7364,47 @@ async fn check_claude_auth() -> Result<ClaudeAuthStatus, String> {
         }
     }
 
+    if let Some(tokens) = fetch_claude_oauth_tokens() {
+        if let Some(expires_at) = tokens.expires_at {
+            let now = chrono::Utc::now().timestamp();
+            if expires_at > now + TOKEN_EXPIRY_BUFFER_SECS {
+                return Ok(ClaudeAuthStatus {
+                    authenticated: true,
+                    method: Some("oauth".to_string()),
+                    expires_at: Some(expires_at.to_string()),
+                    email: None,
+                });
+            }
+        }
+    }
+
     Ok(ClaudeAuthStatus {
         authenticated: false,
         method: None,
         expires_at: None,
         email: None,
     })
+}
+
+#[tauri::command]
+async fn check_claude_auth(state: State<'_, AppState>) -> Result<ClaudeAuthStatus, String> {
+    let status = check_claude_auth_internal().await?;
+    if status.authenticated && status.method.as_deref() == Some("oauth") {
+        let write_credentials = {
+            let settings = state.settings.lock().await;
+            claude_credentials_write_enabled(&settings)
+        };
+        let _ = ensure_claude_credentials_file_opt_in(write_credentials);
+        let mut settings = state.settings.lock().await;
+        if settings.claude_auth_method.as_deref() != Some("oauth") {
+            settings.claude_auth_method = Some("oauth".to_string());
+            persist_settings(&settings)?;
+        }
+    }
+    if let Ok(mut oauth_state) = state.claude_oauth_state.try_lock() {
+        cleanup_claude_oauth_state(&mut oauth_state);
+    }
+    Ok(status)
 }
 
 /// How often to re-check credentials from disk/keychain (5 minutes)
@@ -8970,8 +9806,16 @@ pub(crate) async fn send_chat_message_internal(
             let _ = window.emit("ChatLogStatus", (&task_id, "Reconnecting...", "running"));
         }
 
+        let claude_runtime = claude_runtime_from_task(&task, &settings);
         let (client, session_id, used_session_load) = match reconnect_session_with_context(
-            agent, &task, &cwd, &env, &state.db, false,
+            agent,
+            &task,
+            &cwd,
+            &env,
+            &state.db,
+            false,
+            &settings,
+            claude_runtime,
         )
         .await
         {
@@ -9527,9 +10371,17 @@ pub(crate) async fn send_chat_message_internal(
                                     }
                                 };
 
+                            let claude_runtime = claude_runtime_from_task(&task, &settings);
                             let (new_client, new_session_id, _used_session_load) =
                                 reconnect_session_with_context(
-                                    agent, &task, &cwd, &env, &state.db, true,
+                                    agent,
+                                    &task,
+                                    &cwd,
+                                    &env,
+                                    &state.db,
+                                    true,
+                                    &settings,
+                                    claude_runtime,
                                 )
                                 .await?;
 
@@ -9671,8 +10523,18 @@ pub(crate) async fn send_chat_message_internal(
                     };
 
                     // Reconnect with context restoration
-                    match reconnect_session_with_context(agent, &task, &cwd, &env, &state.db, false)
-                        .await
+                    let claude_runtime = claude_runtime_from_task(&task, &settings);
+                    match reconnect_session_with_context(
+                        agent,
+                        &task,
+                        &cwd,
+                        &env,
+                        &state.db,
+                        false,
+                        &settings,
+                        claude_runtime,
+                    )
+                    .await
                     {
                         Ok((new_client, new_session_id, _used_session_load)) => {
                             println!(
@@ -10422,6 +11284,7 @@ fn main() {
                 pending_discord_tasks: Arc::new(Mutex::new(HashMap::new())),
                 codex_command_cache: Arc::new(StdMutex::new(HashMap::new())),
                 claude_command_cache: Arc::new(StdMutex::new(HashMap::new())),
+                claude_oauth_state: Arc::new(Mutex::new(ClaudeOauthState::default())),
                 terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
                 task_terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
             }
@@ -10471,6 +11334,8 @@ fn main() {
             check_codex_auth,
             codex_rate_limits,
             claude_login,
+            start_claude_oauth,
+            cancel_claude_oauth,
             claude_logout,
             check_claude_auth,
             claude_rate_limits,

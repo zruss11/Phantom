@@ -205,7 +205,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extracts_text_from_assistant_message() {
+    fn extracts_text_from_assistant_message() {
         let json = serde_json::json!({
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": "Hello"}]}
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extracts_text_from_top_level_content() {
+    fn extracts_text_from_top_level_content() {
         let json = serde_json::json!({
             "type": "assistant_message",
             "content": "Summary text"
@@ -229,7 +229,7 @@ mod tests {
     }
 
     #[test]
-    fn test_ignores_user_message_text() {
+    fn ignores_user_message_text() {
         let json = serde_json::json!({
             "type": "user",
             "message": {"content": [{"type": "text", "text": "Prompt text"}]}
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extracts_error_from_result_error() {
+    fn extracts_error_from_result_error() {
         let json = serde_json::json!({
             "type": "result",
             "subtype": "error_during_execution",

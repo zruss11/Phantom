@@ -449,6 +449,9 @@ let codexAuthState = { authenticated: false, method: null };
 let claudeAuthState = { authenticated: false, method: null, email: null };
 let codexAccounts = [];
 let activeCodexAccountId = null;
+let claudeOauthPollTimeout = null;
+let claudeOauthUrl = null;
+let claudeOauthInProgress = false;
 
 // Agent availability tracking
 let agentAvailability = {};
@@ -878,6 +881,13 @@ function updateClaudeAuthUI() {
   document
     .querySelectorAll('[data-auth-action="claude-login"]')
     .forEach((btn) => {
+      if (claudeOauthInProgress && !state.authenticated) {
+        btn.textContent = "Signing in...";
+        btn.dataset.authState = "pending";
+        btn.disabled = true;
+        btn.classList.add("auth-pending");
+        return;
+      }
       btn.textContent = state.authenticated
         ? "Sign out"
         : "Sign in with Claude";
@@ -891,6 +901,66 @@ function updateClaudeAuthUI() {
   if (!state.authenticated) {
     updateAgentUsageWarning("claude-code", null, null);
   }
+}
+
+function showClaudeOauthModal(url) {
+  claudeOauthUrl = url || "";
+  const input = document.getElementById("claudeOauthUrl");
+  if (input) input.value = claudeOauthUrl;
+  $("#claudeOauthModal").modal("show");
+}
+
+function hideClaudeOauthModal() {
+  $("#claudeOauthModal").modal("hide");
+}
+
+function stopClaudeOauthPolling() {
+  if (claudeOauthPollTimeout) {
+    clearTimeout(claudeOauthPollTimeout);
+    claudeOauthPollTimeout = null;
+  }
+}
+
+function startClaudeOauthPolling() {
+  stopClaudeOauthPolling();
+  const poll = async () => {
+    if (!claudeOauthInProgress) {
+      stopClaudeOauthPolling();
+      return;
+    }
+
+    try {
+      const status = await checkClaudeAuth();
+      if (status && status.authenticated) {
+        claudeOauthInProgress = false;
+        stopClaudeOauthPolling();
+        hideClaudeOauthModal();
+        sendNotification("Signed in to Claude", "green");
+        tryEnableClaudeUsage();
+        return;
+      }
+    } catch (err) {
+      console.warn("[Harness] Claude OAuth poll failed", err);
+    }
+
+    if (claudeOauthInProgress) {
+      claudeOauthPollTimeout = setTimeout(poll, 1000);
+    }
+  };
+
+  claudeOauthPollTimeout = setTimeout(poll, 1000);
+}
+
+async function cancelClaudeOauthFlow() {
+  stopClaudeOauthPolling();
+  claudeOauthInProgress = false;
+  try {
+    await ipcRenderer.invoke("cancelClaudeOauth");
+  } catch (err) {
+    console.warn("[Harness] cancelClaudeOauth failed", err);
+  }
+  hideClaudeOauthModal();
+  updateClaudeAuthUI();
 }
 
 async function initAuthState() {
@@ -1224,30 +1294,49 @@ document.querySelectorAll("[data-auth-action]").forEach((button) => {
       } else if (action === "claude-login") {
         if (button.dataset.authState === "connected") {
           // Logout
+          claudeOauthInProgress = false;
+          stopClaudeOauthPolling();
+          hideClaudeOauthModal();
           await ipcRenderer.invoke("claudeLogout");
           claudeAuthState = { authenticated: false, method: null, email: null };
           updateClaudeAuthUI();
           sendNotification("Signed out of Claude", "green");
         } else {
-          // Login - show progress state
-          button.textContent = "Signing in...";
+          // Login - start OAuth flow
+          claudeOauthInProgress = true;
+          button.textContent = "Preparing...";
           button.disabled = true;
           button.classList.add("auth-pending");
-
-          const status = await ipcRenderer.invoke("claudeLogin");
-          claudeAuthState = status || {
-            authenticated: false,
-            method: null,
-            email: null,
-          };
           updateClaudeAuthUI();
 
-          if (claudeAuthState.authenticated) {
-            sendNotification("Signed in to Claude", "green");
-            // Try to enable usage tracking after successful login
-            tryEnableClaudeUsage();
-          } else {
-            sendNotification("Login was not completed", "yellow");
+          try {
+            const response = await ipcRenderer.invoke("startClaudeOauth");
+            if (response && response.alreadyAuthenticated) {
+              claudeOauthInProgress = false;
+              await checkClaudeAuth();
+              sendNotification("Already signed in to Claude", "green");
+              return;
+            }
+            const url = response && response.url ? response.url : null;
+            if (!url) {
+              throw new Error("Claude OAuth URL not available");
+            }
+            showClaudeOauthModal(url);
+            try {
+              await ipcRenderer.invoke("openExternalUrl", url);
+            } catch (err) {
+              console.warn("[Harness] openExternalUrl failed", err);
+            }
+
+            stopClaudeOauthPolling();
+            startClaudeOauthPolling();
+          } catch (err) {
+            claudeOauthInProgress = false;
+            stopClaudeOauthPolling();
+            updateClaudeAuthUI();
+            hideClaudeOauthModal();
+            sendNotification("Claude sign-in failed", "red");
+            console.warn("[Harness] Claude OAuth start failed", err);
           }
         }
       } else if (action === "claude-keychain") {
@@ -2275,6 +2364,16 @@ $("#mcpTokenCopy").on("click", function (event) {
   copyToClipboard(token);
 });
 
+$("#claudeOauthCopy").on("click", function (event) {
+  event.preventDefault();
+  copyToClipboard(claudeOauthUrl);
+});
+
+$("[data-claude-oauth-cancel]").on("click", function (event) {
+  event.preventDefault();
+  cancelClaudeOauthFlow();
+});
+
 $("#mcpTokenReveal").on("click", function (event) {
   event.preventDefault();
   const input = document.getElementById("mcpToken");
@@ -2355,6 +2454,12 @@ function restoreTaskSettings(settings) {
   if (settings.taskBaseBranch !== undefined) {
     pendingBaseBranchValue = settings.taskBaseBranch;
   }
+  if (settings.taskClaudeRuntime !== undefined) {
+    const runtimeToggle = document.getElementById("claudeDockerToggle");
+    if (runtimeToggle) {
+      runtimeToggle.checked = settings.taskClaudeRuntime === "docker";
+    }
+  }
 
   // Select last used agent if available
   if (settings.taskLastAgent) {
@@ -2410,6 +2515,11 @@ async function saveTaskSettingsCore(agentIdOverride) {
     taskBaseBranch: baseBranch,
     taskLastAgent: agentId,
     taskAgentModels: agentModels,
+    taskClaudeRuntime: (() => {
+      const runtimeToggle = document.getElementById("claudeDockerToggle");
+      if (!runtimeToggle) return "native";
+      return runtimeToggle.checked ? "docker" : "native";
+    })(),
   };
 
   const updated = Object.assign({}, currentSettings, taskSettings);
@@ -3319,6 +3429,12 @@ init();
       isRestoringSettings = false;
     }
 
+    // Show Claude runtime toggle only for Claude Code
+    const claudeRuntimeRow = document.getElementById("claudeDockerRow");
+    if (claudeRuntimeRow) {
+      claudeRuntimeRow.style.display = agentId === "claude-code" ? "" : "none";
+    }
+
     const models = await loadModels(agentId);
     if (activeAgentId !== agentId) {
       console.log("[Harness] Skipping stale model load for", agentId);
@@ -3551,6 +3667,11 @@ init();
         if (agentModeGroup) agentModeGroup.style.display = "none";
         if (reasoningEffortGroup) reasoningEffortGroup.style.display = "none";
       }
+
+      const claudeRuntimeRow = document.getElementById("claudeDockerRow");
+      if (claudeRuntimeRow) {
+        claudeRuntimeRow.style.display = initialAgentId === "claude-code" ? "" : "none";
+      }
     }
     hydrateModelsFromCache();
     ensureExecModelOptions();
@@ -3566,6 +3687,7 @@ init();
 
   // Save settings when toggles change
   $("#useWorktreeToggle").on("change", saveTaskSettings);
+  $("#claudeDockerToggle").on("change", saveTaskSettings);
 
   // Note: Permission mode, model, and agent mode dropdown changes are handled
   // by the onChange callbacks in initCustomDropdowns()
@@ -3641,6 +3763,9 @@ init();
       const permissionMode = agentsWithOwnPermissions.includes(agentId)
         ? "bypassPermissions"
         : (prefs.permissionMode || "default");
+      const claudeRuntime = agentId === "claude-code"
+        ? (document.getElementById("claudeDockerToggle")?.checked ? "docker" : "native")
+        : null;
 
       const payload = {
         agentId: agentId,
@@ -3655,6 +3780,7 @@ init();
         reasoningEffort: reasoningEffort !== "default" ? reasoningEffort : null,
         agentMode: agentMode,
         codexMode: codexMode !== "default" ? codexMode : null,
+        claudeRuntime: claudeRuntime,
         attachments: attachments.map((a) => ({
           id: a.id,
           relativePath: a.relativePath,

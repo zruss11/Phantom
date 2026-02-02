@@ -298,6 +298,34 @@
                         <div id="worktreeMultiHint" class="worktree-multi-hint text-muted" style="display: none;">
                           Multi-agent runs always use a worktree.
                         </div>
+                        <div class="setting-row" id="claudeDockerRow" style="display: none;">
+                          <div class="setting-label">
+                            Claude Runtime
+                          </div>
+                          <div
+                            class="toggle-buttons"
+                            data-toggle="claude-runtime"
+                          >
+                            <button
+                              class="toggle-button"
+                              type="button"
+                              data-value="false"
+                            >
+                              Native
+                            </button>
+                            <button
+                              class="toggle-button"
+                              type="button"
+                              data-value="true"
+                            >
+                              Docker
+                            </button>
+                            <input
+                              type="checkbox"
+                              id="claudeDockerToggle"
+                            />
+                          </div>
+                        </div>
                       </div>
                       <div class="form-group mb-0 mt-3">
                         <a
@@ -1600,6 +1628,75 @@
                 data-dismiss="modal"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div
+        class="modal fade mt-5"
+        id="claudeOauthModal"
+        tabindex="-1"
+        role="dialog"
+        aria-labelledby="claudeOauthModalLabel"
+        aria-hidden="true"
+        data-backdrop="static"
+        data-keyboard="false"
+      >
+        <div class="modal-dialog mt-5" role="document">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="claudeOauthModalLabel">
+                Sign in to Claude
+              </h5>
+              <button
+                type="button"
+                class="close"
+                data-claude-oauth-cancel
+                aria-label="Close"
+              >
+                <span aria-hidden="true"><i class="fal fa-times"></i></span>
+              </button>
+            </div>
+            <div class="modal-body">
+              <p class="muted-text">
+                Complete the sign-in in your browser. If it didn't open, copy the
+                URL below.
+              </p>
+              <div class="form-group">
+                <label class="muted-label">OAuth URL</label>
+                <div class="input-group">
+                  <input
+                    type="text"
+                    readonly
+                    class="form-control"
+                    id="claudeOauthUrl"
+                    value=""
+                  />
+                  <div class="input-group-append">
+                    <button
+                      class="btn btn-default btn-sm"
+                      id="claudeOauthCopy"
+                      title="Copy to clipboard"
+                    >
+                      <i class="fal fa-copy"></i>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="text-center mt-3">
+                <i class="fal fa-spinner fa-spin"></i>
+                <span class="muted-text ml-2">Waiting for sign-in...</span>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button
+                type="button"
+                class="btn btn-sm btn-secondary"
+                data-claude-oauth-cancel
+              >
+                Cancel
               </button>
             </div>
           </div>

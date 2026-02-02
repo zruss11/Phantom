@@ -621,6 +621,7 @@ async fn tool_create_task(arguments: Value, server_state: McpServerState) -> Res
         reasoning_effort: args.reasoning_effort.clone(),
         agent_mode: args.agent_mode.clone(),
         codex_mode: args.codex_mode.clone(),
+        claude_runtime: None,
         multi_create: false,
         attachments: Vec::new(),
     };
