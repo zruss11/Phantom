@@ -3398,12 +3398,17 @@ pub(crate) async fn create_agent_session_internal(
 
         tauri::async_runtime::spawn(async move {
             // Generate proper branch name via LLM (using configured summaries agent)
+            let effective_agent = summaries_agent
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(agent_clone.as_str());
+            let timeout_secs = if effective_agent == "opencode" { 30 } else { 5 };
             let metadata = namegen::generate_run_metadata_with_timeout_and_override(
                 &prompt_clone,
                 &agent_clone,
                 summaries_agent.as_deref(),
                 api_key.as_deref(),
-                5,
+                timeout_secs,
             )
             .await;
 

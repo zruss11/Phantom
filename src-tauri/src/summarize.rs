@@ -36,8 +36,8 @@ pub async fn summarize_status_with_override(
 
 /// Generate a short title from a task prompt (async with timeout)
 pub async fn summarize_title(prompt: &str, agent_id: &str) -> String {
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), generate_title(prompt, agent_id)).await;
+    let timeout = summarize_timeout(agent_id);
+    let result = tokio::time::timeout(timeout, generate_title(prompt, agent_id)).await;
 
     match result {
         Ok(Ok(title)) => title,
@@ -54,8 +54,8 @@ pub async fn summarize_title(prompt: &str, agent_id: &str) -> String {
 
 /// Generate a status summary from agent response (async with timeout)
 pub async fn summarize_status(response: &str, agent_id: &str) -> String {
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), generate_status(response, agent_id)).await;
+    let timeout = summarize_timeout(agent_id);
+    let result = tokio::time::timeout(timeout, generate_status(response, agent_id)).await;
 
     match result {
         Ok(Ok(status)) => status,
@@ -106,6 +106,13 @@ async fn generate_status(response: &str, agent_id: &str) -> Result<String, Strin
         "opencode" => call_opencode_cli(&full_prompt).await,
         "amp" => call_amp_cli(&full_prompt).await,
         _ => call_claude_api(&full_prompt).await,
+    }
+}
+
+fn summarize_timeout(agent_id: &str) -> Duration {
+    match agent_id {
+        "opencode" => Duration::from_secs(30),
+        _ => Duration::from_secs(5),
     }
 }
 
