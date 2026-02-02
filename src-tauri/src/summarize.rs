@@ -80,6 +80,7 @@ async fn generate_title(prompt: &str, agent_id: &str) -> Result<String, String> 
 
     match agent_id {
         "codex" => call_codex_api(&full_prompt).await,
+        "opencode" => call_opencode_cli(&full_prompt).await,
         "amp" => call_amp_cli(&full_prompt).await,
         // For claude-code and unknown agents, use Claude API
         _ => call_claude_api(&full_prompt).await,
@@ -102,6 +103,7 @@ async fn generate_status(response: &str, agent_id: &str) -> Result<String, Strin
     match agent_id {
         "claude-code" => call_claude_api(&full_prompt).await,
         "codex" => call_codex_api(&full_prompt).await,
+        "opencode" => call_opencode_cli(&full_prompt).await,
         "amp" => call_amp_cli(&full_prompt).await,
         _ => call_claude_api(&full_prompt).await,
     }
@@ -209,6 +211,15 @@ async fn call_amp_cli(prompt: &str) -> Result<String, String> {
     let result_text = crate::amp_cli::execute(prompt).await?;
     if result_text.is_empty() {
         return Err("No text in Amp response".to_string());
+    }
+    Ok(clean_response(&result_text))
+}
+
+/// Call OpenCode CLI for summarization using programmatic mode.
+async fn call_opencode_cli(prompt: &str) -> Result<String, String> {
+    let result_text = crate::opencode_cli::execute(prompt).await?;
+    if result_text.is_empty() {
+        return Err("No text in OpenCode response".to_string());
     }
     Ok(clean_response(&result_text))
 }

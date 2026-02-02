@@ -101,6 +101,7 @@ pub async fn generate_run_metadata(
 
     let response = match agent_id {
         "codex" => generate_with_codex_backend(&full_prompt).await?,
+        "opencode" => generate_with_opencode_cli(&full_prompt).await?,
         "amp" => generate_with_amp_cli(&full_prompt).await?,
         "claude-code" => generate_with_claude_oauth(&full_prompt).await?,
         // Default to Claude for unknown agents (factory-droid, etc.)
@@ -174,6 +175,15 @@ async fn generate_with_amp_cli(prompt: &str) -> Result<String, String> {
     Ok(extract_json_from_text(&clean_response(&result_text)))
 }
 
+/// Generate using OpenCode CLI (opencode run --format json).
+async fn generate_with_opencode_cli(prompt: &str) -> Result<String, String> {
+    let result_text = crate::opencode_cli::execute(prompt).await?;
+    if result_text.is_empty() {
+        return Err("No text in OpenCode response".to_string());
+    }
+    Ok(extract_json_from_text(&clean_response(&result_text)))
+}
+
 /// Generate using Codex ChatGPT backend (same setup as title summarization).
 async fn generate_with_codex_backend(prompt: &str) -> Result<String, String> {
     let (token, account_id) = get_codex_auth()?;
@@ -223,15 +233,36 @@ async fn generate_with_codex_backend(prompt: &str) -> Result<String, String> {
     Ok(extract_json_from_text(&text))
 }
 
-/// Extract JSON object from potentially wrapped text response.
-/// Models sometimes wrap JSON in markdown code blocks or extra text.
+/// Extract the first complete JSON object from potentially wrapped text response.
+/// Models sometimes wrap JSON in markdown code blocks or extra text, or return
+/// multiple JSON objects (e.g., echoing examples from the prompt).
 fn extract_json_from_text(text: &str) -> String {
     let text = text.trim();
 
-    // Try to find JSON object in the text
+    // Try to find the first complete JSON object by matching braces
     if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            return text[start..=end].to_string();
+        let mut depth = 0;
+        let mut in_string = false;
+        let mut escape_next = false;
+
+        for (i, ch) in text[start..].char_indices() {
+            if escape_next {
+                escape_next = false;
+                continue;
+            }
+
+            match ch {
+                '\\' if in_string => escape_next = true,
+                '"' => in_string = !in_string,
+                '{' if !in_string => depth += 1,
+                '}' if !in_string => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return text[start..=start + i].to_string();
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -396,6 +427,16 @@ mod tests {
 ```"#
             ),
             r#"{"title":"Test","branchName":"feat/test"}"#
+        );
+
+        // Test multiple JSON objects - should return only the first one
+        assert_eq!(
+            extract_json_from_text(
+                r#"{"title":"Fix Login Redirect Loop","branchName":"fix/login-redirect-loop"}
+{"title":"Add Workspace Home View","branchName":"feat/workspace-home"}
+{"title":"Update Dependencies","branchName":"chore/update-deps"}"#
+            ),
+            r#"{"title":"Fix Login Redirect Loop","branchName":"fix/login-redirect-loop"}"#
         );
     }
 

@@ -1,6 +1,7 @@
 mod claude_local_usage;
 mod claude_usage_watcher;
 mod amp_cli;
+mod opencode_cli;
 mod db;
 mod debug_http;
 mod discord_bot;
@@ -441,7 +442,7 @@ struct Settings {
     #[serde(rename = "aiSummariesEnabled")]
     ai_summaries_enabled: Option<bool>,
     // Dedicated agent for summaries (overrides task agent for titles, status, branch names)
-    // Values: "auto" (use task agent), "amp", "codex", "claude-code"
+    // Values: "auto" (use task agent), "amp", "codex", "claude-code", "opencode"
     #[serde(rename = "summariesAgent")]
     summaries_agent: Option<String>,
     // Task creation settings (sticky between restarts)
@@ -1043,6 +1044,13 @@ fn auth_env_for(
             env.push(("CODEX_HOME".to_string(), home.to_string_lossy().to_string()));
         }
     }
+    if agent_id == "amp" {
+        if let Ok(value) = std::env::var("AMP_API_KEY") {
+            if !value.trim().is_empty() {
+                env.push(("AMP_API_KEY".to_string(), value));
+            }
+        }
+    }
     if agent_id != "codex" {
         env.retain(|(key, _)| key != "OPENAI_API_KEY");
         env.retain(|(key, _)| key != "CODEX_HOME");
@@ -1052,6 +1060,7 @@ fn auth_env_for(
     }
     env
 }
+
 
 fn resolve_codex_account_home(
     conn: &rusqlite::Connection,
@@ -3047,6 +3056,19 @@ pub(crate) async fn create_agent_session_internal(
                     .unwrap_or_else(|_| "main".to_string()),
             };
 
+            // Preflight: if repo has uncommitted changes and base branch differs,
+            // warn early instead of failing during patch application.
+            if worktree::has_uncommitted_changes(repo_root).await? {
+                if let Ok(current_branch) = worktree::current_branch(repo_root).await {
+                    if current_branch != base_branch {
+                        return Err(format!(
+                            "Uncommitted changes detected on branch '{}'. Base branch '{}' differs, so changes may not apply cleanly. Stash/commit changes, switch base branch to '{}', or disable worktrees.",
+                            current_branch, base_branch, current_branch
+                        ));
+                    }
+                }
+            }
+
             let base_ref = if worktree::branch_exists(repo_root, &base_branch).await? {
                 base_branch.clone()
             } else if worktree::remote_branch_exists(repo_root, "origin", &base_branch).await? {
@@ -3062,6 +3084,20 @@ pub(crate) async fn create_agent_session_internal(
                     .await?;
             if let Err(err) = worktree::apply_uncommitted_changes(sync_source, &created_path).await
             {
+                let conflict = err.contains("Applied with conflicts")
+                    || err.contains("Patch applied partially")
+                    || err.contains("Resolve conflicts");
+                if conflict {
+                    eprintln!(
+                        "[worktree] Apply uncommitted changes failed (conflicts): {}",
+                        err
+                    );
+                    let _ = worktree::remove_worktree(repo_root, &created_path).await;
+                    return Err(format!(
+                        "Uncommitted changes could not be applied to the new worktree. Resolve conflicts or disable worktree creation. Details: {}",
+                        err
+                    ));
+                }
                 eprintln!(
                     "[worktree] Apply uncommitted changes failed, falling back to full sync: {}",
                     err
@@ -5031,7 +5067,7 @@ async fn save_settings(
 
     // Validate and normalize summaries_agent setting
     // "auto" means use the task agent, which is represented as None internally
-    const VALID_SUMMARIES_AGENTS: &[&str] = &["amp", "codex", "claude-code"];
+    const VALID_SUMMARIES_AGENTS: &[&str] = &["amp", "codex", "claude-code", "opencode"];
     if let Some(ref agent) = next.summaries_agent {
         let normalized = agent.trim().to_lowercase();
         if normalized == "auto" || normalized.is_empty() {
