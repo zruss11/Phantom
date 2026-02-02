@@ -2458,24 +2458,36 @@ fn build_claude_docker_spawn_spec(
     args.push(container_workdir(&workspace_root, cwd));
 
     let home = dirs::home_dir().ok_or("Could not determine home directory")?;
+    let write_credentials = claude_credentials_write_enabled(settings);
     let host_claude_dir = home.join(".claude");
-    if let Err(err) = std::fs::create_dir_all(&host_claude_dir) {
-        return Err(format!("Failed to create ~/.claude directory: {}", err));
+    if write_credentials {
+        if let Err(err) = std::fs::create_dir_all(&host_claude_dir) {
+            return Err(format!("Failed to create ~/.claude directory: {}", err));
+        }
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{}",
+            host_claude_dir.to_string_lossy(),
+            CLAUDE_DOCKER_CONFIG_DIR
+        ));
+    } else if host_claude_dir.exists() {
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{}:ro",
+            host_claude_dir.to_string_lossy(),
+            CLAUDE_DOCKER_CONFIG_DIR
+        ));
     }
-    args.push("-v".to_string());
-    args.push(format!(
-        "{}:{}",
-        host_claude_dir.to_string_lossy(),
-        CLAUDE_DOCKER_CONFIG_DIR
-    ));
 
     let host_claude_json = home.join(".claude.json");
     if host_claude_json.exists() {
+        let mount_mode = if write_credentials { "" } else { ":ro" };
         args.push("-v".to_string());
         args.push(format!(
-            "{}:{}/.claude.json",
+            "{}:{}/.claude.json{}",
             host_claude_json.to_string_lossy(),
-            CLAUDE_DOCKER_HOME
+            CLAUDE_DOCKER_HOME,
+            mount_mode
         ));
     }
 
