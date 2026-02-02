@@ -167,68 +167,10 @@ async fn generate_with_claude_oauth(prompt: &str) -> Result<String, String> {
 
 /// Generate using Amp CLI (spawns amp with --stream-json --execute).
 async fn generate_with_amp_cli(prompt: &str) -> Result<String, String> {
-    use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio::process::Command;
-
-    let mut cmd = Command::new("amp");
-    cmd.args(["--stream-json", "--execute", prompt])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn amp: {}", e))?;
-
-    let stdout = child.stdout.take().ok_or("Failed to capture amp stdout")?;
-
-    let mut reader = BufReader::new(stdout).lines();
-    let mut result_text = String::new();
-
-    // Parse NDJSON output looking for assistant text or final result
-    while let Ok(Some(line)) = reader.next_line().await {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-            match event_type {
-                "assistant" => {
-                    // Extract text from message.content array
-                    if let Some(content) = json
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_array())
-                    {
-                        for block in content {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                    result_text.push_str(text);
-                                }
-                            }
-                        }
-                    }
-                }
-                "result" => {
-                    // Check for final result text
-                    if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
-                        if !result.is_empty() {
-                            result_text = result.to_string();
-                        }
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Kill the process if still running
-    let _ = child.kill().await;
-
+    let result_text = crate::amp_cli::execute(prompt).await?;
     if result_text.is_empty() {
         return Err("No text in Amp response".to_string());
     }
-
     Ok(extract_json_from_text(&clean_response(&result_text)))
 }
 
