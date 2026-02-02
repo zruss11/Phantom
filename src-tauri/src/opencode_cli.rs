@@ -2,8 +2,11 @@
 
 use serde_json::Value;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::Mutex;
+use tokio::time::{sleep, Duration};
 
 const FREE_MODELS: &[&str] = &[
     "opencode/glm-4.7-free",
@@ -17,6 +20,29 @@ const DEFAULT_MODEL: &str = "opencode/glm-4.7-free";
 
 /// Execute OpenCode in non-interactive mode and return extracted text.
 pub async fn execute(prompt: &str) -> Result<String, String> {
+    let _guard = opencode_lock().lock().await;
+    execute_with_retries(prompt).await
+}
+
+async fn execute_with_retries(prompt: &str) -> Result<String, String> {
+    let mut last_err = String::new();
+    for attempt in 0..3 {
+        match execute_with_model_fallback(prompt).await {
+            Ok(text) => return Ok(text),
+            Err(err) => {
+                last_err = err.clone();
+                if attempt < 2 && should_retry(&err) {
+                    sleep(retry_delay(attempt)).await;
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+    Err(last_err)
+}
+
+async fn execute_with_model_fallback(prompt: &str) -> Result<String, String> {
     match execute_with_model(prompt, Some(DEFAULT_MODEL)).await {
         Ok(text) => Ok(text),
         Err(err) => {
@@ -145,6 +171,28 @@ fn extract_error_from_event(json: &Value) -> Option<String> {
 fn should_try_alternate_model(err: &str) -> bool {
     let lower = err.to_lowercase();
     lower.contains("model") || lower.contains("not found")
+}
+
+fn should_retry(err: &str) -> bool {
+    let lower = err.to_lowercase();
+    lower.contains("high concurrency usage")
+        || lower.contains("code\":\"1302\"")
+        || lower.contains("enoent")
+        || lower.contains("cannot find module")
+        || lower.contains("unexpected error")
+}
+
+fn retry_delay(attempt: usize) -> Duration {
+    match attempt {
+        0 => Duration::from_millis(500),
+        1 => Duration::from_millis(1500),
+        _ => Duration::from_millis(3000),
+    }
+}
+
+fn opencode_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(test)]
