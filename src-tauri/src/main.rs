@@ -239,18 +239,43 @@ async fn prewarm_opencode_models() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let run = async {
-        let output = cmd.output().await.map_err(|e| e.to_string())?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            eprintln!("[Harness] OpenCode prewarm failed: {}", stderr.trim());
-        } else {
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("[Harness] OpenCode prewarm spawn failed: {}", e);
+            return;
+        }
+    };
+    let result = timeout(Duration::from_secs(30), child.wait()).await;
+    match result {
+        Ok(Ok(status)) if status.success() => {
             println!("[Harness] OpenCode prewarm complete");
         }
-        Ok::<(), String>(())
-    };
-
-    let _ = timeout(Duration::from_secs(30), run).await;
+        Ok(Ok(_)) => {
+            // Non-zero exit, try to read stderr
+            if let Some(mut stderr) = child.stderr.take() {
+                let mut buf = Vec::new();
+                if tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf)
+                    .await
+                    .is_ok()
+                {
+                    let msg = String::from_utf8_lossy(&buf);
+                    eprintln!("[Harness] OpenCode prewarm failed: {}", msg.trim());
+                } else {
+                    eprintln!("[Harness] OpenCode prewarm failed");
+                }
+            } else {
+                eprintln!("[Harness] OpenCode prewarm failed");
+            }
+        }
+        Ok(Err(e)) => {
+            eprintln!("[Harness] OpenCode prewarm failed: {}", e);
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            eprintln!("[Harness] OpenCode prewarm timed out");
+        }
+    }
 }
 
 fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvailability> {
@@ -1075,8 +1100,10 @@ fn auth_env_for(
             }
         }
     }
-    if agent_id != "codex" {
+    if agent_id != "codex" && agent_id != "opencode" {
         env.retain(|(key, _)| key != "OPENAI_API_KEY");
+    }
+    if agent_id != "codex" {
         env.retain(|(key, _)| key != "CODEX_HOME");
     }
     if agent_id != "claude-code" {

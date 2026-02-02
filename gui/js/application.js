@@ -177,7 +177,7 @@ function initCustomDropdowns() {
         { value: 'auto', name: 'Auto', description: "Use task's agent" },
         { value: 'opencode', name: 'OpenCode', description: 'Free models available' },
         { value: 'codex', name: 'Codex', description: 'GPT-5.1-codex-mini' },
-        { value: 'claude-code', name: 'Claude', description: 'Haiku' },
+        { value: 'claude-code', name: 'Claude Code', description: 'Haiku' },
         { value: 'amp', name: 'Amp', description: 'Requires paid credits' }
       ],
       placeholder: 'Summaries Agent',

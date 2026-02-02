@@ -200,7 +200,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn extracts_text_from_text_event() {
+    fn test_extracts_text_from_text_event() {
         let json = serde_json::json!({
             "type": "text",
             "part": {"text": "Hello"}
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn extracts_error_from_error_event() {
+    fn test_extracts_error_from_error_event() {
         let json = serde_json::json!({
             "type": "error",
             "error": {"data": {"message": "bad request"}}

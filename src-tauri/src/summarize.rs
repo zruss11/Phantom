@@ -216,19 +216,21 @@ async fn call_codex_api(prompt: &str) -> Result<String, String> {
 /// Spawns amp with --execute --stream-json and parses the NDJSON output
 async fn call_amp_cli(prompt: &str) -> Result<String, String> {
     let result_text = crate::amp_cli::execute(prompt).await?;
-    if result_text.is_empty() {
+    let cleaned = clean_response(&result_text);
+    if cleaned.is_empty() {
         return Err("No text in Amp response".to_string());
     }
-    Ok(clean_response(&result_text))
+    Ok(cleaned)
 }
 
 /// Call OpenCode CLI for summarization using programmatic mode.
 async fn call_opencode_cli(prompt: &str) -> Result<String, String> {
     let result_text = crate::opencode_cli::execute(prompt).await?;
-    if result_text.is_empty() {
+    let cleaned = clean_response(&result_text);
+    if cleaned.is_empty() {
         return Err("No text in OpenCode response".to_string());
     }
-    Ok(clean_response(&result_text))
+    Ok(cleaned)
 }
 
 /// Get Codex OAuth token and account ID from auth.json
