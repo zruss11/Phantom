@@ -10281,38 +10281,74 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            let should_close = matches!(
-                event,
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-            );
-            if !should_close {
-                return;
-            }
-            let label = window.label();
-            if label.starts_with("chat-") {
-                let task_id = label.trim_start_matches("chat-").to_string();
-                let state = window.app_handle().state::<AppState>().inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    cleanup_terminal_session_by_task(&state, &task_id).await;
-                });
-                return;
-            }
-            if label != "main" {
-                return;
-            }
-            // Optimize database on shutdown
-            if let Some(state) = window.try_state::<AppState>() {
-                if let Ok(conn) = state.db.lock() {
-                    if let Err(e) = crate::db::optimize_and_shutdown(&conn) {
-                        eprintln!("[Harness] DB shutdown optimization failed: {e}");
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let label = window.label();
+                    if label.starts_with("chat-") {
+                        let task_id = label.trim_start_matches("chat-").to_string();
+                        let state = window.app_handle().state::<AppState>().inner().clone();
+                        tauri::async_runtime::spawn(async move {
+                            cleanup_terminal_session_by_task(&state, &task_id).await;
+                        });
+                        return;
+                    }
+                    if label != "main" {
+                        return;
+                    }
+                    // Prevent immediate close to allow async DB shutdown
+                    api.prevent_close();
+
+                    // Clone handles needed for async work
+                    let app = window.app_handle().clone();
+                    let window_clone = window.clone();
+                    let db_arc = window
+                        .try_state::<AppState>()
+                        .map(|s| Arc::clone(&s.db));
+
+                    tauri::async_runtime::spawn(async move {
+                        // Run DB optimization in blocking thread to avoid holding mutex on main thread
+                        if let Some(db) = db_arc {
+                            let result = tauri::async_runtime::spawn_blocking(move || {
+                                match db.lock() {
+                                    Ok(conn) => crate::db::optimize_and_shutdown(&conn)
+                                        .map_err(|e| anyhow::anyhow!("{e}")),
+                                    Err(e) => Err(anyhow::anyhow!("Failed to acquire DB lock: {e}")),
+                                }
+                            })
+                            .await;
+
+                            match result {
+                                Ok(Ok(())) => tracing::info!("[Harness] DB shutdown optimization completed"),
+                                Ok(Err(e)) => tracing::error!("[Harness] DB shutdown optimization failed: {e}"),
+                                Err(e) => tracing::error!("[Harness] DB shutdown task panicked: {e}"),
+                            }
+                        }
+
+                        // Close chat windows
+                        for (label, win) in app.webview_windows() {
+                            if label.starts_with("chat-") {
+                                let _ = win.close();
+                            }
+                        }
+
+                        // Destroy the main window on main thread
+                        let window_to_destroy = window_clone.clone();
+                        let _ = window_clone.run_on_main_thread(move || {
+                            let _ = window_to_destroy.destroy();
+                        });
+                    });
+                }
+                tauri::WindowEvent::Destroyed => {
+                    let label = window.label();
+                    if label.starts_with("chat-") {
+                        let task_id = label.trim_start_matches("chat-").to_string();
+                        let state = window.app_handle().state::<AppState>().inner().clone();
+                        tauri::async_runtime::spawn(async move {
+                            cleanup_terminal_session_by_task(&state, &task_id).await;
+                        });
                     }
                 }
-            }
-            let app = window.app_handle();
-            for (label, win) in app.webview_windows() {
-                if label.starts_with("chat-") {
-                    let _ = win.close();
-                }
+                _ => {}
             }
         })
         .manage({
