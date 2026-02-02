@@ -233,6 +233,15 @@ async fn call_opencode_cli(prompt: &str) -> Result<String, String> {
     Ok(cleaned)
 }
 
+/// Call OpenCode CLI for summarization using programmatic mode.
+async fn call_opencode_cli(prompt: &str) -> Result<String, String> {
+    let result_text = crate::opencode_cli::execute(prompt).await?;
+    if result_text.is_empty() {
+        return Err("No text in OpenCode response".to_string());
+    }
+    Ok(clean_response(&result_text))
+}
+
 /// Get Codex OAuth token and account ID from auth.json
 /// Uses CODEX_HOME env var if set, otherwise falls back to ~/.codex/
 fn get_codex_auth() -> Result<(String, Option<String>), String> {

@@ -238,7 +238,6 @@ async fn generate_with_codex_backend(prompt: &str) -> Result<String, String> {
 /// multiple JSON objects (e.g., echoing examples from the prompt).
 fn extract_json_from_text(text: &str) -> String {
     let text = text.trim();
-
     let mut last: Option<(usize, usize)> = None;
     let mut start: Option<usize> = None;
     let mut depth = 0;

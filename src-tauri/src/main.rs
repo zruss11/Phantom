@@ -1038,8 +1038,19 @@ fn auth_env_for(
     if let Some(value) = settings.openai_api_key.as_ref() {
         env.push(("OPENAI_API_KEY".to_string(), value.clone()));
     }
-    if let Some(value) = settings.anthropic_api_key.as_ref() {
-        env.push(("ANTHROPIC_API_KEY".to_string(), value.clone()));
+    if agent_id == "claude-code" {
+        // Prefer OAuth when configured; avoid passing API key which can override OAuth.
+        if settings.claude_auth_method.as_deref() != Some("oauth") {
+            if let Some(value) = settings.anthropic_api_key.as_ref() {
+                if !value.trim().is_empty() {
+                    env.push(("ANTHROPIC_API_KEY".to_string(), value.clone()));
+                }
+            }
+        }
+    } else if let Some(value) = settings.anthropic_api_key.as_ref() {
+        if !value.trim().is_empty() {
+            env.push(("ANTHROPIC_API_KEY".to_string(), value.clone()));
+        }
     }
     if agent_id == "codex" {
         if let Some(home) = codex_home {
