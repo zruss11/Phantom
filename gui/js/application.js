@@ -368,12 +368,6 @@ async function saveSettingsFromUi() {
   let mcpPortRaw = $("#mcpPort").val();
   let mcpTokenRaw = $("#mcpToken").val();
   let taskProjectAllowlist = getProjectAllowlist();
-  const claudeWriteCredentialsToggle = document.getElementById(
-    "claudeWriteCredentialsToggle",
-  );
-  const claudeWriteCredentials = !!(
-    claudeWriteCredentialsToggle && claudeWriteCredentialsToggle.checked
-  );
   let agentNotificationTimeoutValue = 0;
   let parsedMcpPort = parseInt(mcpPortRaw, 10);
   if (Number.isNaN(parsedMcpPort)) {
@@ -406,7 +400,6 @@ async function saveSettingsFromUi() {
       aiSummariesEnabled: $("#aiSummariesEnabled").is(":checked"),
       summariesAgent: summariesAgentDropdown ? summariesAgentDropdown.getValue() : "auto",
       taskProjectAllowlist: taskProjectAllowlist,
-      claudeWriteCredentials: claudeWriteCredentials,
       mcpEnabled: $("#mcpEnabled").is(":checked"),
       mcpPort: parsedMcpPort,
       mcpToken: nextMcpToken,
@@ -425,7 +418,7 @@ async function saveSettingsFromUi() {
 
 // Auto-save settings on any change (inputs and toggles)
 $("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken").on("change", saveSettingsFromUi);
-$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #agentNotificationTimeout, #aiSummariesEnabled, #mcpEnabled, #claudeWriteCredentialsToggle").on("change", saveSettingsFromUi);
+$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #agentNotificationTimeout, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
 
 // Show/hide summaries agent dropdown based on AI summaries toggle
 function updateSummariesAgentVisibility() {
@@ -2294,15 +2287,6 @@ async function getSettings() {
   }
   // Update visibility based on current toggle state
   updateSummariesAgentVisibility();
-
-  if (settingsPayload.claudeWriteCredentials !== undefined) {
-    $("#claudeWriteCredentialsToggle").prop(
-      "checked",
-      !!settingsPayload.claudeWriteCredentials,
-    );
-  } else {
-    $("#claudeWriteCredentialsToggle").prop("checked", false);
-  }
 
   if (settingsPayload.taskProjectAllowlist !== undefined) {
     currentSettings.taskProjectAllowlist = Array.isArray(

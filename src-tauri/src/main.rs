@@ -467,8 +467,6 @@ struct Settings {
     claude_auth_method: Option<String>,
     #[serde(rename = "claudeDockerImage")]
     claude_docker_image: Option<String>,
-    #[serde(rename = "claudeWriteCredentials")]
-    claude_write_credentials: Option<bool>,
     #[serde(rename = "agentNotificationsEnabled")]
     agent_notifications_enabled: Option<bool>,
     #[serde(rename = "agentNotificationStack")]
@@ -1006,7 +1004,8 @@ fn mcp_enabled(settings: &Settings) -> bool {
 }
 
 fn claude_credentials_write_enabled(settings: &Settings) -> bool {
-    settings.claude_write_credentials.unwrap_or(false)
+    let _ = settings;
+    true
 }
 
 fn db_path() -> Result<PathBuf, String> {

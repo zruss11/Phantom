@@ -29,7 +29,6 @@
       anthropicApiKey: '',
       codexAuthMethod: '',
       claudeAuthMethod: '',
-      claudeWriteCredentials: false,
       taskProjectAllowlist: []
     },
     projectPath: '~',
