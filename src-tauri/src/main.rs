@@ -181,33 +181,51 @@ async fn prewarm_opencode_models() {
             return;
         }
     };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut stdout) = stdout {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut buf).await;
+        }
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut stderr) = stderr {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
+        }
+        buf
+    });
+
     let result = timeout(Duration::from_secs(30), child.wait()).await;
     match result {
         Ok(Ok(status)) if status.success() => {
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
             println!("[Harness] OpenCode prewarm complete");
         }
         Ok(Ok(_)) => {
-            // Non-zero exit, try to read stderr
-            if let Some(mut stderr) = child.stderr.take() {
-                let mut buf = Vec::new();
-                if tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf)
-                    .await
-                    .is_ok()
-                {
-                    let msg = String::from_utf8_lossy(&buf);
-                    eprintln!("[Harness] OpenCode prewarm failed: {}", msg.trim());
-                } else {
-                    eprintln!("[Harness] OpenCode prewarm failed");
-                }
+            let _ = stdout_task.await;
+            let stderr_buf = stderr_task.await.unwrap_or_default();
+            if !stderr_buf.is_empty() {
+                let msg = String::from_utf8_lossy(&stderr_buf);
+                eprintln!("[Harness] OpenCode prewarm failed: {}", msg.trim());
             } else {
                 eprintln!("[Harness] OpenCode prewarm failed");
             }
         }
         Ok(Err(e)) => {
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
             eprintln!("[Harness] OpenCode prewarm failed: {}", e);
         }
         Err(_) => {
             let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
             eprintln!("[Harness] OpenCode prewarm timed out");
         }
     }
