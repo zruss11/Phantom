@@ -74,6 +74,30 @@ jobs:
           # Clean up
           rm /tmp/AuthKey.p8
 
+      - name: Generate latest.json
+        env:
+          RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          sig_file="$(ls src-tauri/target/release/bundle/macos/*.tar.gz.sig | head -n1)"
+          signature="$(cat "$sig_file")"
+          pub_date="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          cat > src-tauri/target/release/bundle/macos/latest.json <<EOF
+          {
+            "version": "${version}",
+            "notes": "",
+            "pub_date": "${pub_date}",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "${signature}",
+                "url": "https://github.com/zruss11/Phantom/releases/download/v${version}/Phantom.app.tar.gz"
+              }
+            }
+          }
+          EOF
+
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:

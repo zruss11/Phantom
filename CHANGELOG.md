@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.0.3 - 2026-02-02
+
+### Bugfixes
+- Fix auto-update endpoint and release artifact metadata generation.
+
 ## v1.0.2 - 2026-02-01
 
 ### Bugfixes

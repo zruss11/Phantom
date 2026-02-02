@@ -23,12 +23,12 @@
   },
   "productName": "Phantom",
   "mainBinaryName": "Phantom",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "identifier": "com.phantom.app",
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/zachrussell/Phantom-Harness/releases/latest/download/latest.json"
+        "https://github.com/zruss11/Phantom/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2MzY3MzM2QTdCRUZFOEIKUldTTC9yNm5Obk0ybGdWNHVHSFB1d2hDa2FSRHV4TkFRRXhCbURGTEpTY2tzRzV6ZzQvZjNLaWcK"
     }
