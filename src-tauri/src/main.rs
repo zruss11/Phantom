@@ -14,7 +14,7 @@ mod utils;
 mod webhook;
 mod worktree;
 
-use utils::{resolve_command_path, resolve_gh_binary, truncate_str};
+use utils::{default_search_paths, resolve_command_path, resolve_gh_binary, truncate_str};
 
 use chrono::TimeZone;
 use phantom_harness_backend::cli::{
@@ -322,6 +322,7 @@ struct ClaudeOauthState {
     child: Option<tokio::process::Child>,
     url: Option<String>,
     starting: bool,
+    watchdog_id: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -466,6 +467,8 @@ struct Settings {
     claude_auth_method: Option<String>,
     #[serde(rename = "claudeDockerImage")]
     claude_docker_image: Option<String>,
+    #[serde(rename = "claudeWriteCredentials")]
+    claude_write_credentials: Option<bool>,
     #[serde(rename = "agentNotificationsEnabled")]
     agent_notifications_enabled: Option<bool>,
     #[serde(rename = "agentNotificationStack")]
@@ -1000,6 +1003,10 @@ fn ensure_mcp_settings(settings: &mut Settings) -> bool {
 
 fn mcp_enabled(settings: &Settings) -> bool {
     settings.mcp_enabled.unwrap_or(true)
+}
+
+fn claude_credentials_write_enabled(settings: &Settings) -> bool {
+    settings.claude_write_credentials.unwrap_or(false)
 }
 
 fn db_path() -> Result<PathBuf, String> {
@@ -2416,7 +2423,7 @@ fn build_claude_docker_spawn_spec(
     );
     push_docker_env(&mut args, &mut env_keys, "HOME", CLAUDE_DOCKER_HOME);
     if settings.claude_auth_method.as_deref() == Some("oauth") {
-        let _ = ensure_claude_credentials_file();
+        let _ = ensure_claude_credentials_file_opt_in(claude_credentials_write_enabled(settings));
         if let Some(token) = get_claude_oauth_token() {
             if !token.trim().is_empty() {
                 push_docker_env(&mut args, &mut env_keys, "CLAUDE_CODE_OAUTH_TOKEN", &token);
@@ -2592,7 +2599,7 @@ async fn start_claude_oauth_internal(state: &AppState) -> Result<ClaudeOauthStar
         });
     }
 
-    {
+    let watchdog_id = {
         let mut oauth_state = state.claude_oauth_state.lock().await;
         cleanup_claude_oauth_state(&mut oauth_state);
         if oauth_state.child.is_some() || oauth_state.starting {
@@ -2605,7 +2612,9 @@ async fn start_claude_oauth_internal(state: &AppState) -> Result<ClaudeOauthStar
             return Err("Claude OAuth already in progress".to_string());
         }
         oauth_state.starting = true;
-    }
+        oauth_state.watchdog_id = oauth_state.watchdog_id.wrapping_add(1);
+        oauth_state.watchdog_id
+    };
 
     let settings = state.settings.lock().await.clone();
     let spawn_spec = match build_claude_oauth_spawn_spec(&settings) {
@@ -2683,6 +2692,28 @@ async fn start_claude_oauth_internal(state: &AppState) -> Result<ClaudeOauthStar
         oauth_state.child = Some(child);
         oauth_state.starting = false;
     }
+
+    let oauth_state_handle = state.claude_oauth_state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        let mut child_to_kill = None;
+        {
+            let mut oauth_state = oauth_state_handle.lock().await;
+            if oauth_state.watchdog_id != watchdog_id {
+                return;
+            }
+            if oauth_state.child.is_some() {
+                child_to_kill = oauth_state.child.take();
+                oauth_state.url = None;
+                oauth_state.starting = false;
+            } else {
+                return;
+            }
+        }
+        if let Some(mut child) = child_to_kill {
+            let _ = child.kill().await;
+        }
+    });
 
     Ok(ClaudeOauthStartResponse {
         url: Some(url),
@@ -6840,7 +6871,11 @@ async fn claude_login(
     if start.already_authenticated {
         let status = check_claude_auth_internal().await?;
         if status.authenticated {
-            let _ = ensure_claude_credentials_file();
+            let write_credentials = {
+                let settings = state.settings.lock().await;
+                claude_credentials_write_enabled(&settings)
+            };
+            let _ = ensure_claude_credentials_file_opt_in(write_credentials);
             let mut settings = state.settings.lock().await;
             settings.claude_auth_method = Some("oauth".to_string());
             persist_settings(&settings)?;
@@ -6859,7 +6894,11 @@ async fn claude_login(
         tokio::time::sleep(Duration::from_secs(2)).await;
         let status = check_claude_auth_internal().await?;
         if status.authenticated {
-            let _ = ensure_claude_credentials_file();
+            let write_credentials = {
+                let settings = state.settings.lock().await;
+                claude_credentials_write_enabled(&settings)
+            };
+            let _ = ensure_claude_credentials_file_opt_in(write_credentials);
             let mut settings = state.settings.lock().await;
             settings.claude_auth_method = Some("oauth".to_string());
             persist_settings(&settings)?;
@@ -7092,6 +7131,13 @@ async fn codex_logout(state: State<'_, AppState>) -> Result<(), String> {
 
 fn get_claude_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude.json"))
+}
+
+fn ensure_claude_credentials_file_opt_in(write_enabled: bool) -> Result<(), String> {
+    if !write_enabled {
+        return Ok(());
+    }
+    ensure_claude_credentials_file()
 }
 
 fn ensure_claude_credentials_file() -> Result<(), String> {
@@ -7329,7 +7375,11 @@ async fn check_claude_auth_internal() -> Result<ClaudeAuthStatus, String> {
 async fn check_claude_auth(state: State<'_, AppState>) -> Result<ClaudeAuthStatus, String> {
     let status = check_claude_auth_internal().await?;
     if status.authenticated && status.method.as_deref() == Some("oauth") {
-        let _ = ensure_claude_credentials_file();
+        let write_credentials = {
+            let settings = state.settings.lock().await;
+            claude_credentials_write_enabled(&settings)
+        };
+        let _ = ensure_claude_credentials_file_opt_in(write_credentials);
         let mut settings = state.settings.lock().await;
         if settings.claude_auth_method.as_deref() != Some("oauth") {
             settings.claude_auth_method = Some("oauth".to_string());

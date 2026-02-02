@@ -368,6 +368,12 @@ async function saveSettingsFromUi() {
   let mcpPortRaw = $("#mcpPort").val();
   let mcpTokenRaw = $("#mcpToken").val();
   let taskProjectAllowlist = getProjectAllowlist();
+  const claudeWriteCredentialsToggle = document.getElementById(
+    "claudeWriteCredentialsToggle",
+  );
+  const claudeWriteCredentials = !!(
+    claudeWriteCredentialsToggle && claudeWriteCredentialsToggle.checked
+  );
   let agentNotificationTimeoutValue = 0;
   let parsedMcpPort = parseInt(mcpPortRaw, 10);
   if (Number.isNaN(parsedMcpPort)) {
@@ -400,6 +406,7 @@ async function saveSettingsFromUi() {
       aiSummariesEnabled: $("#aiSummariesEnabled").is(":checked"),
       summariesAgent: summariesAgentDropdown ? summariesAgentDropdown.getValue() : "auto",
       taskProjectAllowlist: taskProjectAllowlist,
+      claudeWriteCredentials: claudeWriteCredentials,
       mcpEnabled: $("#mcpEnabled").is(":checked"),
       mcpPort: parsedMcpPort,
       mcpToken: nextMcpToken,
@@ -418,7 +425,7 @@ async function saveSettingsFromUi() {
 
 // Auto-save settings on any change (inputs and toggles)
 $("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken").on("change", saveSettingsFromUi);
-$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #agentNotificationTimeout, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
+$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #agentNotificationTimeout, #aiSummariesEnabled, #mcpEnabled, #claudeWriteCredentialsToggle").on("change", saveSettingsFromUi);
 
 // Show/hide summaries agent dropdown based on AI summaries toggle
 function updateSummariesAgentVisibility() {
@@ -449,7 +456,7 @@ let codexAuthState = { authenticated: false, method: null };
 let claudeAuthState = { authenticated: false, method: null, email: null };
 let codexAccounts = [];
 let activeCodexAccountId = null;
-let claudeOauthPollInterval = null;
+let claudeOauthPollTimeout = null;
 let claudeOauthUrl = null;
 let claudeOauthInProgress = false;
 
@@ -915,10 +922,40 @@ function hideClaudeOauthModal() {
 }
 
 function stopClaudeOauthPolling() {
-  if (claudeOauthPollInterval) {
-    clearInterval(claudeOauthPollInterval);
-    claudeOauthPollInterval = null;
+  if (claudeOauthPollTimeout) {
+    clearTimeout(claudeOauthPollTimeout);
+    claudeOauthPollTimeout = null;
   }
+}
+
+function startClaudeOauthPolling() {
+  stopClaudeOauthPolling();
+  const poll = async () => {
+    if (!claudeOauthInProgress) {
+      stopClaudeOauthPolling();
+      return;
+    }
+
+    try {
+      const status = await checkClaudeAuth();
+      if (status && status.authenticated) {
+        claudeOauthInProgress = false;
+        stopClaudeOauthPolling();
+        hideClaudeOauthModal();
+        sendNotification("Signed in to Claude", "green");
+        tryEnableClaudeUsage();
+        return;
+      }
+    } catch (err) {
+      console.warn("[Harness] Claude OAuth poll failed", err);
+    }
+
+    if (claudeOauthInProgress) {
+      claudeOauthPollTimeout = setTimeout(poll, 1000);
+    }
+  };
+
+  claudeOauthPollTimeout = setTimeout(poll, 1000);
 }
 
 async function cancelClaudeOauthFlow() {
@@ -1299,16 +1336,7 @@ document.querySelectorAll("[data-auth-action]").forEach((button) => {
             }
 
             stopClaudeOauthPolling();
-            claudeOauthPollInterval = setInterval(async () => {
-              const status = await checkClaudeAuth();
-              if (status && status.authenticated) {
-                claudeOauthInProgress = false;
-                stopClaudeOauthPolling();
-                hideClaudeOauthModal();
-                sendNotification("Signed in to Claude", "green");
-                tryEnableClaudeUsage();
-              }
-            }, 1000);
+            startClaudeOauthPolling();
           } catch (err) {
             claudeOauthInProgress = false;
             stopClaudeOauthPolling();
@@ -2266,6 +2294,15 @@ async function getSettings() {
   }
   // Update visibility based on current toggle state
   updateSummariesAgentVisibility();
+
+  if (settingsPayload.claudeWriteCredentials !== undefined) {
+    $("#claudeWriteCredentialsToggle").prop(
+      "checked",
+      !!settingsPayload.claudeWriteCredentials,
+    );
+  } else {
+    $("#claudeWriteCredentialsToggle").prop("checked", false);
+  }
 
   if (settingsPayload.taskProjectAllowlist !== undefined) {
     currentSettings.taskProjectAllowlist = Array.isArray(
