@@ -94,9 +94,10 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     conn.busy_timeout(Duration::from_secs(5))?;
     // PRAGMAs that return results - use query_row to consume them
     let _ = conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()));
-    conn.execute("PRAGMA synchronous = NORMAL", [])?;
-    conn.execute("PRAGMA temp_store = MEMORY", [])?;
-    conn.execute("PRAGMA cache_size = -16000", [])?;
+    let _ = conn.query_row("PRAGMA synchronous = NORMAL", [], |_| Ok(()));
+    let _ = conn.query_row("PRAGMA temp_store = MEMORY", [], |_| Ok(()));
+    let _ = conn.query_row("PRAGMA cache_size = -16000", [], |_| Ok(()));
+    let _ = conn.query_row("PRAGMA mmap_size = 268435456", [], |_| Ok(())); // 256MB memory-mapped I/O
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
@@ -357,7 +358,7 @@ pub fn get_all_analytics_cache(conn: &Connection) -> Result<Vec<(String, String,
 
 /// Get cached models for an agent (returns empty vec if none cached)
 pub fn get_cached_models(conn: &Connection, agent_id: &str) -> Result<Vec<CachedModel>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT value, name, description FROM cached_models WHERE agent_id = ?1 ORDER BY rowid",
     )?;
     let models = stmt.query_map(params![agent_id], |row| {
@@ -371,24 +372,26 @@ pub fn get_cached_models(conn: &Connection, agent_id: &str) -> Result<Vec<Cached
 }
 
 /// Save models to cache (replaces all models for agent)
-pub fn save_cached_models(conn: &Connection, agent_id: &str, models: &[CachedModel]) -> Result<()> {
+pub fn save_cached_models(conn: &mut Connection, agent_id: &str, models: &[CachedModel]) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
+    let tx = conn.transaction()?;
 
     // Delete existing models for this agent
-    conn.execute(
+    tx.execute(
         "DELETE FROM cached_models WHERE agent_id = ?1",
         params![agent_id],
     )?;
 
     // Insert new models
     for model in models {
-        conn.execute(
+        tx.execute(
             "INSERT INTO cached_models (agent_id, value, name, description, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![agent_id, model.value, model.name, model.description, now],
         )?;
     }
 
+    tx.commit()?;
     Ok(())
 }
 
@@ -412,7 +415,7 @@ pub fn get_all_cached_models(conn: &Connection) -> Result<Vec<(String, Vec<Cache
 
 /// Get cached modes for an agent (returns empty vec if none cached)
 pub fn get_cached_modes(conn: &Connection, agent_id: &str) -> Result<Vec<CachedMode>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT value, name, description FROM cached_modes WHERE agent_id = ?1 ORDER BY rowid",
     )?;
     let modes = stmt.query_map(params![agent_id], |row| {
@@ -426,24 +429,26 @@ pub fn get_cached_modes(conn: &Connection, agent_id: &str) -> Result<Vec<CachedM
 }
 
 /// Save modes to cache (replaces all modes for agent)
-pub fn save_cached_modes(conn: &Connection, agent_id: &str, modes: &[CachedMode]) -> Result<()> {
+pub fn save_cached_modes(conn: &mut Connection, agent_id: &str, modes: &[CachedMode]) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
+    let tx = conn.transaction()?;
 
     // Delete existing modes for this agent
-    conn.execute(
+    tx.execute(
         "DELETE FROM cached_modes WHERE agent_id = ?1",
         params![agent_id],
     )?;
 
     // Insert new modes
     for mode in modes {
-        conn.execute(
+        tx.execute(
             "INSERT INTO cached_modes (agent_id, value, name, description, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![agent_id, mode.value, mode.name, mode.description, now],
         )?;
     }
 
+    tx.commit()?;
     Ok(())
 }
 
@@ -649,7 +654,7 @@ pub fn save_message_attachments(
 }
 
 pub fn save_pending_attachments(
-    conn: &Connection,
+    conn: &mut Connection,
     task_id: &str,
     attachments: &[AttachmentRecord],
 ) -> Result<()> {
@@ -657,8 +662,9 @@ pub fn save_pending_attachments(
         return Ok(());
     }
     let now = chrono::Utc::now().timestamp();
+    let tx = conn.transaction()?;
     for attachment in attachments {
-        conn.execute(
+        tx.execute(
             "INSERT OR REPLACE INTO pending_attachments
              (id, task_id, file_name, mime_type, relative_path, byte_size, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -673,6 +679,7 @@ pub fn save_pending_attachments(
             ],
         )?;
     }
+    tx.commit()?;
     Ok(())
 }
 
@@ -706,7 +713,7 @@ pub fn get_message_attachments(
     conn: &Connection,
     task_id: &str,
 ) -> Result<HashMap<i64, Vec<AttachmentRecord>>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT message_id, id, file_name, mime_type, relative_path, byte_size
          FROM message_attachments WHERE task_id = ?1 ORDER BY message_id ASC, rowid ASC",
     )?;
@@ -772,7 +779,7 @@ pub fn attachment_ref_count(
 /// Load all messages for a task
 pub fn get_messages(conn: &Connection, task_id: &str) -> Result<Vec<serde_json::Value>> {
     let attachments_by_message = get_message_attachments(conn, task_id).unwrap_or_default();
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, message_type, content, reasoning, tool_name, tool_arguments, tool_return, timestamp
          FROM messages WHERE task_id = ?1 ORDER BY id ASC",
     )?;
@@ -819,7 +826,7 @@ pub fn get_messages(conn: &Connection, task_id: &str) -> Result<Vec<serde_json::
 }
 
 pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRecord>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window
          FROM tasks ORDER BY created_at DESC"
     )?;
@@ -926,7 +933,7 @@ pub fn delete_codex_account(conn: &Connection, id: &str) -> Result<()> {
 
 /// Get messages as structured MessageRecord for history formatting
 pub fn get_message_records(conn: &Connection, task_id: &str) -> Result<Vec<MessageRecord>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT id, message_type, content, reasoning, tool_name, tool_arguments, tool_return, timestamp
          FROM messages WHERE task_id = ?1 ORDER BY id ASC",
     )?;
@@ -1100,4 +1107,13 @@ pub fn compact_history(
 
     output.push_str("---\n\n");
     (output, true)
+}
+
+/// Optimize database and checkpoint WAL on shutdown
+pub fn optimize_and_shutdown(conn: &Connection) -> Result<()> {
+    // Let SQLite analyze and optimize based on usage patterns
+    conn.execute("PRAGMA optimize", [])?;
+    // Merge WAL back into main database file
+    conn.execute("PRAGMA wal_checkpoint(PASSIVE)", [])?;
+    Ok(())
 }

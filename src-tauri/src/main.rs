@@ -2506,7 +2506,7 @@ fn save_modes_to_cache(
     agent_id: &str,
     modes: &[ModeOption],
 ) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
     let cached_modes: Vec<db::CachedMode> = modes
         .iter()
         .map(|m| db::CachedMode {
@@ -2515,7 +2515,7 @@ fn save_modes_to_cache(
             description: m.description.clone(),
         })
         .collect();
-    db::save_cached_modes(&conn, agent_id, &cached_modes)
+    db::save_cached_modes(&mut conn, agent_id, &cached_modes)
         .map_err(|e| format!("Failed to cache modes: {}", e))?;
     println!("[Harness] Cached {} modes for {}", modes.len(), agent_id);
     Ok(())
@@ -2860,7 +2860,7 @@ fn save_models_to_cache(
     agent_id: &str,
     models: &[ModelOption],
 ) -> Result<(), String> {
-    let conn = db.lock().map_err(|e| e.to_string())?;
+    let mut conn = db.lock().map_err(|e| e.to_string())?;
     let cached_models: Vec<db::CachedModel> = models
         .iter()
         .map(|m| db::CachedModel {
@@ -2869,7 +2869,7 @@ fn save_models_to_cache(
             description: m.description.clone(),
         })
         .collect();
-    db::save_cached_models(&conn, agent_id, &cached_models)
+    db::save_cached_models(&mut conn, agent_id, &cached_models)
         .map_err(|e| format!("Failed to cache models: {}", e))?;
     println!("[Harness] Cached {} models for {}", models.len(), agent_id);
     Ok(())
@@ -3967,22 +3967,7 @@ pub(crate) async fn start_task_internal(
     let chat_window_label = format!("chat-{}", task_id);
 
     // Persist user message before sending so it renders first in history
-    let message_id = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        db::save_message(
-            &conn,
-            &task_id,
-            "user_message",
-            Some(&prompt),
-            None,
-            None,
-            None,
-            None,
-            &user_timestamp,
-        )
-        .map_err(|e| e.to_string())?
-    };
-    if !attachments.is_empty() {
+    {
         let attachment_records: Vec<db::AttachmentRecord> = attachments
             .iter()
             .map(|att| db::AttachmentRecord {
@@ -3993,8 +3978,23 @@ pub(crate) async fn start_task_internal(
                 byte_size: 0,
             })
             .collect();
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        let _ = db::save_message_attachments(&conn, &task_id, message_id, &attachment_records);
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        let message_id = db::save_message(
+            &tx,
+            &task_id,
+            "user_message",
+            Some(&prompt),
+            None,
+            None,
+            None,
+            None,
+            &user_timestamp,
+        )
+        .map_err(|e| e.to_string())?;
+        db::save_message_attachments(&tx, &task_id, message_id, &attachment_records)
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
 
     // Build attachment info with data URLs for chat display
@@ -9328,9 +9328,10 @@ pub(crate) async fn send_chat_message_internal(
 
     // Persist user message before sending so reload ordering is correct
     {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
         let message_id = db::save_message(
-            &conn,
+            &tx,
             &task_id,
             "user_message",
             Some(&message),
@@ -9341,7 +9342,9 @@ pub(crate) async fn send_chat_message_internal(
             &user_timestamp,
         )
         .map_err(|e| e.to_string())?;
-        let _ = db::save_message_attachments(&conn, &task_id, message_id, &attachments);
+        db::save_message_attachments(&tx, &task_id, message_id, &attachments)
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
     }
 
     if from_discord {
@@ -10032,8 +10035,8 @@ async fn save_attachment(
     };
 
     // Save to database
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::save_pending_attachments(&conn, &payload.task_id, &[attachment.clone()])
+    let mut conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::save_pending_attachments(&mut conn, &payload.task_id, &[attachment.clone()])
         .map_err(|e| format!("Failed to save attachment record: {}", e))?;
 
     println!(
@@ -10278,30 +10281,74 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            let should_close = matches!(
-                event,
-                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
-            );
-            if !should_close {
-                return;
-            }
-            let label = window.label();
-            if label.starts_with("chat-") {
-                let task_id = label.trim_start_matches("chat-").to_string();
-                let state = window.app_handle().state::<AppState>().inner().clone();
-                tauri::async_runtime::spawn(async move {
-                    cleanup_terminal_session_by_task(&state, &task_id).await;
-                });
-                return;
-            }
-            if label != "main" {
-                return;
-            }
-            let app = window.app_handle();
-            for (label, win) in app.webview_windows() {
-                if label.starts_with("chat-") {
-                    let _ = win.close();
+            match event {
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    let label = window.label();
+                    if label.starts_with("chat-") {
+                        let task_id = label.trim_start_matches("chat-").to_string();
+                        let state = window.app_handle().state::<AppState>().inner().clone();
+                        tauri::async_runtime::spawn(async move {
+                            cleanup_terminal_session_by_task(&state, &task_id).await;
+                        });
+                        return;
+                    }
+                    if label != "main" {
+                        return;
+                    }
+                    // Prevent immediate close to allow async DB shutdown
+                    api.prevent_close();
+
+                    // Clone handles needed for async work
+                    let app = window.app_handle().clone();
+                    let window_clone = window.clone();
+                    let db_arc = window
+                        .try_state::<AppState>()
+                        .map(|s| Arc::clone(&s.db));
+
+                    tauri::async_runtime::spawn(async move {
+                        // Run DB optimization in blocking thread to avoid holding mutex on main thread
+                        if let Some(db) = db_arc {
+                            let result = tauri::async_runtime::spawn_blocking(move || {
+                                match db.lock() {
+                                    Ok(conn) => crate::db::optimize_and_shutdown(&conn)
+                                        .map_err(|e| anyhow::anyhow!("{e}")),
+                                    Err(e) => Err(anyhow::anyhow!("Failed to acquire DB lock: {e}")),
+                                }
+                            })
+                            .await;
+
+                            match result {
+                                Ok(Ok(())) => tracing::info!("[Harness] DB shutdown optimization completed"),
+                                Ok(Err(e)) => tracing::error!("[Harness] DB shutdown optimization failed: {e}"),
+                                Err(e) => tracing::error!("[Harness] DB shutdown task panicked: {e}"),
+                            }
+                        }
+
+                        // Close chat windows
+                        for (label, win) in app.webview_windows() {
+                            if label.starts_with("chat-") {
+                                let _ = win.close();
+                            }
+                        }
+
+                        // Destroy the main window on main thread
+                        let window_to_destroy = window_clone.clone();
+                        let _ = window_clone.run_on_main_thread(move || {
+                            let _ = window_to_destroy.destroy();
+                        });
+                    });
                 }
+                tauri::WindowEvent::Destroyed => {
+                    let label = window.label();
+                    if label.starts_with("chat-") {
+                        let task_id = label.trim_start_matches("chat-").to_string();
+                        let state = window.app_handle().state::<AppState>().inner().clone();
+                        tauri::async_runtime::spawn(async move {
+                            cleanup_terminal_session_by_task(&state, &task_id).await;
+                        });
+                    }
+                }
+                _ => {}
             }
         })
         .manage({
