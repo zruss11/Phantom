@@ -3,10 +3,13 @@
 use serde_json::Value;
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
+
+use crate::utils::resolve_command_path;
 
 const FREE_MODELS: &[&str] = &[
     "opencode/glm-4.7-free",
@@ -59,7 +62,9 @@ async fn execute_with_model_fallback(prompt: &str) -> Result<String, String> {
 }
 
 async fn execute_with_model(prompt: &str, model: Option<&str>) -> Result<String, String> {
-    let mut cmd = Command::new("opencode");
+    let command_path = resolve_command_path("opencode")
+        .unwrap_or_else(|| PathBuf::from("opencode"));
+    let mut cmd = Command::new(command_path);
     cmd.args(["run", "--format", "json"]);
     if let Some(model) = model {
         if !model.trim().is_empty() {

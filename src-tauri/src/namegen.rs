@@ -239,31 +239,48 @@ async fn generate_with_codex_backend(prompt: &str) -> Result<String, String> {
 fn extract_json_from_text(text: &str) -> String {
     let text = text.trim();
 
-    // Try to find the first complete JSON object by matching braces
-    if let Some(start) = text.find('{') {
-        let mut depth = 0;
-        let mut in_string = false;
-        let mut escape_next = false;
+    let mut last: Option<(usize, usize)> = None;
+    let mut start: Option<usize> = None;
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
 
-        for (i, ch) in text[start..].char_indices() {
-            if escape_next {
-                escape_next = false;
-                continue;
+    for (idx, ch) in text.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
+        }
+
+        match ch {
+            '\\' if in_string => {
+                escape_next = true;
             }
-
-            match ch {
-                '\\' if in_string => escape_next = true,
-                '"' => in_string = !in_string,
-                '{' if !in_string => depth += 1,
-                '}' if !in_string => {
+            '"' => {
+                in_string = !in_string;
+            }
+            '{' if !in_string => {
+                if depth == 0 {
+                    start = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' if !in_string => {
+                if depth > 0 {
                     depth -= 1;
                     if depth == 0 {
-                        return text[start..=start + i].to_string();
+                        if let Some(start_idx) = start {
+                            last = Some((start_idx, idx));
+                            start = None;
+                        }
                     }
                 }
-                _ => {}
             }
+            _ => {}
         }
+    }
+
+    if let Some((start_idx, end_idx)) = last {
+        return text[start_idx..=end_idx].to_string();
     }
 
     text.to_string()
@@ -429,14 +446,14 @@ mod tests {
             r#"{"title":"Test","branchName":"feat/test"}"#
         );
 
-        // Test multiple JSON objects - should return only the first one
+        // Test multiple JSON objects - should return the last one
         assert_eq!(
             extract_json_from_text(
                 r#"{"title":"Fix Login Redirect Loop","branchName":"fix/login-redirect-loop"}
 {"title":"Add Workspace Home View","branchName":"feat/workspace-home"}
 {"title":"Update Dependencies","branchName":"chore/update-deps"}"#
             ),
-            r#"{"title":"Fix Login Redirect Loop","branchName":"fix/login-redirect-loop"}"#
+            r#"{"title":"Update Dependencies","branchName":"chore/update-deps"}"#
         );
     }
 

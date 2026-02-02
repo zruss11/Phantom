@@ -14,7 +14,7 @@ mod utils;
 mod webhook;
 mod worktree;
 
-use utils::{resolve_gh_binary, truncate_str};
+use utils::{resolve_command_path, resolve_gh_binary, truncate_str};
 
 use chrono::TimeZone;
 use phantom_harness_backend::cli::{
@@ -158,71 +158,6 @@ struct AgentAvailability {
     available: bool,
     error_message: Option<String>,
     last_checked: i64,
-}
-
-fn default_search_paths() -> Vec<std::path::PathBuf> {
-    let mut paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(env_paths) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&env_paths));
-    }
-    if let Some(home) = dirs::home_dir() {
-        paths.extend([
-            home.join(".amp/bin"),
-            home.join(".opencode/bin"),
-            home.join(".superset/bin"),
-            home.join(".factory/bin"),
-            home.join(".npm-global/bin"),
-            home.join(".local/bin"),
-            home.join(".cargo/bin"),
-            home.join("bin"),
-        ]);
-    }
-    if cfg!(target_os = "macos") {
-        paths.extend(
-            [
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin",
-                "/usr/sbin",
-                "/sbin",
-            ]
-            .iter()
-            .map(std::path::PathBuf::from),
-        );
-    } else if cfg!(target_os = "linux") {
-        paths.extend(
-            ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-                .iter()
-                .map(std::path::PathBuf::from),
-        );
-    }
-    paths
-}
-
-fn resolve_command_path(command: &str) -> Option<std::path::PathBuf> {
-    let path = Path::new(command);
-    if path.is_absolute() || command.contains('/') || command.contains('\\') {
-        return path.is_file().then_some(path.to_path_buf());
-    }
-    for dir in default_search_paths() {
-        let candidate = dir.join(command);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        {
-            for ext in [".exe", ".cmd", ".bat"] {
-                if candidate
-                    .with_extension(ext.trim_start_matches('.'))
-                    .is_file()
-                {
-                    return Some(candidate.with_extension(ext.trim_start_matches('.')));
-                }
-            }
-        }
-    }
-    None
 }
 
 fn command_exists(command: &str) -> bool {
