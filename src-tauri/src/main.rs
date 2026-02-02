@@ -46,7 +46,7 @@ use tauri::{
 use tauri_plugin_updater::UpdaterExt;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command as TokioCommand;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{timeout, Duration};
 
 #[cfg(unix)]
@@ -84,8 +84,8 @@ const MODEL_PRICING: &[(&str, f64, f64)] = &[
 
 const CLAUDE_DOCKER_IMAGE_DEFAULT: &str = "nezhar/claude-container:1.6.1";
 const CLAUDE_DOCKER_WORKDIR: &str = "/workspace";
-const CLAUDE_DOCKER_CONFIG_DIR: &str = "/claude";
 const CLAUDE_DOCKER_HOME: &str = "/home/claude";
+const CLAUDE_DOCKER_CONFIG_DIR: &str = "/home/claude/.claude";
 
 /// Calculate cost from token usage for a given model
 fn calculate_cost_from_usage(model: &str, usage: &TokenUsageInfo) -> f64 {
@@ -312,8 +312,16 @@ pub(crate) struct AppState {
     pending_discord_tasks: Arc<Mutex<HashMap<String, PendingDiscordTask>>>,
     codex_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
     claude_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
+    claude_oauth_state: Arc<Mutex<ClaudeOauthState>>,
     terminal_sessions: Arc<Mutex<HashMap<String, TerminalSession>>>,
     task_terminal_sessions: Arc<Mutex<HashMap<String, String>>>,
+}
+
+#[derive(Debug, Default)]
+struct ClaudeOauthState {
+    child: Option<tokio::process::Child>,
+    url: Option<String>,
+    starting: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -603,6 +611,13 @@ struct ClaudeAuthStatus {
     method: Option<String>,
     expires_at: Option<String>,
     email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeOauthStartResponse {
+    url: Option<String>,
+    already_authenticated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2331,6 +2346,12 @@ struct AgentSpawnSpec {
     cli_kind: AgentCliKind,
 }
 
+struct ClaudeOauthSpawnSpec {
+    command: String,
+    args: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
 fn push_docker_env(
     args: &mut Vec<String>,
     env_keys: &mut HashSet<String>,
@@ -2394,6 +2415,14 @@ fn build_claude_docker_spawn_spec(
         CLAUDE_DOCKER_CONFIG_DIR,
     );
     push_docker_env(&mut args, &mut env_keys, "HOME", CLAUDE_DOCKER_HOME);
+    if settings.claude_auth_method.as_deref() == Some("oauth") {
+        let _ = ensure_claude_credentials_file();
+        if let Some(token) = get_claude_oauth_token() {
+            if !token.trim().is_empty() {
+                push_docker_env(&mut args, &mut env_keys, "CLAUDE_CODE_OAUTH_TOKEN", &token);
+            }
+        }
+    }
 
     let tmpdir = std::env::var("TMPDIR")
         .ok()
@@ -2454,6 +2483,213 @@ fn build_claude_docker_spawn_spec(
     })
 }
 
+fn build_claude_oauth_spawn_spec(settings: &Settings) -> Result<ClaudeOauthSpawnSpec, String> {
+    let claude_cmd = resolve_claude_command();
+    if command_exists(&claude_cmd) {
+        let mut env = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            let claude_dir = home.join(".claude");
+            env.push((
+                "CLAUDE_CONFIG_DIR".to_string(),
+                claude_dir.to_string_lossy().to_string(),
+            ));
+        }
+        return Ok(ClaudeOauthSpawnSpec {
+            command: claude_cmd,
+            args: vec!["setup-token".to_string()],
+            env,
+        });
+    }
+
+    let docker_command = resolve_command_path("docker")
+        .map(|path| path.to_string_lossy().to_string())
+        .ok_or("Docker CLI not found in PATH")?;
+
+    let image = settings
+        .claude_docker_image
+        .as_deref()
+        .unwrap_or(CLAUDE_DOCKER_IMAGE_DEFAULT);
+
+    let mut args: Vec<String> = vec![
+        "run".to_string(),
+        "--rm".to_string(),
+        "-i".to_string(),
+        "--security-opt".to_string(),
+        "no-new-privileges".to_string(),
+        "--cap-drop".to_string(),
+        "ALL".to_string(),
+        "--cap-add".to_string(),
+        "CHOWN".to_string(),
+        "--cap-add".to_string(),
+        "SETUID".to_string(),
+        "--cap-add".to_string(),
+        "SETGID".to_string(),
+    ];
+
+    args.push("-e".to_string());
+    args.push(format!("HOME={}", CLAUDE_DOCKER_HOME));
+    args.push("-e".to_string());
+    args.push(format!("CLAUDE_CONFIG_DIR={}", CLAUDE_DOCKER_CONFIG_DIR));
+
+    #[cfg(unix)]
+    {
+        let uid = unsafe { geteuid() };
+        let gid = unsafe { getegid() };
+        args.push("-e".to_string());
+        args.push(format!("USER_UID={}", uid));
+        args.push("-e".to_string());
+        args.push(format!("USER_GID={}", gid));
+    }
+
+    if let Ok(tmpdir) = std::env::var("TMPDIR") {
+        if !tmpdir.trim().is_empty() {
+            args.push("-e".to_string());
+            args.push(format!("TMPDIR={}", tmpdir));
+            args.push("-v".to_string());
+            args.push(format!("{tmpdir}:{tmpdir}"));
+        }
+    }
+
+    let home = dirs::home_dir().ok_or("Unable to resolve HOME for Claude OAuth")?;
+    let host_claude_dir = home.join(".claude");
+    if let Err(err) = std::fs::create_dir_all(&host_claude_dir) {
+        return Err(format!("Failed to create ~/.claude directory: {}", err));
+    }
+    args.push("-v".to_string());
+    args.push(format!(
+        "{}:{}",
+        host_claude_dir.to_string_lossy(),
+        CLAUDE_DOCKER_CONFIG_DIR
+    ));
+
+    let host_claude_json = home.join(".claude.json");
+    if host_claude_json.exists() {
+        args.push("-v".to_string());
+        args.push(format!(
+            "{}:{}/.claude.json",
+            host_claude_json.to_string_lossy(),
+            CLAUDE_DOCKER_HOME
+        ));
+    }
+
+    args.push(image.to_string());
+    args.push("claude".to_string());
+    args.push("setup-token".to_string());
+
+    Ok(ClaudeOauthSpawnSpec {
+        command: docker_command,
+        args,
+        env: Vec::new(),
+    })
+}
+
+async fn start_claude_oauth_internal(state: &AppState) -> Result<ClaudeOauthStartResponse, String> {
+    let current_status = check_claude_auth_internal().await?;
+    if current_status.authenticated {
+        return Ok(ClaudeOauthStartResponse {
+            url: None,
+            already_authenticated: true,
+        });
+    }
+
+    {
+        let mut oauth_state = state.claude_oauth_state.lock().await;
+        cleanup_claude_oauth_state(&mut oauth_state);
+        if oauth_state.child.is_some() || oauth_state.starting {
+            if oauth_state.url.is_some() {
+                return Ok(ClaudeOauthStartResponse {
+                    url: oauth_state.url.clone(),
+                    already_authenticated: false,
+                });
+            }
+            return Err("Claude OAuth already in progress".to_string());
+        }
+        oauth_state.starting = true;
+    }
+
+    let settings = state.settings.lock().await.clone();
+    let spawn_spec = match build_claude_oauth_spawn_spec(&settings) {
+        Ok(spec) => spec,
+        Err(err) => {
+            let mut oauth_state = state.claude_oauth_state.lock().await;
+            oauth_state.starting = false;
+            return Err(err);
+        }
+    };
+
+    let mut command = TokioCommand::new(&spawn_spec.command);
+    command
+        .args(&spawn_spec.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in spawn_spec.env {
+        command.env(key, value);
+    }
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let mut oauth_state = state.claude_oauth_state.lock().await;
+            oauth_state.starting = false;
+            return Err(format!("Failed to start Claude OAuth: {}", err));
+        }
+    };
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+    if let Some(stdout) = child.stdout.take() {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = tx.send(line);
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = tx.send(line);
+            }
+        });
+    }
+
+    let url_result = timeout(Duration::from_secs(20), async {
+        while let Some(line) = rx.recv().await {
+            if let Some(url) = extract_oauth_url(&line, validate_claude_oauth_url) {
+                return Ok(url);
+            }
+        }
+        Err("Claude OAuth URL not found".to_string())
+    })
+    .await
+    .map_err(|_| "Timed out waiting for Claude OAuth URL".to_string());
+
+    let url = match url_result {
+        Ok(Ok(url)) => url,
+        Ok(Err(err)) | Err(err) => {
+            let _ = child.kill().await;
+            let mut oauth_state = state.claude_oauth_state.lock().await;
+            oauth_state.starting = false;
+            return Err(err);
+        }
+    };
+
+    {
+        let mut oauth_state = state.claude_oauth_state.lock().await;
+        oauth_state.url = Some(url.clone());
+        oauth_state.child = Some(child);
+        oauth_state.starting = false;
+    }
+
+    Ok(ClaudeOauthStartResponse {
+        url: Some(url),
+        already_authenticated: false,
+    })
+}
+
 fn resolve_agent_command(agent: &AgentConfig) -> String {
     match agent.command.as_str() {
         "claude" => resolve_claude_command(),
@@ -2481,6 +2717,47 @@ fn validate_oauth_url(url: &str) -> bool {
         }
     }
     false
+}
+
+/// Validate Claude OAuth URLs against known Anthropic/Claude domains
+fn validate_claude_oauth_url(url: &str) -> bool {
+    if let Ok(parsed) = url::Url::parse(url) {
+        let allowed_domains = [
+            "console.anthropic.com",
+            "claude.ai",
+            "accounts.anthropic.com",
+            "auth.anthropic.com",
+        ];
+        if let Some(host) = parsed.host_str() {
+            return parsed.scheme() == "https"
+                && allowed_domains
+                    .iter()
+                    .any(|d| host == *d || host.ends_with(&format!(".{}", d)));
+        }
+    }
+    false
+}
+
+fn extract_oauth_url(line: &str, validator: fn(&str) -> bool) -> Option<String> {
+    for token in line.split_whitespace() {
+        let trimmed = token.trim_matches(|c: char| {
+            matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | '.' | ';')
+        });
+        if trimmed.starts_with("https://") && validator(trimmed) {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn cleanup_claude_oauth_state(state: &mut ClaudeOauthState) {
+    if let Some(child) = state.child.as_mut() {
+        if let Ok(Some(_)) = child.try_wait() {
+            state.child = None;
+            state.url = None;
+            state.starting = false;
+        }
+    }
 }
 
 fn build_agent_spawn_spec(
@@ -6557,58 +6834,62 @@ async fn codex_login(
 #[tauri::command]
 async fn claude_login(
     state: State<'_, AppState>,
-    _app: tauri::AppHandle,
+    app: tauri::AppHandle,
 ) -> Result<ClaudeAuthStatus, String> {
-    let settings_handle = state.settings.clone();
-
-    // First check if already authenticated
-    let current_status = check_claude_auth().await?;
-    if current_status.authenticated {
-        // Already logged in, just update settings and return
-        let mut settings = settings_handle.lock().await;
-        settings.claude_auth_method = Some("oauth".to_string());
-        persist_settings(&settings)?;
-        return Ok(current_status);
+    let start = start_claude_oauth_internal(state.inner()).await?;
+    if start.already_authenticated {
+        let status = check_claude_auth_internal().await?;
+        if status.authenticated {
+            let _ = ensure_claude_credentials_file();
+            let mut settings = state.settings.lock().await;
+            settings.claude_auth_method = Some("oauth".to_string());
+            persist_settings(&settings)?;
+        }
+        return Ok(status);
     }
 
-    let claude_cmd = resolve_claude_command();
+    let Some(url) = start.url.clone() else {
+        return Err("Claude OAuth URL unavailable".to_string());
+    };
 
-    // Open Terminal with claude setup-token for interactive login
-    // This allows the user to complete the OAuth flow in a visible terminal
-    let script = format!(
-        r#"tell application "Terminal"
-            do script "{} setup-token"
-        end tell"#,
-        claude_cmd.replace("\"", "\\\"")
-    );
+    use tauri_plugin_opener::OpenerExt;
+    let _ = app.opener().open_url(url, None::<&str>);
 
-    tokio::process::Command::new("osascript")
-        .args(["-e", &script])
-        .spawn()
-        .map_err(|err| format!("Failed to open Terminal: {}", err))?;
-
-    // Wait a bit then poll for auth status (user completes flow in terminal)
-    // Poll every 2 seconds for up to 5 minutes
     for _ in 0..150 {
         tokio::time::sleep(Duration::from_secs(2)).await;
-
-        let status = check_claude_auth().await?;
+        let status = check_claude_auth_internal().await?;
         if status.authenticated {
-            // Update settings
-            let mut settings = settings_handle.lock().await;
+            let _ = ensure_claude_credentials_file();
+            let mut settings = state.settings.lock().await;
             settings.claude_auth_method = Some("oauth".to_string());
             persist_settings(&settings)?;
             return Ok(status);
         }
     }
 
-    // Timeout - user didn't complete login
     Ok(ClaudeAuthStatus {
         authenticated: false,
         method: None,
         expires_at: None,
         email: None,
     })
+}
+
+#[tauri::command]
+async fn start_claude_oauth(state: State<'_, AppState>) -> Result<ClaudeOauthStartResponse, String> {
+    start_claude_oauth_internal(state.inner()).await
+}
+
+#[tauri::command]
+async fn cancel_claude_oauth(state: State<'_, AppState>) -> Result<(), String> {
+    let mut oauth_state = state.claude_oauth_state.lock().await;
+    cleanup_claude_oauth_state(&mut oauth_state);
+    if let Some(mut child) = oauth_state.child.take() {
+        let _ = child.kill().await;
+    }
+    oauth_state.url = None;
+    oauth_state.starting = false;
+    Ok(())
 }
 
 #[tauri::command]
@@ -6813,8 +7094,151 @@ fn get_claude_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".claude.json"))
 }
 
-#[tauri::command]
-async fn check_claude_auth() -> Result<ClaudeAuthStatus, String> {
+fn ensure_claude_credentials_file() -> Result<(), String> {
+    let Some(tokens) = fetch_claude_oauth_tokens() else {
+        return Ok(());
+    };
+    let home = dirs::home_dir().ok_or("Unable to resolve HOME for Claude credentials")?;
+    let claude_dir = home.join(".claude");
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| format!("Failed to create ~/.claude directory: {}", e))?;
+
+    let credentials_path = claude_dir.join(".credentials.json");
+    let mut scopes: Option<Vec<String>> = None;
+    let mut subscription_type: Option<String> = None;
+    let mut rate_limit_tier: Option<String> = None;
+    let parse_scopes = |value: &serde_json::Value| -> Option<Vec<String>> {
+        if let Some(list) = value.as_array() {
+            let scopes: Vec<String> = list
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                .collect();
+            if scopes.is_empty() {
+                None
+            } else {
+                Some(scopes)
+            }
+        } else if let Some(value) = value.as_str() {
+            let scopes: Vec<String> = value
+                .split_whitespace()
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            if scopes.is_empty() {
+                None
+            } else {
+                Some(scopes)
+            }
+        } else {
+            None
+        }
+    };
+
+    if let Ok(existing) = std::fs::read_to_string(&credentials_path) {
+        if let Ok(existing_json) = serde_json::from_str::<serde_json::Value>(&existing) {
+            if let Some(access_token) = existing_json
+                .get("claudeAiOauth")
+                .and_then(|o| o.get("accessToken"))
+                .and_then(|v| v.as_str())
+            {
+                if access_token == tokens.access_token {
+                    if let Some(oauth) = existing_json.get("claudeAiOauth") {
+                        scopes = oauth.get("scopes").and_then(parse_scopes);
+                        subscription_type = oauth
+                            .get("subscriptionType")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        rate_limit_tier = oauth
+                            .get("rateLimitTier")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    let has_inference_scope = scopes
+                        .as_ref()
+                        .map(|list| list.iter().any(|scope| scope == "user:inference"))
+                        .unwrap_or(false);
+                    if has_inference_scope {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
+
+    if scopes.is_none() {
+        if let Some(config_path) = get_claude_config_path() {
+            if let Ok(content) = std::fs::read_to_string(&config_path) {
+                if let Ok(config_json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(oauth) = config_json.get("oauthAccount") {
+                        scopes = oauth.get("scopes").and_then(parse_scopes).or(scopes);
+                        subscription_type = oauth
+                            .get("subscriptionType")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or(subscription_type);
+                        rate_limit_tier = oauth
+                            .get("rateLimitTier")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .or(rate_limit_tier);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut scopes = scopes.unwrap_or_else(|| vec!["user:inference".to_string()]);
+    if !scopes.iter().any(|scope| scope == "user:inference") {
+        scopes.push("user:inference".to_string());
+    }
+    let scopes_json = serde_json::json!(scopes);
+
+    let mut oauth = serde_json::json!({
+        "accessToken": tokens.access_token,
+    });
+    if let Some(refresh_token) = tokens.refresh_token.clone() {
+        oauth["refreshToken"] = serde_json::json!(refresh_token);
+    }
+    if let Some(expires_at) = tokens.expires_at {
+        oauth["expiresAt"] = serde_json::json!(expires_at);
+    }
+    oauth["scopes"] = scopes_json.clone();
+    if let Some(subscription_type) = subscription_type.clone() {
+        oauth["subscriptionType"] = serde_json::json!(subscription_type);
+    }
+    if let Some(rate_limit_tier) = rate_limit_tier.clone() {
+        oauth["rateLimitTier"] = serde_json::json!(rate_limit_tier);
+    }
+
+    // Write both nested and flat formats for compatibility with different CLI builds.
+    let payload = serde_json::json!({
+        "claudeAiOauth": oauth,
+        "accessToken": tokens.access_token,
+        "refreshToken": tokens.refresh_token,
+        "expiresAt": tokens.expires_at,
+        "scopes": scopes_json,
+        "subscriptionType": subscription_type,
+        "rateLimitTier": rate_limit_tier,
+    });
+    let serialized =
+        serde_json::to_string(&payload).map_err(|e| format!("Failed to encode credentials: {}", e))?;
+
+    std::fs::write(&credentials_path, serialized)
+        .map_err(|e| format!("Failed to write credentials: {}", e))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(mut perms) = std::fs::metadata(&credentials_path).map(|m| m.permissions()) {
+            perms.set_mode(0o600);
+            let _ = std::fs::set_permissions(&credentials_path, perms);
+        }
+    }
+
+    Ok(())
+}
+
+async fn check_claude_auth_internal() -> Result<ClaudeAuthStatus, String> {
     // Primary check: ~/.claude.json with oauthAccount
     if let Some(config_path) = get_claude_config_path() {
         if config_path.exists() {
@@ -6884,12 +7308,38 @@ async fn check_claude_auth() -> Result<ClaudeAuthStatus, String> {
         }
     }
 
+    if fetch_claude_oauth_tokens().is_some() {
+        return Ok(ClaudeAuthStatus {
+            authenticated: true,
+            method: Some("oauth".to_string()),
+            expires_at: None,
+            email: None,
+        });
+    }
+
     Ok(ClaudeAuthStatus {
         authenticated: false,
         method: None,
         expires_at: None,
         email: None,
     })
+}
+
+#[tauri::command]
+async fn check_claude_auth(state: State<'_, AppState>) -> Result<ClaudeAuthStatus, String> {
+    let status = check_claude_auth_internal().await?;
+    if status.authenticated && status.method.as_deref() == Some("oauth") {
+        let _ = ensure_claude_credentials_file();
+        let mut settings = state.settings.lock().await;
+        if settings.claude_auth_method.as_deref() != Some("oauth") {
+            settings.claude_auth_method = Some("oauth".to_string());
+            persist_settings(&settings)?;
+        }
+    }
+    if let Ok(mut oauth_state) = state.claude_oauth_state.try_lock() {
+        cleanup_claude_oauth_state(&mut oauth_state);
+    }
+    Ok(status)
 }
 
 /// How often to re-check credentials from disk/keychain (5 minutes)
@@ -10769,6 +11219,7 @@ fn main() {
                 pending_discord_tasks: Arc::new(Mutex::new(HashMap::new())),
                 codex_command_cache: Arc::new(StdMutex::new(HashMap::new())),
                 claude_command_cache: Arc::new(StdMutex::new(HashMap::new())),
+                claude_oauth_state: Arc::new(Mutex::new(ClaudeOauthState::default())),
                 terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
                 task_terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
             }
@@ -10818,6 +11269,8 @@ fn main() {
             check_codex_auth,
             codex_rate_limits,
             claude_login,
+            start_claude_oauth,
+            cancel_claude_oauth,
             claude_logout,
             check_claude_auth,
             claude_rate_limits,

@@ -449,6 +449,9 @@ let codexAuthState = { authenticated: false, method: null };
 let claudeAuthState = { authenticated: false, method: null, email: null };
 let codexAccounts = [];
 let activeCodexAccountId = null;
+let claudeOauthPollInterval = null;
+let claudeOauthUrl = null;
+let claudeOauthInProgress = false;
 
 // Agent availability tracking
 let agentAvailability = {};
@@ -878,6 +881,13 @@ function updateClaudeAuthUI() {
   document
     .querySelectorAll('[data-auth-action="claude-login"]')
     .forEach((btn) => {
+      if (claudeOauthInProgress && !state.authenticated) {
+        btn.textContent = "Signing in...";
+        btn.dataset.authState = "pending";
+        btn.disabled = true;
+        btn.classList.add("auth-pending");
+        return;
+      }
       btn.textContent = state.authenticated
         ? "Sign out"
         : "Sign in with Claude";
@@ -891,6 +901,36 @@ function updateClaudeAuthUI() {
   if (!state.authenticated) {
     updateAgentUsageWarning("claude-code", null, null);
   }
+}
+
+function showClaudeOauthModal(url) {
+  claudeOauthUrl = url || "";
+  const input = document.getElementById("claudeOauthUrl");
+  if (input) input.value = claudeOauthUrl;
+  $("#claudeOauthModal").modal("show");
+}
+
+function hideClaudeOauthModal() {
+  $("#claudeOauthModal").modal("hide");
+}
+
+function stopClaudeOauthPolling() {
+  if (claudeOauthPollInterval) {
+    clearInterval(claudeOauthPollInterval);
+    claudeOauthPollInterval = null;
+  }
+}
+
+async function cancelClaudeOauthFlow() {
+  stopClaudeOauthPolling();
+  claudeOauthInProgress = false;
+  try {
+    await ipcRenderer.invoke("cancelClaudeOauth");
+  } catch (err) {
+    console.warn("[Harness] cancelClaudeOauth failed", err);
+  }
+  hideClaudeOauthModal();
+  updateClaudeAuthUI();
 }
 
 async function initAuthState() {
@@ -1224,30 +1264,58 @@ document.querySelectorAll("[data-auth-action]").forEach((button) => {
       } else if (action === "claude-login") {
         if (button.dataset.authState === "connected") {
           // Logout
+          claudeOauthInProgress = false;
+          stopClaudeOauthPolling();
+          hideClaudeOauthModal();
           await ipcRenderer.invoke("claudeLogout");
           claudeAuthState = { authenticated: false, method: null, email: null };
           updateClaudeAuthUI();
           sendNotification("Signed out of Claude", "green");
         } else {
-          // Login - show progress state
-          button.textContent = "Signing in...";
+          // Login - start OAuth flow
+          claudeOauthInProgress = true;
+          button.textContent = "Preparing...";
           button.disabled = true;
           button.classList.add("auth-pending");
-
-          const status = await ipcRenderer.invoke("claudeLogin");
-          claudeAuthState = status || {
-            authenticated: false,
-            method: null,
-            email: null,
-          };
           updateClaudeAuthUI();
 
-          if (claudeAuthState.authenticated) {
-            sendNotification("Signed in to Claude", "green");
-            // Try to enable usage tracking after successful login
-            tryEnableClaudeUsage();
-          } else {
-            sendNotification("Login was not completed", "yellow");
+          try {
+            const response = await ipcRenderer.invoke("startClaudeOauth");
+            if (response && response.alreadyAuthenticated) {
+              claudeOauthInProgress = false;
+              await checkClaudeAuth();
+              sendNotification("Already signed in to Claude", "green");
+              return;
+            }
+            const url = response && response.url ? response.url : null;
+            if (!url) {
+              throw new Error("Claude OAuth URL not available");
+            }
+            showClaudeOauthModal(url);
+            try {
+              await ipcRenderer.invoke("openExternalUrl", url);
+            } catch (err) {
+              console.warn("[Harness] openExternalUrl failed", err);
+            }
+
+            stopClaudeOauthPolling();
+            claudeOauthPollInterval = setInterval(async () => {
+              const status = await checkClaudeAuth();
+              if (status && status.authenticated) {
+                claudeOauthInProgress = false;
+                stopClaudeOauthPolling();
+                hideClaudeOauthModal();
+                sendNotification("Signed in to Claude", "green");
+                tryEnableClaudeUsage();
+              }
+            }, 1000);
+          } catch (err) {
+            claudeOauthInProgress = false;
+            stopClaudeOauthPolling();
+            updateClaudeAuthUI();
+            hideClaudeOauthModal();
+            sendNotification("Claude sign-in failed", "red");
+            console.warn("[Harness] Claude OAuth start failed", err);
           }
         }
       } else if (action === "claude-keychain") {
@@ -2273,6 +2341,16 @@ $("#mcpTokenCopy").on("click", function (event) {
   event.preventDefault();
   const token = ($("#mcpToken").val() || "").toString().trim();
   copyToClipboard(token);
+});
+
+$("#claudeOauthCopy").on("click", function (event) {
+  event.preventDefault();
+  copyToClipboard(claudeOauthUrl);
+});
+
+$("[data-claude-oauth-cancel]").on("click", function (event) {
+  event.preventDefault();
+  cancelClaudeOauthFlow();
 });
 
 $("#mcpTokenReveal").on("click", function (event) {
