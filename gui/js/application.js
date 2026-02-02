@@ -175,9 +175,10 @@ function initCustomDropdowns() {
       container: summariesAgentContainer,
       items: [
         { value: 'auto', name: 'Auto', description: "Use task's agent" },
-        { value: 'amp', name: 'Amp', description: 'Free' },
+        { value: 'opencode', name: 'OpenCode', description: 'Free models available' },
         { value: 'codex', name: 'Codex', description: 'GPT-5.1-codex-mini' },
-        { value: 'claude-code', name: 'Claude', description: 'Haiku' }
+        { value: 'claude-code', name: 'Claude Code', description: 'Haiku' },
+        { value: 'amp', name: 'Amp', description: 'Requires paid credits' }
       ],
       placeholder: 'Summaries Agent',
       defaultValue: 'auto',
@@ -514,28 +515,10 @@ async function fetchAgentAvailability() {
           status.error_message
         );
       }
-      // Auto-default summaries agent to Amp if not configured and Amp is available
-      autoDefaultSummariesAgentToAmp();
+      // No auto-default for summaries agent to avoid paid providers by surprise
     }
   } catch (err) {
     console.warn("[Harness] Failed to fetch agent availability:", err);
-  }
-}
-
-// Auto-default summaries agent to Amp if not configured and Amp is available
-function autoDefaultSummariesAgentToAmp() {
-  // Guard against race condition: don't run until settings are fully loaded
-  if (!settingsLoaded) return;
-  if (!summariesAgentDropdown) return;
-  const currentValue = summariesAgentDropdown.getValue();
-  // Only auto-default if currently set to "auto" (i.e., user hasn't explicitly chosen)
-  if (currentValue === "auto" && !currentSettings.summariesAgent) {
-    const ampAvailable = agentAvailability?.amp?.available;
-    if (ampAvailable) {
-      console.log("[Harness] Auto-defaulting summaries agent to Amp (free)");
-      summariesAgentDropdown.setValue("amp");
-      saveSettingsFromUi();
-    }
   }
 }
 
@@ -2259,9 +2242,8 @@ async function getSettings() {
   // Initialize settings page toggle buttons
   initSettingsToggles();
 
-  // Mark settings as loaded and trigger auto-default for summaries agent
+  // Mark settings as loaded
   settingsLoaded = true;
-  autoDefaultSummariesAgentToAmp();
 }
 
 function copyToClipboard(text) {

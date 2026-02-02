@@ -101,6 +101,7 @@ pub async fn generate_run_metadata(
 
     let response = match agent_id {
         "codex" => generate_with_codex_backend(&full_prompt).await?,
+        "opencode" => generate_with_opencode_cli(&full_prompt).await?,
         "amp" => generate_with_amp_cli(&full_prompt).await?,
         "claude-code" => generate_with_claude_oauth(&full_prompt).await?,
         // Default to Claude for unknown agents (factory-droid, etc.)
@@ -167,68 +168,19 @@ async fn generate_with_claude_oauth(prompt: &str) -> Result<String, String> {
 
 /// Generate using Amp CLI (spawns amp with --stream-json --execute).
 async fn generate_with_amp_cli(prompt: &str) -> Result<String, String> {
-    use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio::process::Command;
-
-    let mut cmd = Command::new("amp");
-    cmd.args(["--stream-json", "--execute", prompt])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn amp: {}", e))?;
-
-    let stdout = child.stdout.take().ok_or("Failed to capture amp stdout")?;
-
-    let mut reader = BufReader::new(stdout).lines();
-    let mut result_text = String::new();
-
-    // Parse NDJSON output looking for assistant text or final result
-    while let Ok(Some(line)) = reader.next_line().await {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-            match event_type {
-                "assistant" => {
-                    // Extract text from message.content array
-                    if let Some(content) = json
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_array())
-                    {
-                        for block in content {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                    result_text.push_str(text);
-                                }
-                            }
-                        }
-                    }
-                }
-                "result" => {
-                    // Check for final result text
-                    if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
-                        if !result.is_empty() {
-                            result_text = result.to_string();
-                        }
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Kill the process if still running
-    let _ = child.kill().await;
-
+    let result_text = crate::amp_cli::execute(prompt).await?;
     if result_text.is_empty() {
         return Err("No text in Amp response".to_string());
     }
+    Ok(extract_json_from_text(&clean_response(&result_text)))
+}
 
+/// Generate using OpenCode CLI (opencode run --format json).
+async fn generate_with_opencode_cli(prompt: &str) -> Result<String, String> {
+    let result_text = crate::opencode_cli::execute(prompt).await?;
+    if result_text.is_empty() {
+        return Err("No text in OpenCode response".to_string());
+    }
     Ok(extract_json_from_text(&clean_response(&result_text)))
 }
 
@@ -281,16 +233,54 @@ async fn generate_with_codex_backend(prompt: &str) -> Result<String, String> {
     Ok(extract_json_from_text(&text))
 }
 
-/// Extract JSON object from potentially wrapped text response.
-/// Models sometimes wrap JSON in markdown code blocks or extra text.
+/// Extract the first complete JSON object from potentially wrapped text response.
+/// Models sometimes wrap JSON in markdown code blocks or extra text, or return
+/// multiple JSON objects (e.g., echoing examples from the prompt).
 fn extract_json_from_text(text: &str) -> String {
     let text = text.trim();
 
-    // Try to find JSON object in the text
-    if let Some(start) = text.find('{') {
-        if let Some(end) = text.rfind('}') {
-            return text[start..=end].to_string();
+    let mut last: Option<(usize, usize)> = None;
+    let mut start: Option<usize> = None;
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for (idx, ch) in text.char_indices() {
+        if escape_next {
+            escape_next = false;
+            continue;
         }
+
+        match ch {
+            '\\' if in_string => {
+                escape_next = true;
+            }
+            '"' => {
+                in_string = !in_string;
+            }
+            '{' if !in_string => {
+                if depth == 0 {
+                    start = Some(idx);
+                }
+                depth += 1;
+            }
+            '}' if !in_string => {
+                if depth > 0 {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(start_idx) = start {
+                            last = Some((start_idx, idx));
+                            start = None;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if let Some((start_idx, end_idx)) = last {
+        return text[start_idx..=end_idx].to_string();
     }
 
     text.to_string()
@@ -454,6 +444,16 @@ mod tests {
 ```"#
             ),
             r#"{"title":"Test","branchName":"feat/test"}"#
+        );
+
+        // Test multiple JSON objects - should return the last one
+        assert_eq!(
+            extract_json_from_text(
+                r#"{"title":"Fix Login Redirect Loop","branchName":"fix/login-redirect-loop"}
+{"title":"Add Workspace Home View","branchName":"feat/workspace-home"}
+{"title":"Update Dependencies","branchName":"chore/update-deps"}"#
+            ),
+            r#"{"title":"Update Dependencies","branchName":"chore/update-deps"}"#
         );
     }
 

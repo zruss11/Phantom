@@ -136,6 +136,12 @@ model_source = "config"
 # Models use provider/model format
 models = [
     "default",
+    "opencode/glm-4.7-free",
+    "opencode/kimi-k2.5-free",
+    "opencode/minimax-m2.1-free",
+    "opencode/trinity-large-preview-free",
+    "opencode/big-pickle",
+    "opencode/gpt-5-nano",
     "anthropic/claude-sonnet-4-20250514",
     "anthropic/claude-opus-4-5-20251101",
     "anthropic/claude-haiku-4-5-20251001",
@@ -145,9 +151,10 @@ models = [
     "google/gemini-3-pro",
     "google/gemini-3-flash"
 ]
+# Default to a free OpenCode model
+default_exec_model = "opencode/glm-4.7-free"
+default_plan_model = "opencode/glm-4.7-free"
 # OpenCode agents: build (default), plan (restricted), general (multipurpose), explore (read-only)
 # These are passed via --agent flag
 agents = ["build", "plan", "general", "explore"]
-default_plan_model = "default"
-default_exec_model = "default"
 default_agent = "build"

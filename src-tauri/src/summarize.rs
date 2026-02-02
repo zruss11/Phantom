@@ -36,8 +36,8 @@ pub async fn summarize_status_with_override(
 
 /// Generate a short title from a task prompt (async with timeout)
 pub async fn summarize_title(prompt: &str, agent_id: &str) -> String {
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), generate_title(prompt, agent_id)).await;
+    let timeout = summarize_timeout(agent_id);
+    let result = tokio::time::timeout(timeout, generate_title(prompt, agent_id)).await;
 
     match result {
         Ok(Ok(title)) => title,
@@ -54,8 +54,8 @@ pub async fn summarize_title(prompt: &str, agent_id: &str) -> String {
 
 /// Generate a status summary from agent response (async with timeout)
 pub async fn summarize_status(response: &str, agent_id: &str) -> String {
-    let result =
-        tokio::time::timeout(Duration::from_secs(5), generate_status(response, agent_id)).await;
+    let timeout = summarize_timeout(agent_id);
+    let result = tokio::time::timeout(timeout, generate_status(response, agent_id)).await;
 
     match result {
         Ok(Ok(status)) => status,
@@ -80,6 +80,7 @@ async fn generate_title(prompt: &str, agent_id: &str) -> Result<String, String> 
 
     match agent_id {
         "codex" => call_codex_api(&full_prompt).await,
+        "opencode" => call_opencode_cli(&full_prompt).await,
         "amp" => call_amp_cli(&full_prompt).await,
         // For claude-code and unknown agents, use Claude API
         _ => call_claude_api(&full_prompt).await,
@@ -102,8 +103,16 @@ async fn generate_status(response: &str, agent_id: &str) -> Result<String, Strin
     match agent_id {
         "claude-code" => call_claude_api(&full_prompt).await,
         "codex" => call_codex_api(&full_prompt).await,
+        "opencode" => call_opencode_cli(&full_prompt).await,
         "amp" => call_amp_cli(&full_prompt).await,
         _ => call_claude_api(&full_prompt).await,
+    }
+}
+
+fn summarize_timeout(agent_id: &str) -> Duration {
+    match agent_id {
+        "opencode" => Duration::from_secs(30),
+        _ => Duration::from_secs(5),
     }
 }
 
@@ -206,69 +215,22 @@ async fn call_codex_api(prompt: &str) -> Result<String, String> {
 /// Call Amp CLI for summarization using programmatic mode
 /// Spawns amp with --execute --stream-json and parses the NDJSON output
 async fn call_amp_cli(prompt: &str) -> Result<String, String> {
-    use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio::process::Command;
-
-    let mut cmd = Command::new("amp");
-    cmd.args(["--stream-json", "--execute", prompt])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn amp: {}", e))?;
-
-    let stdout = child.stdout.take().ok_or("Failed to capture amp stdout")?;
-
-    let mut reader = BufReader::new(stdout).lines();
-    let mut result_text = String::new();
-
-    // Parse NDJSON output looking for assistant text or final result
-    while let Ok(Some(line)) = reader.next_line().await {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-            let event_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-
-            match event_type {
-                "assistant" => {
-                    // Extract text from message.content array
-                    if let Some(content) = json
-                        .get("message")
-                        .and_then(|m| m.get("content"))
-                        .and_then(|c| c.as_array())
-                    {
-                        for block in content {
-                            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                                    result_text.push_str(text);
-                                }
-                            }
-                        }
-                    }
-                }
-                "result" => {
-                    // Check for final result text
-                    if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
-                        if !result.is_empty() {
-                            result_text = result.to_string();
-                        }
-                    }
-                    break;
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Kill the process if still running
-    let _ = child.kill().await;
-
-    if result_text.is_empty() {
+    let result_text = crate::amp_cli::execute(prompt).await?;
+    let cleaned = clean_response(&result_text);
+    if cleaned.is_empty() {
         return Err("No text in Amp response".to_string());
     }
+    Ok(cleaned)
+}
 
-    Ok(clean_response(&result_text))
+/// Call OpenCode CLI for summarization using programmatic mode.
+async fn call_opencode_cli(prompt: &str) -> Result<String, String> {
+    let result_text = crate::opencode_cli::execute(prompt).await?;
+    let cleaned = clean_response(&result_text);
+    if cleaned.is_empty() {
+        return Err("No text in OpenCode response".to_string());
+    }
+    Ok(cleaned)
 }
 
 /// Get Codex OAuth token and account ID from auth.json

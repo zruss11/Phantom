@@ -15,6 +15,76 @@ fn find_in_path(binary: &str) -> Option<PathBuf> {
     None
 }
 
+/// Default search paths for CLI tools.
+pub fn default_search_paths() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(env_paths) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&env_paths));
+    }
+    if let Some(home) = dirs::home_dir() {
+        paths.extend([
+            home.join(".amp/bin"),
+            home.join(".opencode/bin"),
+            home.join(".superset/bin"),
+            home.join(".factory/bin"),
+            home.join(".npm-global/bin"),
+            home.join(".local/bin"),
+            home.join(".cargo/bin"),
+            home.join("bin"),
+        ]);
+    }
+    if cfg!(target_os = "macos") {
+        paths.extend(
+            [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            ]
+            .iter()
+            .map(PathBuf::from),
+        );
+    } else if cfg!(target_os = "linux") {
+        paths.extend(
+            ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+                .iter()
+                .map(PathBuf::from),
+        );
+    }
+    paths
+}
+
+/// Resolve a command path from default search paths and PATH.
+pub fn resolve_command_path(command: &str) -> Option<PathBuf> {
+    let path = std::path::Path::new(command);
+    if path.is_absolute() || command.contains('/') || command.contains('\\') {
+        return path.is_file().then_some(path.to_path_buf());
+    }
+    if let Some(path) = find_in_path(command) {
+        return Some(path);
+    }
+    for dir in default_search_paths() {
+        let candidate = dir.join(command);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        #[cfg(windows)]
+        {
+            for ext in [".exe", ".cmd", ".bat"] {
+                if candidate
+                    .with_extension(ext.trim_start_matches('.'))
+                    .is_file()
+                {
+                    return Some(candidate.with_extension(ext.trim_start_matches('.')));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Build a PATH value that includes common git install locations.
 pub fn git_env_path() -> String {
     let mut paths: Vec<PathBuf> = Vec::new();

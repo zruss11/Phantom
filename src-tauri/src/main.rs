@@ -1,5 +1,7 @@
 mod claude_local_usage;
 mod claude_usage_watcher;
+mod amp_cli;
+mod opencode_cli;
 mod db;
 mod debug_http;
 mod discord_bot;
@@ -12,7 +14,7 @@ mod utils;
 mod webhook;
 mod worktree;
 
-use utils::{resolve_gh_binary, truncate_str};
+use utils::{resolve_command_path, resolve_gh_binary, truncate_str};
 
 use chrono::TimeZone;
 use phantom_harness_backend::cli::{
@@ -158,73 +160,75 @@ struct AgentAvailability {
     last_checked: i64,
 }
 
-fn default_search_paths() -> Vec<std::path::PathBuf> {
-    let mut paths: Vec<std::path::PathBuf> = Vec::new();
-    if let Some(env_paths) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&env_paths));
-    }
-    if let Some(home) = dirs::home_dir() {
-        paths.extend([
-            home.join(".amp/bin"),
-            home.join(".opencode/bin"),
-            home.join(".superset/bin"),
-            home.join(".factory/bin"),
-            home.join(".npm-global/bin"),
-            home.join(".local/bin"),
-            home.join(".cargo/bin"),
-            home.join("bin"),
-        ]);
-    }
-    if cfg!(target_os = "macos") {
-        paths.extend(
-            [
-                "/opt/homebrew/bin",
-                "/usr/local/bin",
-                "/usr/bin",
-                "/bin",
-                "/usr/sbin",
-                "/sbin",
-            ]
-            .iter()
-            .map(std::path::PathBuf::from),
-        );
-    } else if cfg!(target_os = "linux") {
-        paths.extend(
-            ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-                .iter()
-                .map(std::path::PathBuf::from),
-        );
-    }
-    paths
-}
-
-fn resolve_command_path(command: &str) -> Option<std::path::PathBuf> {
-    let path = Path::new(command);
-    if path.is_absolute() || command.contains('/') || command.contains('\\') {
-        return path.is_file().then_some(path.to_path_buf());
-    }
-    for dir in default_search_paths() {
-        let candidate = dir.join(command);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-        #[cfg(windows)]
-        {
-            for ext in [".exe", ".cmd", ".bat"] {
-                if candidate
-                    .with_extension(ext.trim_start_matches('.'))
-                    .is_file()
-                {
-                    return Some(candidate.with_extension(ext.trim_start_matches('.')));
-                }
-            }
-        }
-    }
-    None
-}
-
 fn command_exists(command: &str) -> bool {
     resolve_command_path(command).is_some()
+}
+
+async fn prewarm_opencode_models() {
+    let Some(path) = resolve_command_path("opencode") else {
+        return;
+    };
+    let mut cmd = TokioCommand::new(path);
+    cmd.args(["models"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("[Harness] OpenCode prewarm spawn failed: {}", e);
+            return;
+        }
+    };
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut stdout) = stdout {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut buf).await;
+        }
+        buf
+    });
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        if let Some(mut stderr) = stderr {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
+        }
+        buf
+    });
+
+    let result = timeout(Duration::from_secs(30), child.wait()).await;
+    match result {
+        Ok(Ok(status)) if status.success() => {
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            println!("[Harness] OpenCode prewarm complete");
+        }
+        Ok(Ok(_)) => {
+            let _ = stdout_task.await;
+            let stderr_buf = stderr_task.await.unwrap_or_default();
+            if !stderr_buf.is_empty() {
+                let msg = String::from_utf8_lossy(&stderr_buf);
+                eprintln!("[Harness] OpenCode prewarm failed: {}", msg.trim());
+            } else {
+                eprintln!("[Harness] OpenCode prewarm failed");
+            }
+        }
+        Ok(Err(e)) => {
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            eprintln!("[Harness] OpenCode prewarm failed: {}", e);
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            eprintln!("[Harness] OpenCode prewarm timed out");
+        }
+    }
 }
 
 fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvailability> {
@@ -440,7 +444,7 @@ struct Settings {
     #[serde(rename = "aiSummariesEnabled")]
     ai_summaries_enabled: Option<bool>,
     // Dedicated agent for summaries (overrides task agent for titles, status, branch names)
-    // Values: "auto" (use task agent), "amp", "codex", "claude-code"
+    // Values: "auto" (use task agent), "amp", "codex", "claude-code", "opencode"
     #[serde(rename = "summariesAgent")]
     summaries_agent: Option<String>,
     // Task creation settings (sticky between restarts)
@@ -1042,8 +1046,17 @@ fn auth_env_for(
             env.push(("CODEX_HOME".to_string(), home.to_string_lossy().to_string()));
         }
     }
-    if agent_id != "codex" {
+    if agent_id == "amp" {
+        if let Ok(value) = std::env::var("AMP_API_KEY") {
+            if !value.trim().is_empty() {
+                env.push(("AMP_API_KEY".to_string(), value));
+            }
+        }
+    }
+    if agent_id != "codex" && agent_id != "opencode" {
         env.retain(|(key, _)| key != "OPENAI_API_KEY");
+    }
+    if agent_id != "codex" {
         env.retain(|(key, _)| key != "CODEX_HOME");
     }
     if agent_id != "claude-code" {
@@ -1051,6 +1064,7 @@ fn auth_env_for(
     }
     env
 }
+
 
 fn resolve_codex_account_home(
     conn: &rusqlite::Connection,
@@ -3046,6 +3060,19 @@ pub(crate) async fn create_agent_session_internal(
                     .unwrap_or_else(|_| "main".to_string()),
             };
 
+            // Preflight: if repo has uncommitted changes and base branch differs,
+            // warn early instead of failing during patch application.
+            if worktree::has_uncommitted_changes(repo_root).await? {
+                if let Ok(current_branch) = worktree::current_branch(repo_root).await {
+                    if current_branch != base_branch {
+                        return Err(format!(
+                            "Uncommitted changes detected on branch '{}'. Base branch '{}' differs, so changes may not apply cleanly. Stash/commit changes, switch base branch to '{}', or disable worktrees.",
+                            current_branch, base_branch, current_branch
+                        ));
+                    }
+                }
+            }
+
             let base_ref = if worktree::branch_exists(repo_root, &base_branch).await? {
                 base_branch.clone()
             } else if worktree::remote_branch_exists(repo_root, "origin", &base_branch).await? {
@@ -3061,6 +3088,20 @@ pub(crate) async fn create_agent_session_internal(
                     .await?;
             if let Err(err) = worktree::apply_uncommitted_changes(sync_source, &created_path).await
             {
+                let conflict = err.contains("Applied with conflicts")
+                    || err.contains("Patch applied partially")
+                    || err.contains("Resolve conflicts");
+                if conflict {
+                    eprintln!(
+                        "[worktree] Apply uncommitted changes failed (conflicts): {}",
+                        err
+                    );
+                    let _ = worktree::remove_worktree(repo_root, &created_path).await;
+                    return Err(format!(
+                        "Uncommitted changes could not be applied to the new worktree. Resolve conflicts or disable worktree creation. Details: {}",
+                        err
+                    ));
+                }
                 eprintln!(
                     "[worktree] Apply uncommitted changes failed, falling back to full sync: {}",
                     err
@@ -3361,12 +3402,17 @@ pub(crate) async fn create_agent_session_internal(
 
         tauri::async_runtime::spawn(async move {
             // Generate proper branch name via LLM (using configured summaries agent)
+            let effective_agent = summaries_agent
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or(agent_clone.as_str());
+            let timeout_secs = if effective_agent == "opencode" { 30 } else { 5 };
             let metadata = namegen::generate_run_metadata_with_timeout_and_override(
                 &prompt_clone,
                 &agent_clone,
                 summaries_agent.as_deref(),
                 api_key.as_deref(),
-                5,
+                timeout_secs,
             )
             .await;
 
@@ -5030,7 +5076,7 @@ async fn save_settings(
 
     // Validate and normalize summaries_agent setting
     // "auto" means use the task agent, which is represented as None internally
-    const VALID_SUMMARIES_AGENTS: &[&str] = &["amp", "codex", "claude-code"];
+    const VALID_SUMMARIES_AGENTS: &[&str] = &["amp", "codex", "claude-code", "opencode"];
     if let Some(ref agent) = next.summaries_agent {
         let normalized = agent.trim().to_lowercase();
         if normalized == "auto" || normalized.is_empty() {
@@ -10277,6 +10323,10 @@ fn main() {
                     }
                 }
             }
+
+            tauri::async_runtime::spawn(async move {
+                prewarm_opencode_models().await;
+            });
 
             Ok(())
         })
