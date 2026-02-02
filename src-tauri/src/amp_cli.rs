@@ -28,8 +28,7 @@ pub async fn execute(prompt: &str) -> Result<String, String> {
     });
 
     let mut reader = BufReader::new(stdout).lines();
-    let mut assistant_text = String::new();
-    let mut result_fallback: Option<String> = None;
+    let mut result_text = String::new();
     let mut last_error: Option<String> = None;
 
     while let Ok(Some(line)) = reader.next_line().await {
@@ -46,28 +45,16 @@ pub async fn execute(prompt: &str) -> Result<String, String> {
             last_error = Some(error);
         }
 
-        if let Some(text) = extract_assistant_text_from_event(&json) {
+        if let Some(text) = extract_text_from_event(&json) {
             if !text.is_empty() {
-                assistant_text.push_str(&text);
+                result_text.push_str(&text);
             }
         }
 
         if json.get("type").and_then(|t| t.as_str()) == Some("result") {
-            let is_error = json
-                .get("subtype")
-                .and_then(|s| s.as_str())
-                .map(|s| s.starts_with("error"))
-                .unwrap_or(false)
-                || json
-                    .get("is_error")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-            if !is_error {
-                if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
-                    if !result.is_empty() {
-                        result_fallback = Some(result.to_string());
-                    }
+            if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
+                if !result.is_empty() {
+                    result_text = result.to_string();
                 }
             }
             break;
@@ -77,14 +64,6 @@ pub async fn execute(prompt: &str) -> Result<String, String> {
     let _ = child.kill().await;
 
     let stderr_output = stderr_task.await.unwrap_or_default();
-
-    let result_text = if !assistant_text.trim().is_empty() {
-        assistant_text
-    } else if let Some(result) = result_fallback {
-        result
-    } else {
-        String::new()
-    };
 
     if result_text.is_empty() {
         if let Some(error) = last_error {
@@ -100,19 +79,7 @@ pub async fn execute(prompt: &str) -> Result<String, String> {
     Ok(result_text)
 }
 
-fn extract_assistant_text_from_event(json: &Value) -> Option<String> {
-    let event_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let role = json
-        .get("message")
-        .and_then(|m| m.get("role"))
-        .and_then(|r| r.as_str());
-
-    let is_assistant =
-        event_type == "assistant" || event_type == "assistant_message" || role == Some("assistant");
-    if !is_assistant {
-        return None;
-    }
-
+fn extract_text_from_event(json: &Value) -> Option<String> {
     if let Some(message) = json.get("message") {
         if let Some(content) = message.get("content") {
             if let Some(text) = extract_text_from_content(content) {
@@ -124,6 +91,12 @@ fn extract_assistant_text_from_event(json: &Value) -> Option<String> {
     if let Some(content) = json.get("content") {
         if let Some(text) = extract_text_from_content(content) {
             return Some(text);
+        }
+    }
+
+    if let Some(result) = json.get("result") {
+        if let Some(text) = result.as_str() {
+            return Some(text.to_string());
         }
     }
 
@@ -205,40 +178,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extracts_text_from_assistant_message() {
+    fn extracts_text_from_assistant_message() {
         let json = serde_json::json!({
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": "Hello"}]}
         });
-        assert_eq!(
-            extract_assistant_text_from_event(&json),
-            Some("Hello".to_string())
-        );
+        assert_eq!(extract_text_from_event(&json), Some("Hello".to_string()));
     }
 
     #[test]
-    fn test_extracts_text_from_top_level_content() {
+    fn extracts_text_from_top_level_content() {
         let json = serde_json::json!({
             "type": "assistant_message",
             "content": "Summary text"
         });
-        assert_eq!(
-            extract_assistant_text_from_event(&json),
-            Some("Summary text".to_string())
-        );
+        assert_eq!(extract_text_from_event(&json), Some("Summary text".to_string()));
     }
 
     #[test]
-    fn test_ignores_user_message_text() {
+    fn extracts_text_from_result() {
         let json = serde_json::json!({
-            "type": "user",
-            "message": {"content": [{"type": "text", "text": "Prompt text"}]}
+            "type": "result",
+            "result": "Done"
         });
-        assert_eq!(extract_assistant_text_from_event(&json), None);
+        assert_eq!(extract_text_from_event(&json), Some("Done".to_string()));
     }
 
     #[test]
-    fn test_extracts_error_from_result_error() {
+    fn extracts_error_from_result_error() {
         let json = serde_json::json!({
             "type": "result",
             "subtype": "error_during_execution",
