@@ -229,6 +229,30 @@ fn command_exists(command: &str) -> bool {
     resolve_command_path(command).is_some()
 }
 
+async fn prewarm_opencode_models() {
+    let Some(path) = resolve_command_path("opencode") else {
+        return;
+    };
+    let mut cmd = TokioCommand::new(path);
+    cmd.args(["models"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let run = async {
+        let output = cmd.output().await.map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("[Harness] OpenCode prewarm failed: {}", stderr.trim());
+        } else {
+            println!("[Harness] OpenCode prewarm complete");
+        }
+        Ok::<(), String>(())
+    };
+
+    let _ = timeout(Duration::from_secs(30), run).await;
+}
+
 fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvailability> {
     let now = chrono::Utc::now().timestamp();
     let mut map = HashMap::new();
@@ -10316,6 +10340,10 @@ fn main() {
                     }
                 }
             }
+
+            tauri::async_runtime::spawn(async move {
+                prewarm_opencode_models().await;
+            });
 
             Ok(())
         })
