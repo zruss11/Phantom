@@ -4743,15 +4743,6 @@ input:checked + .slider:before {
   overflow: hidden;
 }
 
-.review-page .review-header-card::before {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: linear-gradient(90deg, var(--review-magenta), #d06d7e);
-}
 
 .review-page .review-header-card > .card-body {
   padding: 20px 24px;
