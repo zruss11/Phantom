@@ -3519,6 +3519,46 @@ init();
     }
   };
 
+  // Create task from Command Center - navigates to create page and pre-fills form
+  window.createTaskFromCommandCenter = function (agentId, prompt) {
+    console.log('[Application] Creating task from Command Center:', { agentId, prompt });
+
+    // Navigate to create tasks page
+    if (typeof switchToPage === 'function') {
+      switchToPage('createTasksPage');
+    } else {
+      const navEl = document.querySelector('[data-page="createTasksPage"]');
+      if (navEl) navEl.click();
+    }
+
+    // Wait for navigation to complete, then set agent and prompt
+    requestAnimationFrame(() => {
+      // Select the agent if provided
+      if (agentId && window.selectAgentById) {
+        window.selectAgentById(agentId);
+      }
+
+      // Set the prompt text if provided
+      if (prompt) {
+        const promptEl = document.getElementById('initialPrompt');
+        if (promptEl) {
+          // Set the text content (this is a contenteditable div)
+          promptEl.innerText = prompt;
+          // Update placeholder state
+          if (window.updatePromptPlaceholder) {
+            window.updatePromptPlaceholder();
+          }
+          // Focus the prompt
+          promptEl.focus();
+        }
+      }
+    });
+  };
+
+  // Expose Application namespace for external modules
+  window.Application = window.Application || {};
+  window.Application.createTaskFromCommandCenter = window.createTaskFromCommandCenter;
+
   // Expose updateWorktreeLock for external use
   window.updateWorktreeLock = updateWorktreeLock;
 
