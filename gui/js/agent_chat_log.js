@@ -2727,7 +2727,9 @@
     const logo = AGENT_LOGOS[agent] || AGENT_LOGOS["codex"];
     const name = AGENT_NAMES[agent] || "Agent";
 
-    $("#agentLogo").html(logo);
+    const logoContainer = $("#agentLogo");
+    logoContainer.html(logo);
+    logoContainer.attr("data-agent", agent);
     // Use AI-generated title summary if available, otherwise default header
     if (taskInfo.title_summary) {
       $("#agentName").text(taskInfo.title_summary);
