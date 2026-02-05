@@ -2027,8 +2027,10 @@
       case "text_chunk":
         // Flush any accumulated reasoning to the bundle before assistant response
         flushAccumulatedReasoning();
-        // Finalize any pending tool bundle before assistant response
-        finalizeToolBundle();
+        // Only finalize if no tool bundle is active; Claude can interleave text/tools
+        if (!toolCallBundle.element || toolCallBundle.calls.length === 0) {
+          finalizeToolBundle();
+        }
         appendToStreamingMessage("assistant", content, update.item_id);
         updateStatus("Responding...", "running");
         break;
