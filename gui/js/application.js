@@ -4146,6 +4146,92 @@ init();
     });
   }
 
+  // Microphone button for voice transcription (Create Tasks page)
+  const promptMicBtn = document.getElementById("promptMicBtn");
+  if (promptMicBtn && window.tauriBridge?.transcription) {
+    let recorder = null;
+
+    // Check if transcription is available and update button state
+    window.tauriBridge.transcription.isAvailable().then((available) => {
+      if (!available) {
+        promptMicBtn.disabled = true;
+        promptMicBtn.title = "Voice input unavailable - login to Codex first";
+        promptMicBtn.style.opacity = "0.4";
+      }
+    });
+
+    promptMicBtn.addEventListener("click", async () => {
+      const promptEl = document.getElementById("initialPrompt");
+      if (!promptEl) return;
+
+      // If already recording, stop
+      if (recorder && recorder.isRecording()) {
+        promptMicBtn.classList.remove("recording");
+        promptMicBtn.classList.add("transcribing");
+        promptMicBtn.querySelector("i").className = "fas fa-spinner";
+
+        try {
+          await recorder.stop();
+        } catch (err) {
+          console.error("[Mic] Transcription error:", err);
+          sendNotification("Transcription failed: " + (err.message || err), "red");
+        } finally {
+          promptMicBtn.classList.remove("transcribing");
+          promptMicBtn.querySelector("i").className = "fas fa-microphone";
+          recorder = null;
+        }
+        return;
+      }
+
+      // Start recording
+      recorder = window.tauriBridge.transcription.createRecorder({
+        language: "en",
+        onRecording: () => {
+          promptMicBtn.classList.add("recording");
+          promptMicBtn.querySelector("i").className = "fas fa-stop";
+        },
+        onTranscript: (text) => {
+          // Append transcribed text to prompt
+          const trimmedText = text.trim();
+          if (trimmedText) {
+            const currentText = promptEl.textContent || "";
+            const separator = currentText.trim() ? " " : "";
+            promptEl.textContent = currentText + separator + trimmedText;
+            // Focus and place cursor at end
+            promptEl.focus();
+            const range = document.createRange();
+            range.selectNodeContents(promptEl);
+            range.collapse(false);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            // Trigger input event for placeholder
+            promptEl.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        },
+        onError: (err) => {
+          console.error("[Mic] Recording error:", err);
+          sendNotification("Recording failed: " + (err.message || err), "red");
+          promptMicBtn.classList.remove("recording", "transcribing");
+          promptMicBtn.querySelector("i").className = "fas fa-microphone";
+          recorder = null;
+        }
+      });
+
+      try {
+        await recorder.start();
+      } catch (err) {
+        console.error("[Mic] Failed to start recording:", err);
+        if (err.name === "NotAllowedError") {
+          sendNotification("Microphone access denied. Please allow microphone access.", "red");
+        } else {
+          sendNotification("Could not start recording: " + (err.message || err), "red");
+        }
+        recorder = null;
+      }
+    });
+  }
+
   // Paste handler for images - contenteditable version
   const promptEl = document.getElementById("initialPrompt");
   if (promptEl) {

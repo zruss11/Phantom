@@ -10,6 +10,7 @@ mod mcp_server;
 mod namegen;
 mod opencode_cli;
 mod summarize;
+mod transcription;
 mod utils;
 mod webhook;
 mod worktree;
@@ -11189,6 +11190,66 @@ async fn get_attachment_base64(relative_path: String) -> Result<String, String> 
     Ok(STANDARD.encode(&data))
 }
 
+// ============================================================================
+// Transcription Commands (ChatGPT backend API)
+// ============================================================================
+
+/// Check if transcription is available (Codex auth exists)
+#[tauri::command]
+fn check_transcription_available() -> bool {
+    transcription::is_transcription_available()
+}
+
+/// Transcribe an audio file using ChatGPT's transcription API
+///
+/// # Arguments
+/// * `audio_path` - Path to the audio file
+/// * `language` - Optional language hint (e.g., "en", "es")
+#[tauri::command]
+async fn transcribe_audio_file(
+    audio_path: String,
+    language: Option<String>,
+) -> Result<String, String> {
+    transcription::transcribe_audio(&audio_path, language.as_deref()).await
+}
+
+/// Transcribe raw audio bytes using ChatGPT's transcription API
+/// Accepts base64-encoded audio data from the frontend
+///
+/// # Arguments
+/// * `audio_base64` - Base64-encoded audio data
+/// * `filename` - Filename (used for content-type detection)
+/// * `content_type` - MIME type of the audio (e.g., "audio/webm")
+/// * `language` - Optional language hint
+#[tauri::command]
+async fn transcribe_audio_bytes(
+    audio_base64: String,
+    filename: String,
+    content_type: String,
+    language: Option<String>,
+) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    // Decode base64
+    let audio_data = STANDARD
+        .decode(&audio_base64)
+        .map_err(|e| format!("Invalid base64 audio data: {}", e))?;
+
+    // Get auth
+    let (token, account_id) = transcription::get_codex_auth()?;
+    let account_id = account_id.ok_or("Codex account_id required for transcription")?;
+
+    transcription::transcribe_bytes(
+        &audio_data,
+        &filename,
+        &content_type,
+        language.as_deref(),
+        &token,
+        &account_id,
+    )
+    .await
+}
+
 // =============================================================================
 // AUTO-UPDATE COMMANDS
 // =============================================================================
@@ -11553,6 +11614,10 @@ fn main() {
             get_pending_attachments,
             delete_attachment,
             get_attachment_base64,
+            // Transcription commands
+            check_transcription_available,
+            transcribe_audio_file,
+            transcribe_audio_bytes,
             // Code review commands
             gather_code_review_context,
             // Auto-update commands
