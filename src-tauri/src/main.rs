@@ -540,6 +540,38 @@ struct Settings {
     pub(crate) mcp_port: Option<u16>,
     #[serde(rename = "mcpToken")]
     pub(crate) mcp_token: Option<String>,
+
+    // Command Center settings
+    #[serde(rename = "commandCenterEnabled")]
+    command_center_enabled: Option<bool>,
+    #[serde(rename = "commandCenterRefreshInterval")]
+    command_center_refresh_interval: Option<u32>, // minutes, default 15
+
+    // GitHub Integration
+    #[serde(rename = "githubAuthMethod")]
+    github_auth_method: Option<String>, // "gh-cli", "token"
+    #[serde(rename = "githubToken")]
+    github_token: Option<String>,
+    #[serde(rename = "githubWatchedRepos")]
+    github_watched_repos: Option<Vec<String>>, // ["owner/repo", ...]
+
+    // Linear Integration
+    #[serde(rename = "linearAuthMethod")]
+    linear_auth_method: Option<String>, // "oauth", "token"
+    #[serde(rename = "linearToken")]
+    linear_token: Option<String>,
+    #[serde(rename = "linearWatchedProjects")]
+    linear_watched_projects: Option<Vec<String>>,
+    #[serde(rename = "linearWatchedCycles")]
+    linear_watched_cycles: Option<Vec<String>>,
+
+    // Sentry Integration
+    #[serde(rename = "sentryToken")]
+    sentry_token: Option<String>,
+    #[serde(rename = "sentryOrganization")]
+    sentry_organization: Option<String>,
+    #[serde(rename = "sentryWatchedProjects")]
+    sentry_watched_projects: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
