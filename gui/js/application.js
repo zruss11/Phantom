@@ -1464,7 +1464,9 @@ function getSizes(s, e, sizeArray) {
 let tasksOnPage = [];
 let taskDataMap = {}; // Store full task data for sorting
 let startingTasks = {}; // Guard against rapid Start clicks per task
-let pendingDeleteTaskId = null; // Task ID awaiting deletion confirmation
+let activeDeleteConfirm = null;
+let deleteConfirmTimer = null;
+const DELETE_CONFIRM_TIMEOUT_MS = 4500;
 let displayIdCounter = 1; // Sequential display IDs
 let currentSortState = { column: null, direction: "asc" };
 let pendingStatusUpdates = {}; // Queue status updates for tasks not yet in DOM
@@ -1802,22 +1804,8 @@ function StopTask(id) {
   // UI update will be handled by StatusUpdate event from backend
 }
 
-async function DeleteTask(id) {
-  try {
-    const result = await ipcRenderer.invoke('checkTaskUncommittedChanges', id);
-
-    if (result && result.hasChanges) {
-      pendingDeleteTaskId = id;
-      const pathEl = document.getElementById('deleteTaskWorktreePath');
-      if (pathEl) pathEl.textContent = result.worktreePath || '';
-      $('#deleteTaskWarningModal').modal('show');
-    } else {
-      performTaskDeletion(id);
-    }
-  } catch (err) {
-    console.error('[Harness] Error checking uncommitted changes:', err);
-    performTaskDeletion(id); // Fail-open: allow deletion if check fails
-  }
+function DeleteTask(id) {
+  performTaskDeletion(id);
 }
 
 function performTaskDeletion(id) {
@@ -1829,6 +1817,54 @@ function performTaskDeletion(id) {
   }
   // Clean up task data map
   delete taskDataMap[id];
+}
+
+function resetDeleteConfirm() {
+  if (!activeDeleteConfirm) return;
+  const original = activeDeleteConfirm.dataset.originalHtml || '<i class="far fa-trash-alt"></i>';
+  activeDeleteConfirm.innerHTML = original;
+  activeDeleteConfirm.classList.remove("confirm-delete", "confirm-delete-warning");
+  activeDeleteConfirm.classList.add("red-text");
+  activeDeleteConfirm.removeAttribute("title");
+  delete activeDeleteConfirm.dataset.confirming;
+  activeDeleteConfirm = null;
+  if (deleteConfirmTimer) {
+    clearTimeout(deleteConfirmTimer);
+    deleteConfirmTimer = null;
+  }
+}
+
+function setDeleteConfirm(element, taskId) {
+  if (activeDeleteConfirm && activeDeleteConfirm !== element) {
+    resetDeleteConfirm();
+  }
+  if (!element.dataset.originalHtml) {
+    element.dataset.originalHtml = element.innerHTML;
+  }
+  element.dataset.confirming = "true";
+  element.classList.add("confirm-delete");
+  element.classList.remove("red-text");
+  element.textContent = "Confirm";
+  element.title = "Click again to delete";
+  activeDeleteConfirm = element;
+  if (deleteConfirmTimer) {
+    clearTimeout(deleteConfirmTimer);
+  }
+  deleteConfirmTimer = setTimeout(() => {
+    resetDeleteConfirm();
+  }, DELETE_CONFIRM_TIMEOUT_MS);
+
+  if (!ipcRenderer) return;
+  ipcRenderer.invoke("checkTaskUncommittedChanges", taskId)
+    .then((result) => {
+      if (!result || !result.hasChanges || element.dataset.confirming !== "true") return;
+      element.classList.add("confirm-delete-warning");
+      const worktreePath = result.worktreePath || "worktree";
+      element.title = `Uncommitted changes in ${worktreePath}. Click to delete.`;
+    })
+    .catch((err) => {
+      console.error("[Harness] Error checking uncommitted changes:", err);
+    });
 }
 
 function ViewTaskLog(id) {
@@ -1849,17 +1885,19 @@ $("#tasks-table").on("click", "a.play, a.stop, a.view-log, a.delete", function (
   } else if (action === "view-log") {
     ViewTaskLog(taskId);
   } else if (action === "delete") {
-    DeleteTask(taskId);
+    event.stopPropagation();
+    if (this.dataset.confirming === "true") {
+      resetDeleteConfirm();
+      DeleteTask(taskId);
+    } else {
+      setDeleteConfirm(this, taskId);
+    }
   }
 });
 
-// Delete task confirmation modal handler
-$('#confirmDeleteTask').on('click', function() {
-  $('#deleteTaskWarningModal').modal('hide');
-  if (pendingDeleteTaskId) {
-    performTaskDeletion(pendingDeleteTaskId);
-    pendingDeleteTaskId = null;
-  }
+document.addEventListener("click", (event) => {
+  if (activeDeleteConfirm && activeDeleteConfirm.contains(event.target)) return;
+  resetDeleteConfirm();
 });
 
 // Table sorting functionality

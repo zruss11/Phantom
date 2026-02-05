@@ -2238,7 +2238,37 @@ input:checked + .slider:before {
 }
 
 .view-tasks-page .actions-cell {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
   white-space: nowrap;
+}
+
+.view-tasks-page .actions-cell .confirm-delete {
+  align-items: center;
+  background: rgba(255, 67, 67, 0.18);
+  border: 1px solid rgba(255, 67, 67, 0.35);
+  border-radius: 6px;
+  color: #ff9a9a;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  margin-left: -6px;
+  margin-right: -8px;
+  padding: 2px 6px;
+  text-transform: uppercase;
+}
+
+.view-tasks-page .actions-cell .confirm-delete:hover {
+  background: rgba(255, 67, 67, 0.28);
+  color: #fff;
+}
+
+.view-tasks-page .actions-cell .confirm-delete-warning {
+  background: rgba(255, 67, 67, 0.35);
+  border-color: rgba(255, 67, 67, 0.55);
+  color: #fff;
 }
 
 .view-tasks-page .actions-cell .view-log {

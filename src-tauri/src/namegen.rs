@@ -21,17 +21,6 @@ fn resolve_summaries_agent<'a>(task_agent: &'a str, configured: Option<&'a str>)
     }
 }
 
-/// Generate run metadata using the configured summaries agent (or fallback to task agent)
-pub async fn generate_run_metadata_with_override(
-    prompt: &str,
-    task_agent_id: &str,
-    summaries_agent: Option<&str>,
-    api_key: Option<&str>,
-) -> Result<RunMetadata, String> {
-    let agent_id = resolve_summaries_agent(task_agent_id, summaries_agent);
-    generate_run_metadata(prompt, agent_id, api_key).await
-}
-
 /// Generate run metadata with timeout, using the configured summaries agent
 pub async fn generate_run_metadata_with_timeout_and_override(
     prompt: &str,

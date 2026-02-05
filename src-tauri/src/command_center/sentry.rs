@@ -141,7 +141,10 @@ pub async fn fetch_errors(
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            eprintln!("[Sentry] API error response for project {}: {}", project_slug, body);
+            eprintln!(
+                "[Sentry] API error response for project {} ({}): {}",
+                project_slug, status, body
+            );
             // Continue to next project instead of failing entirely
             continue;
         }

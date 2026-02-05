@@ -4,6 +4,10 @@
 
 Phantom Harness is a Tauri-based desktop application serving as a unified orchestrator for AI code agents. It provides a desktop UI to interact with multiple agents (Claude Code, Codex, Factory Droid) using their native protocols.
 
+## API Integration
+
+When integrating with external APIs (Sentry, Stripe, etc.), ALWAYS read the official documentation first before attempting implementation. Never guess at API formats or parameters.
+
 ## Tech Stack
 
 - **Backend**: Rust (Edition 2021) with Tauri v2, tokio, rusqlite, serde
@@ -108,6 +112,16 @@ Models are configured per-agent in `backend/config/agents.toml`:
 - Claude Code runs with `--permission-mode bypassPermissions` (non-interactive)
 - OAuth flows have 5-minute timeout
 - Frontend updates are event-driven via Tauri emit
+
+## Debugging
+
+For debugging tasks, start by reading error messages and logs carefully, then trace the issue systematically rather than making speculative fixes.
+
+## Language-Specific Guidelines
+
+### Rust
+
+When working with Rust code, prefer idiomatic error handling with Result types and use `cargo clippy` before committing changes.
 
 ## Philosophy
 
