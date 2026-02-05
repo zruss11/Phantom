@@ -256,7 +256,7 @@
     return tauriInvoke('check_gh_cli_auth')
       .then(function(result) {
         console.log('[CommandCenterConfig] gh CLI auth status:', result);
-        state.ghCliAvailable = result && result.authenticated;
+        state.ghCliAvailable = result && result.available;
 
         if (statusEl) {
           if (state.ghCliAvailable) {
@@ -292,6 +292,50 @@
   }
 
   /**
+   * Browse for a local git repository
+   */
+  function browseForRepo() {
+    if (typeof window.openFileBrowser !== 'function') {
+      notify('File browser not available', 'red');
+      return;
+    }
+
+    // Fix z-index for nested modal - file browser needs to appear above config modal
+    var fileBrowserModal = $('#fileBrowserModal');
+
+    // One-time handler for when the modal is shown
+    fileBrowserModal.one('shown.bs.modal', function() {
+      // Ensure file browser modal is above config modal
+      fileBrowserModal.css('z-index', 1060);
+
+      // Fix the backdrop - get the last one (belongs to file browser)
+      var backdrops = $('.modal-backdrop');
+      if (backdrops.length > 1) {
+        backdrops.last().css('z-index', 1055);
+      }
+    });
+
+    window.openFileBrowser(function(selectedPath) {
+      if (!selectedPath) return;
+
+      // Get GitHub repo info from the selected path
+      tauriInvoke('get_github_repo_from_path', { path: selectedPath })
+        .then(function(repoInfo) {
+          console.log('[CommandCenterConfig] Got repo info:', repoInfo);
+          var input = document.getElementById('ccGithubRepoInput');
+          if (input) {
+            input.value = repoInfo.full_name;
+          }
+          notify('Found GitHub repo: ' + repoInfo.full_name, 'green');
+        })
+        .catch(function(err) {
+          console.error('[CommandCenterConfig] Failed to get repo info:', err);
+          notify(err, 'red');
+        });
+    });
+  }
+
+  /**
    * Add a GitHub repo to watch list
    */
   function addGithubRepo() {
@@ -300,7 +344,7 @@
 
     var repo = input.value.trim();
     if (!repo) {
-      notify('Please enter a repository (owner/repo)', 'red');
+      notify('Please browse for a repository or enter owner/repo', 'red');
       return;
     }
 
@@ -377,6 +421,7 @@
       notify('Please enter a Linear API key first', 'red');
       return;
     }
+    notify('Loading Linear teams...', 'blue');
 
     var btn = document.getElementById('ccLoadLinearProjectsBtn');
     var container = document.getElementById('ccLinearProjectsList');
@@ -388,15 +433,16 @@
 
     tauriInvoke('cc_fetch_linear_projects', { token: token })
       .then(function(projects) {
-        console.log('[CommandCenterConfig] Linear projects loaded:', projects);
+        console.log('[CommandCenterConfig] Linear teams loaded:', projects);
         state.linearProjects = projects || [];
         renderLinearProjects();
+        notify('Loaded ' + projects.length + ' Linear team(s)', 'green');
       })
       .catch(function(err) {
-        console.error('[CommandCenterConfig] Failed to load Linear projects:', err);
-        notify('Failed to load Linear projects: ' + err, 'red');
+        console.error('[CommandCenterConfig] Failed to load Linear teams:', err);
+        notify('Failed to load Linear teams: ' + err, 'red');
         if (container) {
-          container.innerHTML = '<div class="cc-empty-list text-danger">Failed to load projects</div>';
+          container.innerHTML = '<div class="cc-empty-list text-danger">Failed to load teams</div>';
         }
       })
       .finally(function() {
@@ -415,7 +461,7 @@
     if (!container) return;
 
     if (state.linearProjects.length === 0) {
-      container.innerHTML = '<div class="cc-empty-list">No projects found</div>';
+      container.innerHTML = '<div class="cc-empty-list">No teams found</div>';
       return;
     }
 
@@ -583,6 +629,12 @@
       });
     });
 
+    // Browse for GitHub repo
+    var browseRepoBtn = document.getElementById('ccBrowseRepoBtn');
+    if (browseRepoBtn) {
+      browseRepoBtn.addEventListener('click', browseForRepo);
+    }
+
     // Add GitHub repo
     var addRepoBtn = document.getElementById('ccAddGithubRepoBtn');
     if (addRepoBtn) {
@@ -660,6 +712,7 @@
     loadLinearProjects: loadLinearProjects,
     loadSentryOrgs: loadSentryOrgs,
     loadSentryProjects: loadSentryProjects,
+    browseForRepo: browseForRepo,
     addGithubRepo: addGithubRepo,
     removeGithubRepo: removeGithubRepo
   };

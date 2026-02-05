@@ -55,32 +55,34 @@ async fn graphql_query<T: for<'de> Deserialize<'de>>(
     gql_response.data.ok_or_else(|| "No data in Linear response".to_string())
 }
 
-/// Fetch all projects the user has access to
+/// Fetch all teams the user has access to
+/// Note: We fetch Teams (not Projects) because Teams are Linear's primary organizational unit.
+/// Projects in Linear are optional higher-level groupings that many users don't use.
 pub async fn fetch_projects(client: &Client, token: &str) -> Result<Vec<LinearProject>, String> {
     #[derive(Deserialize)]
     struct Response {
-        projects: ProjectsResponse,
+        teams: TeamsResponse,
     }
 
     #[derive(Deserialize)]
-    struct ProjectsResponse {
-        nodes: Vec<ProjectNode>,
+    struct TeamsResponse {
+        nodes: Vec<TeamNode>,
     }
 
     #[derive(Deserialize)]
-    struct ProjectNode {
+    struct TeamNode {
         id: String,
         name: String,
-        state: String,
+        key: String,
     }
 
     let query = r#"
         query {
-            projects(first: 50) {
+            teams(first: 50) {
                 nodes {
                     id
                     name
-                    state
+                    key
                 }
             }
         }
@@ -89,13 +91,13 @@ pub async fn fetch_projects(client: &Client, token: &str) -> Result<Vec<LinearPr
     let response: Response = graphql_query(client, token, query, None).await?;
 
     Ok(response
-        .projects
+        .teams
         .nodes
         .into_iter()
-        .map(|p| LinearProject {
-            id: p.id,
-            name: p.name,
-            state: p.state,
+        .map(|t| LinearProject {
+            id: t.id,
+            name: format!("{} ({})", t.name, t.key),
+            state: "active".to_string(), // Teams don't have state like projects
         })
         .collect())
 }
@@ -184,7 +186,7 @@ pub async fn fetch_issues(
         #[serde(rename = "updatedAt")]
         updated_at: String,
         url: String,
-        project: Option<ProjectRef>,
+        team: TeamRef,
         cycle: Option<CycleRef>,
     }
 
@@ -213,7 +215,7 @@ pub async fn fetch_issues(
     }
 
     #[derive(Deserialize)]
-    struct ProjectRef {
+    struct TeamRef {
         name: String,
     }
 
@@ -222,12 +224,13 @@ pub async fn fetch_issues(
         name: Option<String>,
     }
 
-    // Build filter based on project/cycle IDs
+    // Build filter based on team/cycle IDs
+    // Note: project_ids actually contains team IDs (we renamed the concept but kept the variable name)
     let mut filters = vec!["state: { type: { nin: [\"completed\", \"canceled\"] } }".to_string()];
 
     if !project_ids.is_empty() {
         let ids: Vec<_> = project_ids.iter().map(|id| format!("\"{}\"", id)).collect();
-        filters.push(format!("project: {{ id: {{ in: [{}] }} }}", ids.join(", ")));
+        filters.push(format!("team: {{ id: {{ in: [{}] }} }}", ids.join(", ")));
     }
 
     if !cycle_ids.is_empty() {
@@ -266,7 +269,7 @@ pub async fn fetch_issues(
                     createdAt
                     updatedAt
                     url
-                    project {{
+                    team {{
                         name
                     }}
                     cycle {{
@@ -298,7 +301,7 @@ pub async fn fetch_issues(
             created_at: i.created_at,
             updated_at: i.updated_at,
             url: i.url,
-            project: i.project.map(|p| p.name),
+            project: Some(i.team.name), // Using 'project' field to store team name for backwards compat
             cycle: i.cycle.and_then(|c| c.name),
         })
         .collect())

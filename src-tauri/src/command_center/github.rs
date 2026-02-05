@@ -1,7 +1,8 @@
 use super::types::*;
 use std::process::Command;
+use std::path::Path;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Check if gh CLI is authenticated and get username
 pub fn check_gh_cli_auth() -> GhCliAuthStatus {
@@ -301,4 +302,84 @@ pub async fn rerun_workflow_gh_cli(repo: &str, run_id: u64) -> Result<(), String
     }
 
     Ok(())
+}
+
+/// Result of extracting GitHub repo info from a folder
+#[derive(Serialize, Clone)]
+pub struct GitRepoInfo {
+    pub owner: String,
+    pub repo: String,
+    pub full_name: String,
+    pub path: String,
+}
+
+/// Parse a GitHub remote URL to extract owner and repo
+fn parse_github_remote(remote_url: &str) -> Option<(String, String)> {
+    let trimmed = remote_url.trim().trim_end_matches(".git");
+
+    let rest = if let Some(rest) = trimmed.strip_prefix("git@github.com:") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("https://github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("ssh://git@github.com/") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("git://github.com/") {
+        rest
+    } else {
+        return None;
+    };
+
+    let mut parts = rest.split('/');
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+
+    Some((owner.to_string(), repo.to_string()))
+}
+
+/// Get GitHub repo info from a local folder path
+pub fn get_github_repo_from_path(folder_path: &str) -> Result<GitRepoInfo, String> {
+    let path = Path::new(folder_path);
+
+    if !path.exists() {
+        return Err("Path does not exist".to_string());
+    }
+
+    if !path.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
+
+    // Check if it's a git repository
+    let git_dir = path.join(".git");
+    if !git_dir.exists() {
+        return Err("Not a git repository (no .git directory)".to_string());
+    }
+
+    // Get the remote origin URL
+    let output = Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(path)
+        .output()
+        .map_err(|e| format!("Failed to run git command: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("No origin remote found: {}", stderr));
+    }
+
+    let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+    // Parse the remote URL
+    let (owner, repo) = parse_github_remote(&remote_url)
+        .ok_or_else(|| format!("Not a GitHub repository. Remote URL: {}", remote_url))?;
+
+    Ok(GitRepoInfo {
+        full_name: format!("{}/{}", owner, repo),
+        owner,
+        repo,
+        path: folder_path.to_string(),
+    })
 }

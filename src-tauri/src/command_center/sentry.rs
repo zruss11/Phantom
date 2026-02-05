@@ -116,48 +116,44 @@ pub async fn fetch_errors(
         value: Option<String>,
     }
 
-    let project_filter = if project_slugs.is_empty() {
-        String::new()
-    } else {
-        project_slugs
-            .iter()
-            .map(|p| format!("project:{}", p))
-            .collect::<Vec<_>>()
-            .join(" OR ")
-    };
+    // Fetch issues from each project using the per-project endpoint
+    // API: GET /api/0/projects/{org}/{project}/issues/
+    let mut all_issues = Vec::new();
 
-    let query = if project_filter.is_empty() {
-        "is:unresolved".to_string()
-    } else {
-        format!("is:unresolved ({})", project_filter)
-    };
+    for project_slug in project_slugs {
+        let url = format!(
+            "{}/projects/{}/{}/issues/?query={}&statsPeriod=14d",
+            SENTRY_API_URL,
+            org,
+            project_slug,
+            urlencoding::encode("is:unresolved")
+        );
 
-    let url = format!(
-        "{}/organizations/{}/issues/?query={}&limit=50&sort=freq",
-        SENTRY_API_URL,
-        org,
-        urlencoding::encode(&query)
-    );
+        eprintln!("[Sentry] Requesting URL: {}", url);
 
-    let response = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-        .map_err(|e| format!("Sentry API error: {}", e))?;
+        let response = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| format!("Sentry API error: {}", e))?;
 
-    if !response.status().is_success() {
-        return Err(format!("Sentry API returned {}", response.status()));
-    }
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            eprintln!("[Sentry] API error response for project {}: {}", project_slug, body);
+            // Continue to next project instead of failing entirely
+            continue;
+        }
 
-    let issues: Vec<ApiIssue> = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse Sentry response: {}", e))?;
+        let issues: Vec<ApiIssue> = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse Sentry response: {}", e))?;
 
-    Ok(issues
-        .into_iter()
-        .map(|i| SentryError {
+        eprintln!("[Sentry] Project {} returned {} issues", project_slug, issues.len());
+
+        all_issues.extend(issues.into_iter().map(|i| SentryError {
             id: i.id,
             title: i.title,
             culprit: i.culprit,
@@ -176,8 +172,16 @@ pub async fn fetch_errors(
                 error_type: i.metadata.error_type,
                 value: i.metadata.value,
             },
-        })
-        .collect())
+        }));
+    }
+
+    // Sort by event count (most frequent first)
+    all_issues.sort_by(|a, b| b.count.cmp(&a.count));
+
+    // Limit to top 50 across all projects
+    all_issues.truncate(50);
+
+    Ok(all_issues)
 }
 
 /// Mark an issue as resolved

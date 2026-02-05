@@ -1310,7 +1310,7 @@
           <div class="command-panel">
             <div class="command-panel-header">
               <span class="command-panel-title">
-                <i class="fab fa-linear command-icon-linear"></i>
+                <span class="command-logo-linear"></span>
                 Linear Issues
               </span>
               <span class="command-panel-badge command-badge-purple" id="linearIssueCount">0 active</span>
@@ -1328,7 +1328,7 @@
           <div class="command-panel">
             <div class="command-panel-header">
               <span class="command-panel-title">
-                <i class="fal fa-exclamation-triangle command-icon-sentry"></i>
+                <span class="command-logo-sentry"></span>
                 Sentry Errors
               </span>
               <span class="command-panel-badge command-badge-orange" id="sentryErrorCount">0 unresolved</span>
@@ -2043,12 +2043,12 @@
     <!-- Command Center Configuration Modal -->
     <div class="modal fade" id="commandCenterConfigModal" tabindex="-1" role="dialog" aria-labelledby="commandCenterConfigModalLabel" aria-hidden="true">
       <div class="modal-dialog modal-lg" role="document">
-        <div class="modal-content bg-dark text-light">
+        <div class="modal-content">
           <div class="modal-header">
             <h5 class="modal-title" id="commandCenterConfigModalLabel">
               <i class="fal fa-cog"></i> Command Center Configuration
             </h5>
-            <button type="button" class="close text-light" data-dismiss="modal" aria-label="Close">
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
               <span aria-hidden="true"><i class="fal fa-times"></i></span>
             </button>
           </div>
@@ -2062,12 +2062,12 @@
               </li>
               <li class="nav-item">
                 <a class="nav-link" id="ccTabLinear" data-toggle="tab" href="#ccPaneLinear" role="tab">
-                  <i class="fab fa-linear"></i> Linear
+                  <span class="command-logo-linear" style="vertical-align: middle;"></span> Linear
                 </a>
               </li>
               <li class="nav-item">
                 <a class="nav-link" id="ccTabSentry" data-toggle="tab" href="#ccPaneSentry" role="tab">
-                  <i class="fal fa-bug"></i> Sentry
+                  <span class="command-logo-sentry" style="vertical-align: middle;"></span> Sentry
                 </a>
               </li>
               <li class="nav-item">
@@ -2114,7 +2114,7 @@
                   <div id="ccGhTokenSection" class="cc-auth-section" style="display: none;">
                     <div class="form-group">
                       <label class="cc-label">Personal Access Token</label>
-                      <input type="password" class="form-control form-control-sm bg-dark text-light" id="ccGithubToken" placeholder="ghp_xxxxxxxxxxxx">
+                      <input type="password" class="form-control form-control-sm" id="ccGithubToken" placeholder="ghp_xxxxxxxxxxxx">
                       <small class="form-text text-muted">Token needs <code>repo</code> scope for accessing issues and workflows</small>
                     </div>
                   </div>
@@ -2122,8 +2122,12 @@
 
                 <div class="cc-section">
                   <h6 class="cc-section-title">Watched Repositories</h6>
+                  <p class="cc-section-desc">Select local git repositories to watch for GitHub issues and PRs.</p>
                   <div class="cc-input-group">
-                    <input type="text" class="form-control form-control-sm bg-dark text-light" id="ccGithubRepoInput" placeholder="owner/repo">
+                    <input type="text" class="form-control form-control-sm" id="ccGithubRepoInput" placeholder="owner/repo or browse for local repo" readonly>
+                    <button type="button" class="btn btn-sm btn-outline-primary" id="ccBrowseRepoBtn">
+                      <i class="fal fa-folder-open"></i> Browse
+                    </button>
                     <button type="button" class="btn btn-sm btn-outline-primary" id="ccAddGithubRepoBtn">
                       <i class="fal fa-plus"></i> Add
                     </button>
@@ -2140,18 +2144,18 @@
                   <h6 class="cc-section-title">Authentication</h6>
                   <div class="form-group">
                     <label class="cc-label">API Key</label>
-                    <input type="password" class="form-control form-control-sm bg-dark text-light" id="ccLinearToken" placeholder="lin_api_xxxxxxxxxxxx">
+                    <input type="password" class="form-control form-control-sm" id="ccLinearToken" placeholder="lin_api_xxxxxxxxxxxx">
                     <small class="form-text text-muted">Generate an API key at <a href="https://linear.app/settings/api" target="_blank" class="text-info">linear.app/settings/api</a></small>
                   </div>
                 </div>
 
                 <div class="cc-section">
-                  <h6 class="cc-section-title">Watched Projects</h6>
+                  <h6 class="cc-section-title">Watched Teams</h6>
                   <button type="button" class="btn btn-sm btn-outline-primary mb-2" id="ccLoadLinearProjectsBtn">
-                    <i class="fal fa-sync-alt"></i> Load Projects
+                    <i class="fal fa-sync-alt"></i> Load Teams
                   </button>
                   <div id="ccLinearProjectsList" class="cc-checkbox-list">
-                    <div class="cc-empty-list">Enter API key and click Load Projects</div>
+                    <div class="cc-empty-list">Enter API key and click Load Teams</div>
                   </div>
                 </div>
               </div>
@@ -2162,7 +2166,7 @@
                   <h6 class="cc-section-title">Authentication</h6>
                   <div class="form-group">
                     <label class="cc-label">Auth Token</label>
-                    <input type="password" class="form-control form-control-sm bg-dark text-light" id="ccSentryToken" placeholder="sntrys_xxxxxxxxxxxx">
+                    <input type="password" class="form-control form-control-sm" id="ccSentryToken" placeholder="sntrys_xxxxxxxxxxxx">
                     <small class="form-text text-muted">Generate a token at <a href="https://sentry.io/settings/auth-tokens/" target="_blank" class="text-info">sentry.io/settings/auth-tokens</a></small>
                   </div>
                 </div>
@@ -2170,7 +2174,7 @@
                 <div class="cc-section">
                   <h6 class="cc-section-title">Organization</h6>
                   <div class="cc-input-group">
-                    <select class="form-control form-control-sm bg-dark text-light" id="ccSentryOrg">
+                    <select class="form-control form-control-sm" id="ccSentryOrg">
                       <option value="">Select an organization...</option>
                     </select>
                     <button type="button" class="btn btn-sm btn-outline-primary" id="ccLoadSentryOrgsBtn">

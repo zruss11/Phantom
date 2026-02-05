@@ -5707,6 +5707,32 @@ input:checked + .slider:before {
 .command-icon-sentry { color: var(--command-orange-sentry); }
 .command-icon-ci { color: var(--command-green-success); }
 
+/* Official brand logos using mask-image for color control */
+.command-logo-linear,
+.command-logo-sentry {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+}
+
+.command-logo-linear {
+  -webkit-mask-image: url('images/linear-logomark.svg');
+  mask-image: url('images/linear-logomark.svg');
+  background-color: var(--command-purple-linear, #5e6ad2);
+}
+
+.command-logo-sentry {
+  -webkit-mask-image: url('images/sentry-logomark.svg');
+  mask-image: url('images/sentry-logomark.svg');
+  background-color: var(--command-orange-sentry, #f2684b);
+}
+
 .command-panel-badge {
   padding: 2px 8px;
   border-radius: 10px;
@@ -6229,9 +6255,88 @@ input:checked + .slider:before {
 
 /************************************ Command Center Config Modal start ****************************************/
 
-/* Tab styling */
+/* Modal-specific overrides for Bootstrap tabs */
+#commandCenterConfigModal .modal-content {
+  background: var(--command-bg-card, #252026);
+  border: 1px solid var(--command-border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+#commandCenterConfigModal .modal-header {
+  background: var(--command-bg-card, #252026);
+  border-bottom: 1px solid var(--command-border-subtle, rgba(255, 255, 255, 0.08));
+  padding: 16px 20px;
+}
+
+#commandCenterConfigModal .modal-header .modal-title {
+  color: var(--command-text-primary, #fff);
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#commandCenterConfigModal .modal-header .modal-title i {
+  color: var(--command-pink-primary, #f78a97);
+}
+
+#commandCenterConfigModal .modal-header .close {
+  color: var(--command-text-muted, rgba(255, 255, 255, 0.6));
+  text-shadow: none;
+  opacity: 1;
+  padding: 0;
+  margin: 0;
+}
+
+#commandCenterConfigModal .modal-header .close:hover {
+  color: var(--command-text-primary, #fff);
+}
+
+#commandCenterConfigModal .nav-tabs {
+  background: var(--command-bg-deep, #1b1b1c) !important;
+  border-bottom: 1px solid var(--command-border-subtle, rgba(255, 255, 255, 0.08));
+  margin: 0;
+}
+
+#commandCenterConfigModal .nav-tabs .nav-item {
+  margin-bottom: 0;
+}
+
+#commandCenterConfigModal .nav-tabs .nav-link {
+  background: transparent !important;
+  border: none !important;
+  border-bottom: 2px solid transparent !important;
+  border-radius: 0 !important;
+  color: var(--command-text-muted, rgba(255, 255, 255, 0.6));
+  padding: 12px 16px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.15s ease;
+}
+
+#commandCenterConfigModal .nav-tabs .nav-link:hover,
+#commandCenterConfigModal .nav-tabs .nav-link:focus {
+  color: var(--command-text-primary, #fff);
+  background: rgba(255, 255, 255, 0.03) !important;
+  border-color: transparent !important;
+  isolation: isolate;
+}
+
+#commandCenterConfigModal .nav-tabs .nav-link.active {
+  color: var(--command-pink-primary, #f78a97) !important;
+  background: transparent !important;
+  border-bottom: 2px solid var(--command-pink-primary, #f78a97) !important;
+}
+
+#commandCenterConfigModal .nav-tabs .nav-link i {
+  font-size: 14px;
+}
+
+/* Tab styling - legacy selectors for compatibility */
 .cc-config-tabs {
-  background: rgba(0, 0, 0, 0.2);
+  background: var(--command-bg-deep, #1b1b1c);
   border-bottom: 1px solid var(--command-border-subtle);
   padding: 0 16px;
 }
@@ -6264,11 +6369,76 @@ input:checked + .slider:before {
   font-size: 14px;
 }
 
+/* Modal footer styling */
+#commandCenterConfigModal .modal-footer {
+  background: var(--command-bg-deep, #1b1b1c);
+  border-top: 1px solid var(--command-border-subtle, rgba(255, 255, 255, 0.08));
+  padding: 12px 20px;
+}
+
+#commandCenterConfigModal .modal-footer .btn-secondary {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--command-border-subtle, rgba(255, 255, 255, 0.08));
+  color: var(--command-text-primary, #fff);
+}
+
+#commandCenterConfigModal .modal-footer .btn-secondary:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+#commandCenterConfigModal .modal-footer .btn-primary {
+  background: var(--command-pink-primary, #f78a97);
+  border-color: var(--command-pink-primary, #f78a97);
+  color: #1b1b1c;
+}
+
+#commandCenterConfigModal .modal-footer .btn-primary:hover {
+  background: #f9a0ab;
+  border-color: #f9a0ab;
+}
+
+/* Form control overrides for dark theme */
+#commandCenterConfigModal .form-control {
+  background: var(--command-bg-deep, #1b1b1c) !important;
+  border: 1px solid var(--command-border-subtle, rgba(255, 255, 255, 0.08)) !important;
+  color: var(--command-text-primary, #fff) !important;
+}
+
+#commandCenterConfigModal .form-control:focus {
+  background: var(--command-bg-deep, #1b1b1c) !important;
+  border-color: var(--command-pink-primary, #f78a97) !important;
+  box-shadow: 0 0 0 2px rgba(247, 138, 151, 0.2) !important;
+}
+
+#commandCenterConfigModal .form-control::placeholder {
+  color: var(--command-text-muted, rgba(255, 255, 255, 0.6));
+}
+
+#commandCenterConfigModal select.form-control {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23999' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  padding-right: 30px;
+}
+
+#commandCenterConfigModal .btn-outline-primary {
+  border-color: var(--command-pink-primary, #f78a97);
+  color: var(--command-pink-primary, #f78a97);
+}
+
+#commandCenterConfigModal .btn-outline-primary:hover {
+  background: var(--command-pink-primary, #f78a97);
+  color: #1b1b1c;
+}
+
 /* Content area */
 .cc-config-content {
   padding: 20px;
   max-height: 500px;
   overflow-y: auto;
+  background: var(--command-bg-card, #252026);
 }
 
 .cc-section {
@@ -6288,6 +6458,13 @@ input:checked + .slider:before {
   margin-bottom: 12px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--command-border-subtle);
+}
+
+.cc-section-desc {
+  font-size: 12px;
+  color: var(--command-text-muted, rgba(255, 255, 255, 0.6));
+  margin-bottom: 12px;
+  margin-top: -4px;
 }
 
 /* Radio buttons */
@@ -6605,6 +6782,16 @@ input:checked + .slider:before {
 /************************************ Command Center end ****************************************/
 
 /************************************ Custom File Browser start ****************************************/
+
+/* Z-index fix for nested modals - ensure file browser appears above other modals */
+#fileBrowserModal {
+  z-index: 1060 !important;
+}
+
+#fileBrowserModal + .modal-backdrop,
+.modal-backdrop + #fileBrowserModal ~ .modal-backdrop {
+  z-index: 1055 !important;
+}
 
 /* Modal sizing and positioning */
 .file-browser-dialog {

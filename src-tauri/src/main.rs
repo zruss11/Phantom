@@ -11347,6 +11347,11 @@ async fn check_gh_cli_auth() -> Result<GhCliAuthStatus, String> {
 }
 
 #[tauri::command]
+async fn get_github_repo_from_path(path: String) -> Result<command_center::github::GitRepoInfo, String> {
+    command_center::github::get_github_repo_from_path(&path)
+}
+
+#[tauri::command]
 async fn fetch_github_issues(state: State<'_, AppState>) -> Result<Vec<GithubIssue>, String> {
     let settings = state.settings.lock().await;
     let repos = settings.github_watched_repos.clone().unwrap_or_default();
@@ -11497,15 +11502,27 @@ async fn fetch_sentry_errors(state: State<'_, AppState>) -> Result<Vec<SentryErr
     let project_slugs = settings.sentry_watched_projects.clone().unwrap_or_default();
     drop(settings);
 
+    eprintln!("[Sentry] fetch_sentry_errors - token_set: {}, org: {:?}, projects: {:?}",
+        token.is_some(), org, project_slugs);
+
     let token = token.ok_or("Sentry token not configured")?;
     let org = org.ok_or("Sentry organization not configured")?;
 
     if project_slugs.is_empty() {
+        eprintln!("[Sentry] No projects configured, returning empty");
         return Ok(vec![]);
     }
 
+    eprintln!("[Sentry] Fetching errors for org: {}, projects: {:?}", org, project_slugs);
     let client = reqwest::Client::new();
-    command_center::sentry::fetch_errors(&client, &token, &org, &project_slugs).await
+    let result = command_center::sentry::fetch_errors(&client, &token, &org, &project_slugs).await;
+
+    match &result {
+        Ok(errors) => eprintln!("[Sentry] API returned {} errors", errors.len()),
+        Err(e) => eprintln!("[Sentry] API error: {}", e),
+    }
+
+    result
 }
 
 #[tauri::command]
@@ -11519,13 +11536,51 @@ async fn resolve_sentry_issue(issue_id: String, state: State<'_, AppState>) -> R
     command_center::sentry::resolve_issue(&client, &token, &issue_id).await
 }
 
+// Config modal commands - accept token directly for testing before saving
+#[tauri::command]
+async fn cc_fetch_linear_projects(token: String) -> Result<Vec<LinearProject>, String> {
+    if token.is_empty() {
+        return Err("Linear token is required".to_string());
+    }
+    let client = reqwest::Client::new();
+    command_center::linear::fetch_projects(&client, &token).await
+}
+
+#[tauri::command]
+async fn cc_fetch_sentry_organizations(token: String) -> Result<Vec<SentryOrganization>, String> {
+    if token.is_empty() {
+        return Err("Sentry token is required".to_string());
+    }
+    let client = reqwest::Client::new();
+    command_center::sentry::fetch_organizations(&client, &token).await
+}
+
+#[tauri::command]
+async fn cc_fetch_sentry_projects(token: String, org: String) -> Result<Vec<SentryProject>, String> {
+    if token.is_empty() {
+        return Err("Sentry token is required".to_string());
+    }
+    if org.is_empty() {
+        return Err("Sentry organization is required".to_string());
+    }
+    let client = reqwest::Client::new();
+    command_center::sentry::fetch_projects(&client, &token, &org).await
+}
+
 #[tauri::command]
 async fn fetch_command_center_data(state: State<'_, AppState>) -> Result<CommandCenterData, String> {
     let settings = state.settings.lock().await;
     let enabled = settings.command_center_enabled.unwrap_or(false);
+    let sentry_token_set = settings.sentry_token.is_some();
+    let sentry_org = settings.sentry_organization.clone();
+    let sentry_projects = settings.sentry_watched_projects.clone();
     drop(settings);
 
+    eprintln!("[CommandCenter] Fetching data - enabled: {}, sentry_token_set: {}, sentry_org: {:?}, sentry_projects: {:?}",
+        enabled, sentry_token_set, sentry_org, sentry_projects);
+
     if !enabled {
+        eprintln!("[CommandCenter] Command Center is disabled, returning empty data");
         return Ok(CommandCenterData::default());
     }
 
@@ -11551,14 +11606,25 @@ async fn fetch_command_center_data(state: State<'_, AppState>) -> Result<Command
     }
 
     // Fetch Sentry data
+    eprintln!("[CommandCenter] Fetching Sentry errors...");
     match fetch_sentry_errors(state.clone()).await {
-        Ok(errs) => data.sentry_errors = errs,
-        Err(e) if !e.contains("not configured") => errors.push(format!("Sentry: {}", e)),
-        _ => {}
+        Ok(errs) => {
+            eprintln!("[CommandCenter] Sentry returned {} errors", errs.len());
+            data.sentry_errors = errs;
+        },
+        Err(e) => {
+            eprintln!("[CommandCenter] Sentry fetch error: {}", e);
+            if !e.contains("not configured") {
+                errors.push(format!("Sentry: {}", e));
+            }
+        }
     }
 
     data.last_updated = chrono::Utc::now().to_rfc3339();
     data.errors = errors;
+
+    eprintln!("[CommandCenter] Data fetch complete - sentry_errors: {}, data_errors: {:?}",
+        data.sentry_errors.len(), data.errors);
 
     Ok(data)
 }
@@ -11886,6 +11952,7 @@ fn main() {
             install_update,
             // Command Center commands
             check_gh_cli_auth,
+            get_github_repo_from_path,
             fetch_github_issues,
             fetch_github_workflows,
             rerun_github_workflow,
@@ -11896,6 +11963,9 @@ fn main() {
             fetch_sentry_projects,
             fetch_sentry_errors,
             resolve_sentry_issue,
+            cc_fetch_linear_projects,
+            cc_fetch_sentry_organizations,
+            cc_fetch_sentry_projects,
             fetch_command_center_data
         ])
         .run(tauri::generate_context!())

@@ -165,6 +165,32 @@
       .panel-title .icon-sentry { color: var(--orange-sentry); }
       .panel-title .icon-ci { color: var(--green-success); }
 
+      /* Official brand logos using mask-image */
+      .logo-linear,
+      .logo-sentry {
+        display: inline-block;
+        width: 1em;
+        height: 1em;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+        -webkit-mask-position: center;
+        mask-position: center;
+      }
+
+      .logo-linear {
+        -webkit-mask-image: url('images/linear-logomark.svg');
+        mask-image: url('images/linear-logomark.svg');
+        background-color: var(--purple-linear);
+      }
+
+      .logo-sentry {
+        -webkit-mask-image: url('images/sentry-logomark.svg');
+        mask-image: url('images/sentry-logomark.svg');
+        background-color: var(--orange-sentry);
+      }
+
       .panel-badge {
         padding: 2px 8px;
         border-radius: 10px;
@@ -784,7 +810,7 @@
         <div class="panel">
           <div class="panel-header">
             <span class="panel-title">
-              <i class="fab fa-linear icon-linear"></i>
+              <span class="logo-linear"></span>
               Linear Issues
             </span>
             <span class="panel-badge badge-purple">6 active</span>
@@ -845,7 +871,7 @@
         <div class="panel">
           <div class="panel-header">
             <span class="panel-title">
-              <i class="fal fa-exclamation-triangle icon-sentry"></i>
+              <span class="logo-sentry"></span>
               Sentry Errors
             </span>
             <span class="panel-badge badge-orange">12 unresolved</span>

@@ -9,6 +9,12 @@ navLinks.click(function () {
 
   let page = $(this).attr("data-page");
 
+  // Only handle clicks on nav-links that have data-page attribute (main navigation)
+  // This prevents modal tabs (which also use .nav-link class) from hiding all pages
+  if (!page) {
+    return;
+  }
+
   $(".nav-link").each(function () {
     $(this).parent().removeClass("active");
   });
