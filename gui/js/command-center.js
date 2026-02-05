@@ -648,7 +648,9 @@
       }
     }
 
-    // Show popup
+    // Show popup and backdrop
+    var backdrop = document.getElementById('commandAgentPopupBackdrop');
+    if (backdrop) backdrop.removeAttribute('hidden');
     popup.removeAttribute('hidden');
   }
 
@@ -657,8 +659,12 @@
    */
   function closeAgentPopup() {
     var popup = document.getElementById('commandAgentPopup');
+    var backdrop = document.getElementById('commandAgentPopupBackdrop');
     if (popup) {
       popup.setAttribute('hidden', '');
+    }
+    if (backdrop) {
+      backdrop.setAttribute('hidden', '');
     }
     state.popupContext = null;
   }
@@ -682,8 +688,13 @@
     if (window.tauriBridge && window.tauriBridge.ipcRenderer) {
       var payload = {
         agentId: agent,
-        initialPrompt: prompt,
-        projectPath: null // Will use current project
+        prompt: prompt,
+        projectPath: null, // Will use current project
+        planMode: false,
+        thinking: false,
+        useWorktree: false,
+        permissionMode: 'default',
+        execModel: 'default'
       };
 
       window.tauriBridge.ipcRenderer.send('CreateAgentSession', payload);
@@ -832,6 +843,12 @@
     var cancelBtn = document.getElementById('commandAgentCancelBtn');
     if (cancelBtn) {
       cancelBtn.addEventListener('click', closeAgentPopup);
+    }
+
+    // Clicking backdrop closes popup
+    var popupBackdrop = document.getElementById('commandAgentPopupBackdrop');
+    if (popupBackdrop) {
+      popupBackdrop.addEventListener('click', closeAgentPopup);
     }
 
     var createBtn = document.getElementById('commandAgentCreateBtn');

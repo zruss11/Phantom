@@ -6063,18 +6063,33 @@ input:checked + .slider:before {
   color: var(--command-text-primary);
 }
 
+/* Agent Task Popup Backdrop */
+.command-agent-popup-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 9999;
+}
+
+.command-agent-popup-backdrop[hidden] {
+  display: none;
+}
+
 /* Agent Task Popup (floating) */
 .command-agent-popup {
   position: fixed;
   bottom: 24px;
   right: 24px;
   width: 380px;
-  background: var(--command-bg-card);
-  border: 1px solid var(--command-pink-primary);
+  background: #252026;
+  border: 1px solid #f78a97;
   border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 24px var(--command-pink-glow);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.6), 0 0 24px rgba(247, 138, 151, 0.25);
   overflow: hidden;
-  z-index: 1000;
+  z-index: 10000;
 }
 
 .command-agent-popup[hidden] {
@@ -6218,14 +6233,20 @@ input:checked + .slider:before {
 
 .command-agent-btn.cancel {
   background: transparent;
-  border: 1px solid var(--command-border-subtle);
-  color: var(--command-text-muted);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.command-agent-btn.cancel:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.8);
 }
 
 .command-agent-btn.create {
-  background: var(--command-pink-primary);
+  background: #f78a97;
   border: none;
   color: #1c1b1b;
+  font-weight: 600;
 }
 
 .command-agent-btn.create:hover {
