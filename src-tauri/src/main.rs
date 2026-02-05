@@ -396,6 +396,9 @@ pub(crate) struct AgentConfig {
     pub(crate) models: Vec<String>,
 }
 
+const MAX_ATTACHMENT_BYTES: u64 = 5 * 1024 * 1024; // 5MB cap to avoid base64 memory spikes
+const MAX_SESSION_MESSAGES: usize = 200;
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AttachmentRef {
     id: String,
@@ -833,6 +836,27 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
         }
     }
     Ok(output)
+}
+
+fn read_attachment_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("Failed to stat attachment: {}", e))?;
+    if metadata.len() > max_bytes {
+        return Err(format!(
+            "Attachment too large ({} bytes). Max allowed is {} bytes.",
+            metadata.len(),
+            max_bytes
+        ));
+    }
+    std::fs::read(path).map_err(|e| format!("Failed to read attachment: {}", e))
+}
+
+fn push_session_message(messages: &mut Vec<serde_json::Value>, msg: serde_json::Value) {
+    messages.push(msg);
+    if messages.len() > MAX_SESSION_MESSAGES {
+        let overflow = messages.len() - MAX_SESSION_MESSAGES;
+        messages.drain(0..overflow);
+    }
 }
 
 fn decode_jwt_payload_value(token: &str) -> Option<serde_json::Value> {
@@ -4780,7 +4804,7 @@ pub(crate) async fn start_task_internal(
             .take()
             .ok_or("No prompt pending - task may have already started")?;
         let attachments = std::mem::take(&mut handle.pending_attachments);
-        handle.messages.push(serde_json::json!({
+        push_session_message(&mut handle.messages, serde_json::json!({
             "message_type": "user_message",
             "content": prompt,
             "timestamp": user_timestamp
@@ -4807,7 +4831,7 @@ pub(crate) async fn start_task_internal(
             for att in &attachments {
                 let file_path = base_dir.join(&att.relative_path);
                 if file_path.exists() {
-                    match std::fs::read(&file_path) {
+                    match read_attachment_bytes(&file_path, MAX_ATTACHMENT_BYTES) {
                         Ok(data) => {
                             use base64::Engine;
                             let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -5565,7 +5589,7 @@ pub(crate) async fn start_task_internal(
         // Store message in memory
         {
             let mut handle = handle_ref.lock().await;
-            handle.messages.push(serde_json::json!({
+            push_session_message(&mut handle.messages, serde_json::json!({
                 "message_type": msg.message_type,
                 "content": msg.content,
                 "reasoning": msg.reasoning,
@@ -10139,7 +10163,7 @@ pub(crate) async fn send_chat_message_internal(
             .pending_prompt
             .take()
             .unwrap_or_else(|| message.clone());
-        handle.messages.push(serde_json::json!({
+        push_session_message(&mut handle.messages, serde_json::json!({
             "message_type": "user_message",
             "content": message,
             "timestamp": user_timestamp
@@ -10208,7 +10232,7 @@ pub(crate) async fn send_chat_message_internal(
             for att in &attachments {
                 let file_path = base_dir.join(&att.relative_path);
                 if file_path.exists() {
-                    match std::fs::read(&file_path) {
+                    match read_attachment_bytes(&file_path, MAX_ATTACHMENT_BYTES) {
                         Ok(data) => {
                             use base64::Engine;
                             let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
@@ -10850,7 +10874,7 @@ pub(crate) async fn send_chat_message_internal(
             // Store message in memory
             {
                 let mut handle = handle_ref.lock().await;
-                handle.messages.push(chat_msg.clone());
+                push_session_message(&mut handle.messages, chat_msg.clone());
             }
 
             // Persist to DB
@@ -11221,8 +11245,7 @@ async fn get_attachment_base64(relative_path: String) -> Result<String, String> 
     let attachments_path = attachments_dir()?;
     let file_path = attachments_path.join(&relative_path);
 
-    let data =
-        std::fs::read(&file_path).map_err(|e| format!("Failed to read attachment: {}", e))?;
+    let data = read_attachment_bytes(&file_path, MAX_ATTACHMENT_BYTES)?;
 
     Ok(STANDARD.encode(&data))
 }

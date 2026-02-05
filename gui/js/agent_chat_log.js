@@ -7,6 +7,8 @@
 
   const bridge = window.tauriBridge;
   const ipcRenderer = bridge ? bridge.ipcRenderer : null;
+  const MAX_RENDERED_MESSAGES = 300;
+  const PRUNE_BATCH = 50;
 
   // Configure marked for safe rendering
   function initMarkdown() {
@@ -188,6 +190,7 @@
   // Load attachment image from backend and return data URL
   // Caches loaded images to avoid repeated loads
   const attachmentDataUrlCache = new Map();
+  const MAX_ATTACHMENT_CACHE = 50;
 
   async function loadAttachmentDataUrl(attachment) {
     // If already has dataUrl, use it
@@ -209,6 +212,12 @@
           const mimeType = attachment.mimeType || "image/png";
           const dataUrl = `data:${mimeType};base64,${base64Data}`;
           attachmentDataUrlCache.set(cacheKey, dataUrl);
+          if (attachmentDataUrlCache.size > MAX_ATTACHMENT_CACHE) {
+            const oldestKey = attachmentDataUrlCache.keys().next().value;
+            if (oldestKey) {
+              attachmentDataUrlCache.delete(oldestKey);
+            }
+          }
           return dataUrl;
         }
       } catch (err) {
@@ -1723,18 +1732,29 @@
       }
     });
 
-    // Receive batch of messages (initial load)
-    ipcRenderer.on("ChatLogBatch", function (e, taskId, messages) {
-      if (taskId === currentTaskId && Array.isArray(messages)) {
-        clearMessages();
-        messages.forEach(function (msg) {
-          addMessageWithBundling(msg, false);
-        });
-        // Finalize any remaining reasoning and bundle after batch load
-        flushAccumulatedReasoning();
-        finalizeToolBundle();
-        scrollToBottom();
+  // Receive batch of messages (initial load)
+  ipcRenderer.on("ChatLogBatch", function (e, taskId, messages) {
+    if (taskId === currentTaskId && Array.isArray(messages)) {
+      clearMessages();
+      const totalMessages = messages.length;
+      const startIndex = Math.max(0, totalMessages - MAX_RENDERED_MESSAGES);
+      const visibleMessages = messages.slice(startIndex);
+
+      if (startIndex > 0) {
+        addMessage({
+          type: "system",
+          content: "Showing latest " + visibleMessages.length + " of " + totalMessages + " messages for performance."
+        }, false);
       }
+
+      visibleMessages.forEach(function (msg) {
+        addMessageWithBundling(msg, false);
+      });
+      // Finalize any remaining reasoning and bundle after batch load
+      flushAccumulatedReasoning();
+      finalizeToolBundle();
+      scrollToBottom();
+    }
     });
 
     // Handle window close notification
@@ -1896,6 +1916,7 @@
     toolCallBundle.element = div;
     toolCallBundle.calls = [];
     toolCallBundle.expanded = false;
+    pruneChatHistory();
     return div;
   }
 
@@ -1969,6 +1990,7 @@
     bundleEl.find(".tool-bundle-details").append(itemHtml);
 
     if (autoScroll) scrollToBottom();
+    pruneChatHistory();
   }
 
   // Add thinking/reasoning to the current tool bundle (shows as a "Thinking" item)
@@ -2451,6 +2473,7 @@
 
       container.append(div);
       streamingElement = div;
+      pruneChatHistory();
     }
 
     // Append content
@@ -2879,6 +2902,7 @@
       '<div class="draft-label">Draft - Not Sent</div>' + escapeHtml(prompt);
     container.append(div);
     scrollToBottom();
+    pruneChatHistory();
   }
 
   // Track if generation is in progress
@@ -3150,6 +3174,7 @@
     if (shouldScroll && autoScroll) {
       scrollToBottom();
     }
+    pruneChatHistory();
   }
 
   // Merge a tool result into the most recent pending tool call
@@ -4086,6 +4111,26 @@
     toolCallBundle.calls = [];
     toolCallBundle.expanded = false;
     toolCallBundle.iconNames = new Set();
+  }
+
+  function pruneChatHistory() {
+    const container = $("#chatContainer");
+    const messages = container.children(".chat-message");
+    if (messages.length <= MAX_RENDERED_MESSAGES) return;
+
+    let toRemove = messages.length - MAX_RENDERED_MESSAGES;
+    const removable = messages.filter(function () {
+      const el = $(this);
+      if (el.hasClass("streaming")) return false;
+      if (el.hasClass("pending")) return false;
+      if (el.hasClass("permission-request") && !el.hasClass("responded")) return false;
+      if (el.hasClass("user-input-request") && !el.hasClass("responded")) return false;
+      return true;
+    });
+
+    if (!removable.length) return;
+    const removeCount = Math.min(toRemove + PRUNE_BATCH, removable.length);
+    removable.slice(0, removeCount).remove();
   }
 
   // Scroll to bottom of chat
