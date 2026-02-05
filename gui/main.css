@@ -6227,6 +6227,381 @@ input:checked + .slider:before {
   }
 }
 
+/************************************ Command Center Config Modal start ****************************************/
+
+/* Tab styling */
+.cc-config-tabs {
+  background: rgba(0, 0, 0, 0.2);
+  border-bottom: 1px solid var(--command-border-subtle);
+  padding: 0 16px;
+}
+
+.cc-config-tabs .nav-link {
+  color: var(--command-text-muted);
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 12px 16px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  transition: all 0.15s ease;
+}
+
+.cc-config-tabs .nav-link:hover {
+  color: var(--command-text-primary);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.cc-config-tabs .nav-link.active {
+  color: var(--command-pink-primary);
+  border-bottom-color: var(--command-pink-primary);
+  background: transparent;
+}
+
+.cc-config-tabs .nav-link i {
+  font-size: 14px;
+}
+
+/* Content area */
+.cc-config-content {
+  padding: 20px;
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.cc-section {
+  margin-bottom: 24px;
+}
+
+.cc-section:last-child {
+  margin-bottom: 0;
+}
+
+.cc-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--command-text-muted);
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--command-border-subtle);
+}
+
+/* Radio buttons */
+.cc-radio-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.cc-radio-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--command-border-subtle);
+  border-radius: 8px;
+  transition: all 0.15s ease;
+}
+
+.cc-radio-label:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.cc-radio-label input[type="radio"] {
+  margin-top: 3px;
+  accent-color: var(--command-pink-primary);
+}
+
+.cc-radio-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cc-radio-text strong {
+  font-size: 13px;
+  color: var(--command-text-primary);
+}
+
+.cc-radio-text small {
+  font-size: 11px;
+  color: var(--command-text-muted);
+}
+
+/* Auth sections */
+.cc-auth-section {
+  margin-top: 12px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+}
+
+.cc-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cc-label {
+  font-size: 12px;
+  color: var(--command-text-muted);
+  margin-bottom: 6px;
+  display: block;
+}
+
+.cc-status {
+  font-size: 12px;
+  color: var(--command-text-primary);
+}
+
+/* Input group for repo/add button */
+.cc-input-group {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.cc-input-group .form-control {
+  flex: 1;
+}
+
+/* Repos list */
+.cc-repos-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.cc-repo-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--command-border-subtle);
+  border-radius: 6px;
+}
+
+.cc-repo-name {
+  font-size: 12px;
+  color: var(--command-text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cc-repo-name i {
+  color: var(--command-text-muted);
+}
+
+.cc-remove-btn {
+  background: none;
+  border: none;
+  color: var(--command-text-muted);
+  cursor: pointer;
+  padding: 4px;
+  font-size: 12px;
+  transition: color 0.15s ease;
+}
+
+.cc-remove-btn:hover {
+  color: var(--command-red-error);
+}
+
+/* Empty state */
+.cc-empty-list {
+  font-size: 12px;
+  color: var(--command-text-muted);
+  text-align: center;
+  padding: 20px;
+  background: rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+}
+
+/* Checkbox list */
+.cc-checkbox-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.cc-checkbox-item {
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--command-border-subtle);
+  border-radius: 6px;
+}
+
+.cc-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  margin: 0;
+}
+
+.cc-checkbox-label input[type="checkbox"] {
+  accent-color: var(--command-pink-primary);
+}
+
+.cc-checkbox-text {
+  font-size: 12px;
+  color: var(--command-text-primary);
+}
+
+/* Toggle switch */
+.cc-toggle-row {
+  margin-bottom: 12px;
+}
+
+.cc-toggle-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: pointer;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--command-border-subtle);
+  border-radius: 8px;
+}
+
+.cc-toggle-text {
+  font-size: 13px;
+  color: var(--command-text-primary);
+}
+
+.cc-toggle-label input[type="checkbox"] {
+  display: none;
+}
+
+.cc-toggle-slider {
+  width: 40px;
+  height: 22px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 11px;
+  position: relative;
+  transition: background 0.2s ease;
+}
+
+.cc-toggle-slider::after {
+  content: '';
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  background: #fff;
+  border-radius: 50%;
+  top: 2px;
+  left: 2px;
+  transition: transform 0.2s ease;
+}
+
+.cc-toggle-label input:checked + .cc-toggle-slider {
+  background: var(--command-pink-primary);
+}
+
+.cc-toggle-label input:checked + .cc-toggle-slider::after {
+  transform: translateX(18px);
+}
+
+/* Slider */
+.cc-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 8px;
+}
+
+.cc-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+  outline: none;
+}
+
+.cc-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  background: var(--command-pink-primary);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+
+.cc-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+
+.cc-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  background: var(--command-pink-primary);
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.cc-slider-value {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--command-pink-primary);
+  min-width: 50px;
+  text-align: right;
+}
+
+/* Loading state */
+.cc-loading {
+  font-size: 12px;
+  color: var(--command-text-muted);
+  text-align: center;
+  padding: 20px;
+}
+
+/* Modal footer adjustments */
+#commandCenterConfigModal .modal-footer {
+  background: rgba(0, 0, 0, 0.2);
+  border-top: 1px solid var(--command-border-subtle);
+}
+
+/* Form control overrides for dark mode */
+#commandCenterConfigModal .form-control {
+  border-color: var(--command-border-subtle);
+}
+
+#commandCenterConfigModal .form-control:focus {
+  border-color: var(--command-pink-primary);
+  box-shadow: 0 0 0 2px rgba(247, 138, 151, 0.2);
+}
+
+#commandCenterConfigModal .form-control::placeholder {
+  color: rgba(255, 255, 255, 0.3);
+}
+
+#commandCenterConfigModal select.form-control {
+  background-image: url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3e%3cpath fill='none' stroke='%23ffffff' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 12px;
+  padding-right: 2.25rem;
+}
+
+/************************************ Command Center Config Modal end ****************************************/
+
 /************************************ Command Center end ****************************************/
 
 /************************************ Custom File Browser start ****************************************/
