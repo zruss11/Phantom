@@ -136,6 +136,10 @@
    * Open external URL
    */
   function openExternal(url) {
+    if (!isSafeExternalUrl(url)) {
+      console.warn('[CommandCenter] Blocked unsafe external URL:', url);
+      return;
+    }
     var tauri = window.__TAURI__;
     if (tauri && tauri.shell && tauri.shell.open) {
       tauri.shell.open(url);
@@ -146,6 +150,30 @@
       return;
     }
     window.open(url, '_blank');
+  }
+
+  function isSafeExternalUrl(url) {
+    if (typeof url !== 'string') return false;
+    var trimmed = url.trim();
+    if (!trimmed) return false;
+    var lowered = trimmed.toLowerCase();
+    if (
+      lowered.indexOf('javascript:') === 0 ||
+      lowered.indexOf('data:') === 0 ||
+      lowered.indexOf('vbscript:') === 0
+    ) {
+      return false;
+    }
+    try {
+      var parsed = new URL(trimmed, window.location.href);
+      return (
+        parsed.protocol === 'http:' ||
+        parsed.protocol === 'https:' ||
+        parsed.protocol === 'mailto:'
+      );
+    } catch (err) {
+      return false;
+    }
   }
 
   // ============================================================================
@@ -537,7 +565,7 @@
    */
   function resolveError(errorId) {
     console.log('[CommandCenter] Resolving error:', errorId);
-    tauriInvoke('cc_resolve_sentry_issue', { issueId: errorId })
+    tauriInvoke('resolve_sentry_issue', { issueId: errorId })
       .then(function() {
         console.log('[CommandCenter] Error resolved');
         // Refresh data
@@ -559,7 +587,7 @@
    */
   function rerunWorkflow(repo, runId) {
     console.log('[CommandCenter] Re-running workflow:', repo, runId);
-    tauriInvoke('cc_rerun_github_workflow', { repo: repo, runId: parseInt(runId, 10) })
+    tauriInvoke('rerun_github_workflow', { repo: repo, runId: parseInt(runId, 10) })
       .then(function() {
         console.log('[CommandCenter] Workflow re-run triggered');
         // Refresh data after a delay to allow GitHub to update
