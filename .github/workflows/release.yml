@@ -56,9 +56,8 @@ jobs:
           # Clean up
           rm certificate.p12
 
-      - name: Build Tauri app
+      - name: Build Tauri app (app + updater only)
         env:
-          CI: false  # Required for DMG background/icon positioning to work
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
@@ -69,11 +68,36 @@ jobs:
           # Write API key
           echo "${{ secrets.APPLE_API_KEY_CONTENT }}" > /tmp/AuthKey.p8
 
-          # Build using npm-installed tauri CLI
-          tauri build
+          # Build app and updater bundles (skip DMG - we create it separately)
+          tauri build --bundles app,updater
 
           # Clean up
           rm /tmp/AuthKey.p8
+
+      - name: Create custom DMG
+        run: |
+          brew install create-dmg
+
+          # Find the built .app
+          APP_PATH="$(ls -d src-tauri/target/release/bundle/macos/*.app | head -n1)"
+          APP_NAME="$(basename "$APP_PATH")"
+          VERSION="${{ github.event.inputs.version || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          DMG_NAME="Phantom_${VERSION}_aarch64.dmg"
+          DMG_DIR="src-tauri/target/release/bundle/dmg"
+
+          mkdir -p "$DMG_DIR"
+
+          create-dmg \
+            --volname "Phantom" \
+            --background "src-tauri/icons/dmg-background.png" \
+            --window-size 540 380 \
+            --icon-size 80 \
+            --icon "$APP_NAME" 390 170 \
+            --app-drop-link 150 170 \
+            --no-internet-enable \
+            "$DMG_DIR/$DMG_NAME" \
+            "$APP_PATH" || true
 
       - name: Generate latest.json
         env:
