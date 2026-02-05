@@ -1,0 +1,1003 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>Phantom - Command Center</title>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&family=Roboto+Mono:wght@400;500&display=swap" />
+    <link rel="stylesheet" href="vendor/bootstrap.min.css" />
+    <link rel="stylesheet" href="fontawesome/fontawesome-all.css" />
+    <link rel="stylesheet" href="fonts/fonts.css" />
+    <style>
+      :root {
+        --bg-dark: #1c1b1b;
+        --bg-card: #252026;
+        --bg-deep: #1b1b1c;
+        --pink-primary: #f78a97;
+        --pink-glow: rgba(247, 138, 151, 0.4);
+        --green-success: #3fb950;
+        --red-error: #f85149;
+        --yellow-warning: #d29922;
+        --blue-info: #58a6ff;
+        --purple-linear: #5e6ad2;
+        --orange-sentry: #f2684b;
+        --border-subtle: rgba(255, 255, 255, 0.08);
+        --text-primary: #fff;
+        --text-muted: rgba(255, 255, 255, 0.6);
+      }
+
+      * { box-sizing: border-box; }
+
+      body {
+        font-family: "Proxima Nova", "Roboto", sans-serif;
+        background: var(--bg-dark);
+        color: var(--text-primary);
+        margin: 0;
+        padding: 0;
+        min-height: 100vh;
+      }
+
+      /* Nav Bar */
+      .top-navbar {
+        background: linear-gradient(180deg, #3a2a35 0%, #2e242c 100%);
+        padding: 12px 20px;
+        display: flex;
+        gap: 24px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .nav-item {
+        color: var(--text-muted);
+        text-decoration: none;
+        font-size: 13px;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        border-radius: 6px;
+        transition: all 0.2s ease;
+      }
+
+      .nav-item:hover {
+        color: var(--text-primary);
+        background: rgba(255, 255, 255, 0.05);
+      }
+
+      .nav-item.active {
+        color: var(--pink-primary);
+        background: rgba(247, 138, 151, 0.1);
+      }
+
+      /* Page Container */
+      .command-page {
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        height: calc(100vh - 60px);
+        overflow-y: auto;
+      }
+
+      /* Header */
+      .command-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .command-title {
+        font-size: 20px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin: 0;
+      }
+
+      .command-title i {
+        color: var(--pink-primary);
+      }
+
+      .header-actions {
+        display: flex;
+        gap: 10px;
+      }
+
+      .header-btn {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-subtle);
+        color: var(--text-muted);
+        padding: 8px 16px;
+        border-radius: 8px;
+        font-size: 13px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        transition: all 0.2s ease;
+      }
+
+      .header-btn:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text-primary);
+      }
+
+      .header-btn i {
+        font-size: 14px;
+      }
+
+      /* Main Grid */
+      .command-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 16px;
+        flex: 1;
+        min-height: 0;
+      }
+
+      /* Panel Base */
+      .panel {
+        background: var(--bg-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: 12px;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+
+      .panel-header {
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border-subtle);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .panel-title {
+        font-size: 14px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .panel-title .icon-linear { color: var(--purple-linear); }
+      .panel-title .icon-sentry { color: var(--orange-sentry); }
+      .panel-title .icon-ci { color: var(--green-success); }
+
+      .panel-badge {
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      .badge-purple {
+        background: rgba(94, 106, 210, 0.15);
+        color: var(--purple-linear);
+      }
+
+      .badge-orange {
+        background: rgba(242, 104, 75, 0.15);
+        color: var(--orange-sentry);
+      }
+
+      .badge-green {
+        background: rgba(63, 185, 80, 0.15);
+        color: var(--green-success);
+      }
+
+      .panel-content {
+        flex: 1;
+        overflow-y: auto;
+        padding: 8px 0;
+      }
+
+      /* Issue Item */
+      .issue-item {
+        padding: 12px 16px;
+        cursor: pointer;
+        transition: background 0.15s ease;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .issue-item:last-child {
+        border-bottom: none;
+      }
+
+      .issue-item:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .issue-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 6px;
+      }
+
+      .issue-id {
+        font-family: "Roboto Mono", monospace;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      .issue-priority {
+        width: 8px;
+        height: 8px;
+        border-radius: 2px;
+      }
+
+      .priority-urgent { background: var(--red-error); }
+      .priority-high { background: var(--orange-sentry); }
+      .priority-medium { background: var(--yellow-warning); }
+      .priority-low { background: var(--blue-info); }
+
+      .issue-title {
+        font-size: 13px;
+        font-weight: 500;
+        margin-bottom: 8px;
+        line-height: 1.4;
+      }
+
+      .issue-meta {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      .issue-label {
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 10px;
+        font-weight: 500;
+      }
+
+      .label-bug {
+        background: rgba(248, 81, 73, 0.15);
+        color: var(--red-error);
+      }
+
+      .label-feature {
+        background: rgba(94, 106, 210, 0.15);
+        color: var(--purple-linear);
+      }
+
+      .label-improvement {
+        background: rgba(63, 185, 80, 0.15);
+        color: var(--green-success);
+      }
+
+      /* Error Item (Sentry) */
+      .error-item {
+        padding: 12px 16px;
+        cursor: pointer;
+        transition: background 0.15s ease;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .error-item:last-child {
+        border-bottom: none;
+      }
+
+      .error-item:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .error-item.critical {
+        border-left: 3px solid var(--red-error);
+      }
+
+      .error-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 6px;
+      }
+
+      .error-type {
+        font-family: "Roboto Mono", monospace;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--red-error);
+      }
+
+      .error-count {
+        background: rgba(248, 81, 73, 0.2);
+        color: var(--red-error);
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+
+      .error-message {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: 8px;
+        font-family: "Roboto Mono", monospace;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .error-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .error-location {
+        font-size: 11px;
+        color: var(--text-muted);
+        font-family: "Roboto Mono", monospace;
+      }
+
+      .error-time {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      .error-actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 10px;
+      }
+
+      .error-action-btn {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-subtle);
+        color: var(--text-muted);
+        padding: 5px 10px;
+        border-radius: 5px;
+        font-size: 11px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        transition: all 0.15s ease;
+      }
+
+      .error-action-btn:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text-primary);
+      }
+
+      .error-action-btn.fix {
+        background: rgba(247, 138, 151, 0.1);
+        border-color: rgba(247, 138, 151, 0.3);
+        color: var(--pink-primary);
+      }
+
+      .error-action-btn.fix:hover {
+        background: rgba(247, 138, 151, 0.2);
+      }
+
+      /* CI Item */
+      .ci-item {
+        padding: 12px 16px;
+        cursor: pointer;
+        transition: background 0.15s ease;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .ci-item:last-child {
+        border-bottom: none;
+      }
+
+      .ci-item:hover {
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .ci-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 8px;
+      }
+
+      .ci-status {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+
+      .ci-status.success { background: var(--green-success); box-shadow: 0 0 8px rgba(63, 185, 80, 0.5); }
+      .ci-status.failed { background: var(--red-error); box-shadow: 0 0 8px rgba(248, 81, 73, 0.5); }
+      .ci-status.running { background: var(--yellow-warning); animation: pulse 1.5s infinite; }
+      .ci-status.pending { background: var(--text-muted); }
+
+      @keyframes pulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+      }
+
+      .ci-branch {
+        font-family: "Roboto Mono", monospace;
+        font-size: 12px;
+        font-weight: 500;
+      }
+
+      .ci-workflow {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: 6px;
+      }
+
+      .ci-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      .ci-duration {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+
+      .ci-actions {
+        display: flex;
+        gap: 6px;
+        margin-top: 10px;
+      }
+
+      .ci-action-btn {
+        background: rgba(255, 255, 255, 0.05);
+        border: 1px solid var(--border-subtle);
+        color: var(--text-muted);
+        padding: 5px 10px;
+        border-radius: 5px;
+        font-size: 11px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        transition: all 0.15s ease;
+      }
+
+      .ci-action-btn:hover {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text-primary);
+      }
+
+      /* Quick Actions Row */
+      .quick-actions-row {
+        background: var(--bg-card);
+        border: 1px solid var(--border-subtle);
+        border-radius: 12px;
+        padding: 16px 20px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+
+      .quick-actions-label {
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--text-muted);
+        white-space: nowrap;
+      }
+
+      .quick-action {
+        flex: 1;
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px dashed var(--border-subtle);
+        border-radius: 8px;
+        padding: 14px 16px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+      }
+
+      .quick-action:hover {
+        background: rgba(255, 255, 255, 0.05);
+        border-style: solid;
+        border-color: var(--pink-primary);
+      }
+
+      .quick-action-icon {
+        width: 36px;
+        height: 36px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+      }
+
+      .quick-action-icon.sentry {
+        background: rgba(242, 104, 75, 0.15);
+        color: var(--orange-sentry);
+      }
+
+      .quick-action-icon.linear {
+        background: rgba(94, 106, 210, 0.15);
+        color: var(--purple-linear);
+      }
+
+      .quick-action-icon.ci {
+        background: rgba(63, 185, 80, 0.15);
+        color: var(--green-success);
+      }
+
+      .quick-action-text {
+        flex: 1;
+      }
+
+      .quick-action-title {
+        font-size: 13px;
+        font-weight: 600;
+        margin-bottom: 2px;
+      }
+
+      .quick-action-desc {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+
+      .quick-action-arrow {
+        color: var(--text-muted);
+        font-size: 14px;
+      }
+
+      /* Agent Task Popup (floating) */
+      .agent-popup {
+        position: fixed;
+        bottom: 24px;
+        right: 24px;
+        width: 380px;
+        background: var(--bg-card);
+        border: 1px solid var(--pink-primary);
+        border-radius: 12px;
+        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4), 0 0 24px var(--pink-glow);
+        overflow: hidden;
+        z-index: 1000;
+      }
+
+      .agent-popup-header {
+        background: linear-gradient(135deg, rgba(247, 138, 151, 0.15), rgba(218, 119, 86, 0.1));
+        padding: 14px 16px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .agent-popup-title {
+        font-size: 13px;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .agent-popup-title i {
+        color: var(--pink-primary);
+      }
+
+      .agent-popup-close {
+        background: none;
+        border: none;
+        color: var(--text-muted);
+        cursor: pointer;
+        font-size: 14px;
+      }
+
+      .agent-popup-body {
+        padding: 16px;
+      }
+
+      .agent-error-preview {
+        background: rgba(248, 81, 73, 0.08);
+        border-left: 3px solid var(--red-error);
+        padding: 10px 12px;
+        border-radius: 0 6px 6px 0;
+        margin-bottom: 14px;
+      }
+
+      .agent-error-title {
+        font-family: "Roboto Mono", monospace;
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--red-error);
+        margin-bottom: 4px;
+      }
+
+      .agent-error-file {
+        font-size: 11px;
+        color: var(--text-muted);
+        font-family: "Roboto Mono", monospace;
+      }
+
+      .agent-select-label {
+        font-size: 12px;
+        color: var(--text-muted);
+        margin-bottom: 8px;
+      }
+
+      .agent-select-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin-bottom: 14px;
+      }
+
+      .agent-option {
+        background: rgba(255, 255, 255, 0.03);
+        border: 1px solid var(--border-subtle);
+        border-radius: 8px;
+        padding: 10px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .agent-option:hover {
+        background: rgba(255, 255, 255, 0.05);
+      }
+
+      .agent-option.selected {
+        border-color: var(--pink-primary);
+        background: rgba(247, 138, 151, 0.1);
+      }
+
+      .agent-option img {
+        width: 24px;
+        height: 24px;
+      }
+
+      .agent-option-name {
+        font-size: 10px;
+        color: var(--text-muted);
+      }
+
+      .agent-prompt-input {
+        width: 100%;
+        background: rgba(0, 0, 0, 0.3);
+        border: 1px solid var(--border-subtle);
+        border-radius: 6px;
+        padding: 10px 12px;
+        color: var(--text-primary);
+        font-size: 12px;
+        resize: none;
+        min-height: 70px;
+        font-family: inherit;
+        margin-bottom: 14px;
+      }
+
+      .agent-prompt-input:focus {
+        outline: none;
+        border-color: var(--pink-primary);
+      }
+
+      .agent-popup-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 8px;
+      }
+
+      .agent-btn {
+        padding: 8px 16px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+
+      .agent-btn.cancel {
+        background: transparent;
+        border: 1px solid var(--border-subtle);
+        color: var(--text-muted);
+      }
+
+      .agent-btn.create {
+        background: var(--pink-primary);
+        border: none;
+        color: #1c1b1b;
+      }
+
+      .agent-btn.create:hover {
+        background: #f9a0ab;
+      }
+    </style>
+  </head>
+
+  <body>
+    <!-- Navigation -->
+    <nav class="top-navbar">
+      <a class="nav-item" href="#"><i class="fal fa-tasks"></i> Create Tasks</a>
+      <a class="nav-item" href="#"><i class="fal fa-bars"></i> View Tasks</a>
+      <a class="nav-item" href="#"><i class="fal fa-key"></i> Accounts</a>
+      <a class="nav-item" href="#"><i class="fal fa-magic"></i> Skills</a>
+      <a class="nav-item" href="#"><i class="fal fa-clipboard-check"></i> Analytics</a>
+      <a class="nav-item" href="#"><i class="fal fa-code-compare"></i> Review</a>
+      <a class="nav-item active" href="#"><i class="fal fa-radar"></i> Command</a>
+    </nav>
+
+    <!-- Command Page -->
+    <section class="command-page">
+      <!-- Header -->
+      <div class="command-header">
+        <h5 class="command-title">
+          <i class="fal fa-radar"></i>
+          Command Center
+        </h5>
+        <div class="header-actions">
+          <button class="header-btn">
+            <i class="fal fa-sync-alt"></i> Refresh
+          </button>
+          <button class="header-btn">
+            <i class="fal fa-cog"></i> Configure
+          </button>
+        </div>
+      </div>
+
+      <!-- Quick Actions -->
+      <div class="quick-actions-row">
+        <span class="quick-actions-label">Quick Actions</span>
+        <div class="quick-action">
+          <div class="quick-action-icon sentry">
+            <i class="fal fa-bug"></i>
+          </div>
+          <div class="quick-action-text">
+            <div class="quick-action-title">Fix Top Error</div>
+            <div class="quick-action-desc">TypeError in auth.ts (847 events)</div>
+          </div>
+          <i class="fal fa-arrow-right quick-action-arrow"></i>
+        </div>
+        <div class="quick-action">
+          <div class="quick-action-icon linear">
+            <i class="fal fa-ticket"></i>
+          </div>
+          <div class="quick-action-text">
+            <div class="quick-action-title">Start Next Issue</div>
+            <div class="quick-action-desc">PHN-142: Add MCP support</div>
+          </div>
+          <i class="fal fa-arrow-right quick-action-arrow"></i>
+        </div>
+        <div class="quick-action">
+          <div class="quick-action-icon ci">
+            <i class="fal fa-redo"></i>
+          </div>
+          <div class="quick-action-text">
+            <div class="quick-action-title">Re-run Failed CI</div>
+            <div class="quick-action-desc">feat/review-center (2 failed)</div>
+          </div>
+          <i class="fal fa-arrow-right quick-action-arrow"></i>
+        </div>
+      </div>
+
+      <!-- Main Grid -->
+      <div class="command-grid">
+        <!-- Linear Issues -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">
+              <i class="fab fa-linear icon-linear"></i>
+              Linear Issues
+            </span>
+            <span class="panel-badge badge-purple">6 active</span>
+          </div>
+          <div class="panel-content">
+            <div class="issue-item">
+              <div class="issue-header">
+                <span class="issue-priority priority-urgent"></span>
+                <span class="issue-id">PHN-156</span>
+                <span class="issue-label label-bug">bug</span>
+              </div>
+              <div class="issue-title">Tasks not stopping properly on Windows</div>
+              <div class="issue-meta">
+                <span><i class="fal fa-user"></i> Assigned to you</span>
+                <span><i class="fal fa-clock"></i> 2h ago</span>
+              </div>
+            </div>
+            <div class="issue-item">
+              <div class="issue-header">
+                <span class="issue-priority priority-high"></span>
+                <span class="issue-id">PHN-142</span>
+                <span class="issue-label label-feature">feature</span>
+              </div>
+              <div class="issue-title">Add MCP server support for external tools</div>
+              <div class="issue-meta">
+                <span><i class="fal fa-user"></i> Assigned to you</span>
+                <span><i class="fal fa-clock"></i> 1d ago</span>
+              </div>
+            </div>
+            <div class="issue-item">
+              <div class="issue-header">
+                <span class="issue-priority priority-medium"></span>
+                <span class="issue-id">PHN-138</span>
+                <span class="issue-label label-improvement">improvement</span>
+              </div>
+              <div class="issue-title">Improve task status polling performance</div>
+              <div class="issue-meta">
+                <span><i class="fal fa-user"></i> Assigned to you</span>
+                <span><i class="fal fa-clock"></i> 3d ago</span>
+              </div>
+            </div>
+            <div class="issue-item">
+              <div class="issue-header">
+                <span class="issue-priority priority-low"></span>
+                <span class="issue-id">PHN-131</span>
+                <span class="issue-label label-feature">feature</span>
+              </div>
+              <div class="issue-title">Add keyboard shortcuts cheatsheet</div>
+              <div class="issue-meta">
+                <span><i class="fal fa-user"></i> Assigned to you</span>
+                <span><i class="fal fa-clock"></i> 5d ago</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Sentry Errors -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">
+              <i class="fal fa-exclamation-triangle icon-sentry"></i>
+              Sentry Errors
+            </span>
+            <span class="panel-badge badge-orange">12 unresolved</span>
+          </div>
+          <div class="panel-content">
+            <div class="error-item critical">
+              <div class="error-header">
+                <span class="error-type">TypeError</span>
+                <span class="error-count">847 events</span>
+              </div>
+              <div class="error-message">Cannot read property 'id' of undefined</div>
+              <div class="error-meta">
+                <span class="error-location">auth.ts:142</span>
+                <span class="error-time">12 min ago</span>
+              </div>
+              <div class="error-actions">
+                <button class="error-action-btn"><i class="fal fa-external-link"></i> View</button>
+                <button class="error-action-btn"><i class="fal fa-check"></i> Resolve</button>
+                <button class="error-action-btn fix"><i class="fal fa-robot"></i> Fix with Agent</button>
+              </div>
+            </div>
+            <div class="error-item">
+              <div class="error-header">
+                <span class="error-type">NetworkError</span>
+                <span class="error-count">234 events</span>
+              </div>
+              <div class="error-message">Failed to fetch: net::ERR_CONNECTION_REFUSED</div>
+              <div class="error-meta">
+                <span class="error-location">api.ts:89</span>
+                <span class="error-time">1h ago</span>
+              </div>
+              <div class="error-actions">
+                <button class="error-action-btn"><i class="fal fa-external-link"></i> View</button>
+                <button class="error-action-btn fix"><i class="fal fa-robot"></i> Fix with Agent</button>
+              </div>
+            </div>
+            <div class="error-item">
+              <div class="error-header">
+                <span class="error-type">RangeError</span>
+                <span class="error-count">56 events</span>
+              </div>
+              <div class="error-message">Maximum call stack size exceeded</div>
+              <div class="error-meta">
+                <span class="error-location">worktree.rs:445</span>
+                <span class="error-time">3h ago</span>
+              </div>
+              <div class="error-actions">
+                <button class="error-action-btn"><i class="fal fa-external-link"></i> View</button>
+                <button class="error-action-btn fix"><i class="fal fa-robot"></i> Fix with Agent</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- CI/CD Status -->
+        <div class="panel">
+          <div class="panel-header">
+            <span class="panel-title">
+              <i class="fab fa-github icon-ci"></i>
+              CI / CD
+            </span>
+            <span class="panel-badge badge-green">3 running</span>
+          </div>
+          <div class="panel-content">
+            <div class="ci-item">
+              <div class="ci-header">
+                <span class="ci-status running"></span>
+                <span class="ci-branch">feat/review-center</span>
+              </div>
+              <div class="ci-workflow">Build & Test</div>
+              <div class="ci-meta">
+                <span class="ci-duration"><i class="fal fa-clock"></i> 4m 23s</span>
+                <span>Triggered 5m ago</span>
+              </div>
+            </div>
+            <div class="ci-item">
+              <div class="ci-header">
+                <span class="ci-status failed"></span>
+                <span class="ci-branch">feat/mcp-server</span>
+              </div>
+              <div class="ci-workflow">Build & Test</div>
+              <div class="ci-meta">
+                <span class="ci-duration"><i class="fal fa-clock"></i> 2m 11s</span>
+                <span>12m ago</span>
+              </div>
+              <div class="ci-actions">
+                <button class="ci-action-btn"><i class="fal fa-file-alt"></i> Logs</button>
+                <button class="ci-action-btn"><i class="fal fa-redo"></i> Re-run</button>
+              </div>
+            </div>
+            <div class="ci-item">
+              <div class="ci-header">
+                <span class="ci-status success"></span>
+                <span class="ci-branch">main</span>
+              </div>
+              <div class="ci-workflow">Build & Deploy</div>
+              <div class="ci-meta">
+                <span class="ci-duration"><i class="fal fa-clock"></i> 8m 45s</span>
+                <span>1h ago</span>
+              </div>
+            </div>
+            <div class="ci-item">
+              <div class="ci-header">
+                <span class="ci-status success"></span>
+                <span class="ci-branch">fix/worktree-cleanup</span>
+              </div>
+              <div class="ci-workflow">Build & Test</div>
+              <div class="ci-meta">
+                <span class="ci-duration"><i class="fal fa-clock"></i> 5m 12s</span>
+                <span>2h ago</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Agent Task Popup -->
+    <div class="agent-popup">
+      <div class="agent-popup-header">
+        <span class="agent-popup-title">
+          <i class="fal fa-robot"></i>
+          Create Fix Task
+        </span>
+        <button class="agent-popup-close"><i class="fal fa-times"></i></button>
+      </div>
+      <div class="agent-popup-body">
+        <div class="agent-error-preview">
+          <div class="agent-error-title">TypeError: Cannot read property 'id' of undefined</div>
+          <div class="agent-error-file">auth.ts:142 · 847 events</div>
+        </div>
+        <div class="agent-select-label">Select an agent</div>
+        <div class="agent-select-grid">
+          <div class="agent-option selected">
+            <img src="images/claude-color.png" alt="Claude" onerror="this.style.display='none'">
+            <span class="agent-option-name">Claude</span>
+          </div>
+          <div class="agent-option">
+            <img src="images/chatgpt.png" alt="Codex" onerror="this.style.display='none'">
+            <span class="agent-option-name">Codex</span>
+          </div>
+          <div class="agent-option">
+            <img src="images/ampcode.png" alt="Amp" onerror="this.style.display='none'">
+            <span class="agent-option-name">Amp</span>
+          </div>
+        </div>
+        <textarea class="agent-prompt-input" placeholder="Additional context...">Fix the TypeError in auth.ts:142. The error occurs when accessing the 'id' property of an undefined user object. Add proper null checks and error handling.</textarea>
+        <div class="agent-popup-actions">
+          <button class="agent-btn cancel">Cancel</button>
+          <button class="agent-btn create">Create Task</button>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
