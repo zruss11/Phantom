@@ -1191,6 +1191,171 @@
     }
   };
 
+  // ============================================================================
+  // Transcription API (ChatGPT backend)
+  // ============================================================================
+  var transcription = {
+    /**
+     * Check if transcription is available (Codex auth exists)
+     * @returns {Promise<boolean>}
+     */
+    isAvailable: function() {
+      if (!tauriInvoke) return Promise.resolve(false);
+      return tauriInvoke('check_transcription_available').catch(function() {
+        return false;
+      });
+    },
+
+    /**
+     * Transcribe an audio file
+     * @param {string} audioPath - Path to audio file
+     * @param {string} [language] - Optional language hint (e.g., "en")
+     * @returns {Promise<string>} - Transcribed text
+     */
+    transcribeFile: function(audioPath, language) {
+      if (!tauriInvoke) return Promise.reject(new Error('Tauri not available'));
+      return tauriInvoke('transcribe_audio_file', {
+        audioPath: audioPath,
+        language: language || null
+      });
+    },
+
+    /**
+     * Transcribe audio from base64 data
+     * @param {string} base64Data - Base64-encoded audio
+     * @param {string} filename - Filename for MIME detection
+     * @param {string} contentType - MIME type (e.g., "audio/webm")
+     * @param {string} [language] - Optional language hint
+     * @returns {Promise<string>} - Transcribed text
+     */
+    transcribeBase64: function(base64Data, filename, contentType, language) {
+      if (!tauriInvoke) return Promise.reject(new Error('Tauri not available'));
+      return tauriInvoke('transcribe_audio_bytes', {
+        audioBase64: base64Data,
+        filename: filename,
+        contentType: contentType,
+        language: language || null
+      });
+    },
+
+    /**
+     * Record audio from microphone and transcribe
+     * Returns a recorder controller object
+     * @param {Object} options - Recording options
+     * @param {string} [options.language] - Language hint
+     * @param {function} [options.onTranscript] - Callback with transcribed text
+     * @param {function} [options.onError] - Error callback
+     * @param {function} [options.onRecording] - Called when recording starts
+     * @returns {Object} - { start, stop, cancel }
+     */
+    createRecorder: function(options) {
+      options = options || {};
+      var mediaRecorder = null;
+      var audioChunks = [];
+      var stream = null;
+      var isRecording = false;
+
+      return {
+        start: function() {
+          if (isRecording) return Promise.reject(new Error('Already recording'));
+
+          return navigator.mediaDevices.getUserMedia({ audio: true })
+            .then(function(mediaStream) {
+              stream = mediaStream;
+              audioChunks = [];
+
+              // Use webm for best compatibility
+              var mimeType = 'audio/webm';
+              if (!MediaRecorder.isTypeSupported(mimeType)) {
+                mimeType = 'audio/mp4';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                  mimeType = '';
+                }
+              }
+
+              mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType: mimeType } : {});
+
+              mediaRecorder.ondataavailable = function(event) {
+                if (event.data.size > 0) {
+                  audioChunks.push(event.data);
+                }
+              };
+
+              mediaRecorder.start(100); // Collect data every 100ms
+              isRecording = true;
+
+              if (options.onRecording) options.onRecording();
+              console.log('[Transcription] Recording started');
+            })
+            .catch(function(err) {
+              if (options.onError) options.onError(err);
+              throw err;
+            });
+        },
+
+        stop: function() {
+          return new Promise(function(resolve, reject) {
+            if (!mediaRecorder || !isRecording) {
+              reject(new Error('Not recording'));
+              return;
+            }
+
+            mediaRecorder.onstop = function() {
+              isRecording = false;
+
+              // Stop all tracks
+              if (stream) {
+                stream.getTracks().forEach(function(track) { track.stop(); });
+              }
+
+              // Create blob and convert to base64
+              var mimeType = mediaRecorder.mimeType || 'audio/webm';
+              var audioBlob = new Blob(audioChunks, { type: mimeType });
+
+              console.log('[Transcription] Recording stopped, size:', audioBlob.size);
+
+              // Convert to base64 and transcribe
+              var reader = new FileReader();
+              reader.onloadend = function() {
+                var base64 = reader.result.split(',')[1];
+                var ext = mimeType.split('/')[1] || 'webm';
+                var filename = 'recording.' + ext.split(';')[0];
+
+                transcription.transcribeBase64(base64, filename, mimeType, options.language)
+                  .then(function(text) {
+                    if (options.onTranscript) options.onTranscript(text);
+                    resolve(text);
+                  })
+                  .catch(function(err) {
+                    if (options.onError) options.onError(err);
+                    reject(err);
+                  });
+              };
+              reader.readAsDataURL(audioBlob);
+            };
+
+            mediaRecorder.stop();
+          });
+        },
+
+        cancel: function() {
+          if (mediaRecorder && isRecording) {
+            mediaRecorder.stop();
+          }
+          if (stream) {
+            stream.getTracks().forEach(function(track) { track.stop(); });
+          }
+          isRecording = false;
+          audioChunks = [];
+        },
+
+        isRecording: function() {
+          return isRecording;
+        }
+      };
+    }
+  };
+
   window.tauriBridge = {
     ipcRenderer: ipcRenderer,
     remote: remote,
@@ -1198,7 +1363,8 @@
     webFrame: webFrame,
     clipboard: clipboard,
     app: app,
-    window: bridgeWindow
+    window: bridgeWindow,
+    transcription: transcription
   };
 
   window.tauriEmitEvent = emitEvent;

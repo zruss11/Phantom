@@ -75,6 +75,46 @@ This is where it gets fun. See your token usage across both agents. Compare cach
 - **Model distribution** — Which models are doing the heavy lifting
 - **Head-to-head** — Because everything's better with a leaderboard
 
+### Command Center Integrations
+
+The Command Center pulls issues and tasks from your development tools. Here's how to connect each one:
+
+#### GitHub
+
+Uses the GitHub CLI (`gh`) — no token needed if you're already authenticated.
+
+```bash
+# Check if you're logged in
+gh auth status
+
+# If not, authenticate
+gh auth login
+```
+
+#### Linear
+
+1. Go to **[Linear Settings → API](https://linear.app/settings/api)**
+2. Click **"Create new API key"**
+3. Give it a label (e.g., "Phantom Harness")
+4. Copy the key and paste it into the Command Center config
+
+The key looks like: `lin_api_xxxxxxxxxx`
+
+#### Sentry
+
+1. Go to **[Sentry Settings → Auth Tokens](https://sentry.io/settings/account/api/auth-tokens/)**
+2. Click **"Create New Token"**
+3. Select these scopes:
+   - `org:read` — List organizations
+   - `project:read` — List projects
+   - `event:read` — Read issues/events
+4. Name it (e.g., "Phantom Harness") and create
+5. Copy the token and paste it into the Command Center config
+
+The token looks like: `sntrys_eyJpYXQ...`
+
+> **Note:** Use a Personal Auth Token (not Organization) so you can access all your orgs/projects.
+
 ---
 
 <p align="center">
@@ -188,6 +228,17 @@ cargo tauri build
 ```
 
 The built app will be in `src-tauri/target/release/bundle/`.
+
+### Custom DMG (macOS)
+
+The installer window can be customized to match Phantom's styling. After building:
+
+```bash
+scripts/dmg/build-dmg.sh
+```
+
+This produces a branded DMG at `src-tauri/target/release/bundle/dmg/Phantom-<version>-custom.dmg`.
+Replace `scripts/dmg/phantom-dmg-bg.png` to update the installer background.
 
 ---
 

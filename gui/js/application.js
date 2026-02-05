@@ -3519,6 +3519,46 @@ init();
     }
   };
 
+  // Create task from Command Center - navigates to create page and pre-fills form
+  window.createTaskFromCommandCenter = function (agentId, prompt) {
+    console.log('[Application] Creating task from Command Center:', { agentId, prompt });
+
+    // Navigate to create tasks page
+    if (typeof switchToPage === 'function') {
+      switchToPage('createTasksPage');
+    } else {
+      const navEl = document.querySelector('[data-page="createTasksPage"]');
+      if (navEl) navEl.click();
+    }
+
+    // Wait for navigation to complete, then set agent and prompt
+    requestAnimationFrame(() => {
+      // Select the agent if provided
+      if (agentId && window.selectAgentById) {
+        window.selectAgentById(agentId);
+      }
+
+      // Set the prompt text if provided
+      if (prompt) {
+        const promptEl = document.getElementById('initialPrompt');
+        if (promptEl) {
+          // Set the text content (this is a contenteditable div)
+          promptEl.innerText = prompt;
+          // Update placeholder state
+          if (window.updatePromptPlaceholder) {
+            window.updatePromptPlaceholder();
+          }
+          // Focus the prompt
+          promptEl.focus();
+        }
+      }
+    });
+  };
+
+  // Expose Application namespace for external modules
+  window.Application = window.Application || {};
+  window.Application.createTaskFromCommandCenter = window.createTaskFromCommandCenter;
+
   // Expose updateWorktreeLock for external use
   window.updateWorktreeLock = updateWorktreeLock;
 
@@ -4143,6 +4183,92 @@ init();
     });
     attachImageBtn.addEventListener("click", () => {
       attachmentInput?.click();
+    });
+  }
+
+  // Microphone button for voice transcription (Create Tasks page)
+  const promptMicBtn = document.getElementById("promptMicBtn");
+  if (promptMicBtn && window.tauriBridge?.transcription) {
+    let recorder = null;
+
+    // Check if transcription is available and update button state
+    window.tauriBridge.transcription.isAvailable().then((available) => {
+      if (!available) {
+        promptMicBtn.disabled = true;
+        promptMicBtn.title = "Voice input unavailable - login to Codex first";
+        promptMicBtn.style.opacity = "0.4";
+      }
+    });
+
+    promptMicBtn.addEventListener("click", async () => {
+      const promptEl = document.getElementById("initialPrompt");
+      if (!promptEl) return;
+
+      // If already recording, stop
+      if (recorder && recorder.isRecording()) {
+        promptMicBtn.classList.remove("recording");
+        promptMicBtn.classList.add("transcribing");
+        promptMicBtn.querySelector("i").className = "fas fa-spinner";
+
+        try {
+          await recorder.stop();
+        } catch (err) {
+          console.error("[Mic] Transcription error:", err);
+          sendNotification("Transcription failed: " + (err.message || err), "red");
+        } finally {
+          promptMicBtn.classList.remove("transcribing");
+          promptMicBtn.querySelector("i").className = "fas fa-microphone";
+          recorder = null;
+        }
+        return;
+      }
+
+      // Start recording
+      recorder = window.tauriBridge.transcription.createRecorder({
+        language: "en",
+        onRecording: () => {
+          promptMicBtn.classList.add("recording");
+          promptMicBtn.querySelector("i").className = "fas fa-stop";
+        },
+        onTranscript: (text) => {
+          // Append transcribed text to prompt
+          const trimmedText = text.trim();
+          if (trimmedText) {
+            const currentText = promptEl.textContent || "";
+            const separator = currentText.trim() ? " " : "";
+            promptEl.textContent = currentText + separator + trimmedText;
+            // Focus and place cursor at end
+            promptEl.focus();
+            const range = document.createRange();
+            range.selectNodeContents(promptEl);
+            range.collapse(false);
+            const selection = window.getSelection();
+            selection.removeAllRanges();
+            selection.addRange(range);
+            // Trigger input event for placeholder
+            promptEl.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        },
+        onError: (err) => {
+          console.error("[Mic] Recording error:", err);
+          sendNotification("Recording failed: " + (err.message || err), "red");
+          promptMicBtn.classList.remove("recording", "transcribing");
+          promptMicBtn.querySelector("i").className = "fas fa-microphone";
+          recorder = null;
+        }
+      });
+
+      try {
+        await recorder.start();
+      } catch (err) {
+        console.error("[Mic] Failed to start recording:", err);
+        if (err.name === "NotAllowedError") {
+          sendNotification("Microphone access denied. Please allow microphone access.", "red");
+        } else {
+          sendNotification("Could not start recording: " + (err.message || err), "red");
+        }
+        recorder = null;
+      }
     });
   }
 
@@ -5472,7 +5598,9 @@ init();
     "nav.accounts": { mod: true, key: "3" },
     "nav.skills": { mod: true, key: "4" },
     "nav.analytics": { mod: true, key: "5" },
-    "nav.settings": { mod: true, key: "6" },
+    "nav.review": { mod: true, key: "6" },
+    "nav.command": { mod: true, key: "7" },
+    "nav.settings": { mod: true, key: "8" },
     // Agent selection
     "agent.codex": { mod: true, shift: true, key: "1" },
     "agent.claude": { mod: true, shift: true, key: "2" },
@@ -5493,6 +5621,8 @@ init();
     "nav.accounts": () => switchToPage("accountsPage"),
     "nav.skills": () => switchToPage("skillsPage"),
     "nav.analytics": () => switchToPage("analyticsPage"),
+    "nav.review": () => switchToPage("reviewPage"),
+    "nav.command": () => switchToPage("commandPage"),
     "nav.settings": () => switchToPage("settingsPage"),
     "agent.codex": () => window.selectAgentById && window.selectAgentById("codex"),
     "agent.claude": () => window.selectAgentById && window.selectAgentById("claude-code"),

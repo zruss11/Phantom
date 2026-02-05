@@ -1,6 +1,7 @@
 mod amp_cli;
 mod claude_local_usage;
 mod claude_usage_watcher;
+mod command_center;
 mod db;
 mod debug_http;
 mod discord_bot;
@@ -10,10 +11,15 @@ mod mcp_server;
 mod namegen;
 mod opencode_cli;
 mod summarize;
+mod transcription;
 mod utils;
 mod webhook;
 mod worktree;
 
+use command_center::{
+    CommandCenterData, GhCliAuthStatus, GithubIssue, GithubWorkflow,
+    LinearCycle, LinearIssue, LinearProject, SentryError, SentryOrganization, SentryProject,
+};
 use utils::{default_search_paths, resolve_command_path, resolve_gh_binary, truncate_str};
 
 use chrono::TimeZone;
@@ -539,6 +545,38 @@ struct Settings {
     pub(crate) mcp_port: Option<u16>,
     #[serde(rename = "mcpToken")]
     pub(crate) mcp_token: Option<String>,
+
+    // Command Center settings
+    #[serde(rename = "commandCenterEnabled")]
+    command_center_enabled: Option<bool>,
+    #[serde(rename = "commandCenterRefreshInterval")]
+    command_center_refresh_interval: Option<u32>, // minutes, default 15
+
+    // GitHub Integration
+    #[serde(rename = "githubAuthMethod")]
+    github_auth_method: Option<String>, // "gh-cli", "token"
+    #[serde(rename = "githubToken")]
+    github_token: Option<String>,
+    #[serde(rename = "githubWatchedRepos")]
+    github_watched_repos: Option<Vec<String>>, // ["owner/repo", ...]
+
+    // Linear Integration
+    #[serde(rename = "linearAuthMethod")]
+    linear_auth_method: Option<String>, // "oauth", "token"
+    #[serde(rename = "linearToken")]
+    linear_token: Option<String>,
+    #[serde(rename = "linearWatchedProjects")]
+    linear_watched_projects: Option<Vec<String>>,
+    #[serde(rename = "linearWatchedCycles")]
+    linear_watched_cycles: Option<Vec<String>>,
+
+    // Sentry Integration
+    #[serde(rename = "sentryToken")]
+    sentry_token: Option<String>,
+    #[serde(rename = "sentryOrganization")]
+    sentry_organization: Option<String>,
+    #[serde(rename = "sentryWatchedProjects")]
+    sentry_watched_projects: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -11189,6 +11227,66 @@ async fn get_attachment_base64(relative_path: String) -> Result<String, String> 
     Ok(STANDARD.encode(&data))
 }
 
+// ============================================================================
+// Transcription Commands (ChatGPT backend API)
+// ============================================================================
+
+/// Check if transcription is available (Codex auth exists)
+#[tauri::command]
+fn check_transcription_available() -> bool {
+    transcription::is_transcription_available()
+}
+
+/// Transcribe an audio file using ChatGPT's transcription API
+///
+/// # Arguments
+/// * `audio_path` - Path to the audio file
+/// * `language` - Optional language hint (e.g., "en", "es")
+#[tauri::command]
+async fn transcribe_audio_file(
+    audio_path: String,
+    language: Option<String>,
+) -> Result<String, String> {
+    transcription::transcribe_audio(&audio_path, language.as_deref()).await
+}
+
+/// Transcribe raw audio bytes using ChatGPT's transcription API
+/// Accepts base64-encoded audio data from the frontend
+///
+/// # Arguments
+/// * `audio_base64` - Base64-encoded audio data
+/// * `filename` - Filename (used for content-type detection)
+/// * `content_type` - MIME type of the audio (e.g., "audio/webm")
+/// * `language` - Optional language hint
+#[tauri::command]
+async fn transcribe_audio_bytes(
+    audio_base64: String,
+    filename: String,
+    content_type: String,
+    language: Option<String>,
+) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    // Decode base64
+    let audio_data = STANDARD
+        .decode(&audio_base64)
+        .map_err(|e| format!("Invalid base64 audio data: {}", e))?;
+
+    // Get auth
+    let (token, account_id) = transcription::get_codex_auth()?;
+    let account_id = account_id.ok_or("Codex account_id required for transcription")?;
+
+    transcription::transcribe_bytes(
+        &audio_data,
+        &filename,
+        &content_type,
+        language.as_deref(),
+        &token,
+        &account_id,
+    )
+    .await
+}
+
 // =============================================================================
 // AUTO-UPDATE COMMANDS
 // =============================================================================
@@ -11239,6 +11337,296 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+// ============== Command Center Commands ==============
+
+#[tauri::command]
+async fn check_gh_cli_auth() -> Result<GhCliAuthStatus, String> {
+    Ok(command_center::github::check_gh_cli_auth())
+}
+
+#[tauri::command]
+async fn get_github_repo_from_path(path: String) -> Result<command_center::github::GitRepoInfo, String> {
+    command_center::github::get_github_repo_from_path(&path)
+}
+
+#[tauri::command]
+async fn fetch_github_issues(state: State<'_, AppState>) -> Result<Vec<GithubIssue>, String> {
+    let settings = state.settings.lock().await;
+    let repos = settings.github_watched_repos.clone().unwrap_or_default();
+    let auth_method = settings.github_auth_method.clone().unwrap_or_else(|| "gh-cli".to_string());
+    let token = settings.github_token.clone();
+    drop(settings);
+
+    if repos.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut all_issues = Vec::new();
+    let mut errors = Vec::new();
+
+    for repo in &repos {
+        let result = if auth_method == "gh-cli" {
+            command_center::github::fetch_issues_gh_cli(repo).await
+        } else if let Some(ref t) = token {
+            let client = reqwest::Client::new();
+            command_center::github::fetch_issues_rest(&client, t, repo).await
+        } else {
+            Err("No GitHub token configured".to_string())
+        };
+
+        match result {
+            Ok(issues) => all_issues.extend(issues),
+            Err(e) => errors.push(format!("{}: {}", repo, e)),
+        }
+    }
+
+    if !errors.is_empty() {
+        println!("[CommandCenter] GitHub fetch errors: {:?}", errors);
+    }
+
+    // Sort by updated_at descending
+    all_issues.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(all_issues)
+}
+
+#[tauri::command]
+async fn fetch_github_workflows(state: State<'_, AppState>) -> Result<Vec<GithubWorkflow>, String> {
+    let settings = state.settings.lock().await;
+    let repos = settings.github_watched_repos.clone().unwrap_or_default();
+    let auth_method = settings.github_auth_method.clone().unwrap_or_else(|| "gh-cli".to_string());
+    let token = settings.github_token.clone();
+    drop(settings);
+
+    if repos.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let mut all_workflows = Vec::new();
+
+    for repo in &repos {
+        let result = if auth_method == "gh-cli" {
+            command_center::github::fetch_workflows_gh_cli(repo).await
+        } else if let Some(ref t) = token {
+            let client = reqwest::Client::new();
+            command_center::github::fetch_workflows_rest(&client, t, repo).await
+        } else {
+            continue;
+        };
+
+        if let Ok(workflows) = result {
+            all_workflows.extend(workflows);
+        }
+    }
+
+    // Sort by created_at descending
+    all_workflows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(all_workflows)
+}
+
+#[tauri::command]
+async fn rerun_github_workflow(repo: String, run_id: u64) -> Result<(), String> {
+    command_center::github::rerun_workflow_gh_cli(&repo, run_id).await
+}
+
+#[tauri::command]
+async fn fetch_linear_projects(state: State<'_, AppState>) -> Result<Vec<LinearProject>, String> {
+    let settings = state.settings.lock().await;
+    let token = settings.linear_token.clone();
+    drop(settings);
+
+    let token = token.ok_or("Linear token not configured")?;
+    let client = reqwest::Client::new();
+    command_center::linear::fetch_projects(&client, &token).await
+}
+
+#[tauri::command]
+async fn fetch_linear_cycles(state: State<'_, AppState>) -> Result<Vec<LinearCycle>, String> {
+    let settings = state.settings.lock().await;
+    let token = settings.linear_token.clone();
+    drop(settings);
+
+    let token = token.ok_or("Linear token not configured")?;
+    let client = reqwest::Client::new();
+    command_center::linear::fetch_cycles(&client, &token).await
+}
+
+#[tauri::command]
+async fn fetch_linear_issues(state: State<'_, AppState>) -> Result<Vec<LinearIssue>, String> {
+    let settings = state.settings.lock().await;
+    let token = settings.linear_token.clone();
+    let project_ids = settings.linear_watched_projects.clone().unwrap_or_default();
+    let cycle_ids = settings.linear_watched_cycles.clone().unwrap_or_default();
+    drop(settings);
+
+    let token = token.ok_or("Linear token not configured")?;
+
+    if project_ids.is_empty() && cycle_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let client = reqwest::Client::new();
+    command_center::linear::fetch_issues(&client, &token, &project_ids, &cycle_ids).await
+}
+
+#[tauri::command]
+async fn fetch_sentry_organizations(state: State<'_, AppState>) -> Result<Vec<SentryOrganization>, String> {
+    let settings = state.settings.lock().await;
+    let token = settings.sentry_token.clone();
+    drop(settings);
+
+    let token = token.ok_or("Sentry token not configured")?;
+    let client = reqwest::Client::new();
+    command_center::sentry::fetch_organizations(&client, &token).await
+}
+
+#[tauri::command]
+async fn fetch_sentry_projects(state: State<'_, AppState>) -> Result<Vec<SentryProject>, String> {
+    let settings = state.settings.lock().await;
+    let token = settings.sentry_token.clone();
+    let org = settings.sentry_organization.clone();
+    drop(settings);
+
+    let token = token.ok_or("Sentry token not configured")?;
+    let org = org.ok_or("Sentry organization not configured")?;
+    let client = reqwest::Client::new();
+    command_center::sentry::fetch_projects(&client, &token, &org).await
+}
+
+#[tauri::command]
+async fn fetch_sentry_errors(state: State<'_, AppState>) -> Result<Vec<SentryError>, String> {
+    let settings = state.settings.lock().await;
+    let token = settings.sentry_token.clone();
+    let org = settings.sentry_organization.clone();
+    let project_slugs = settings.sentry_watched_projects.clone().unwrap_or_default();
+    drop(settings);
+
+    eprintln!("[Sentry] fetch_sentry_errors - token_set: {}, org: {:?}, projects: {:?}",
+        token.is_some(), org, project_slugs);
+
+    let token = token.ok_or("Sentry token not configured")?;
+    let org = org.ok_or("Sentry organization not configured")?;
+
+    if project_slugs.is_empty() {
+        eprintln!("[Sentry] No projects configured, returning empty");
+        return Ok(vec![]);
+    }
+
+    eprintln!("[Sentry] Fetching errors for org: {}, projects: {:?}", org, project_slugs);
+    let client = reqwest::Client::new();
+    let result = command_center::sentry::fetch_errors(&client, &token, &org, &project_slugs).await;
+
+    match &result {
+        Ok(errors) => eprintln!("[Sentry] API returned {} errors", errors.len()),
+        Err(e) => eprintln!("[Sentry] API error: {}", e),
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn resolve_sentry_issue(issue_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let settings = state.settings.lock().await;
+    let token = settings.sentry_token.clone();
+    drop(settings);
+
+    let token = token.ok_or("Sentry token not configured")?;
+    let client = reqwest::Client::new();
+    command_center::sentry::resolve_issue(&client, &token, &issue_id).await
+}
+
+// Config modal commands - accept token directly for testing before saving
+#[tauri::command]
+async fn cc_fetch_linear_projects(token: String) -> Result<Vec<LinearProject>, String> {
+    if token.is_empty() {
+        return Err("Linear token is required".to_string());
+    }
+    let client = reqwest::Client::new();
+    command_center::linear::fetch_projects(&client, &token).await
+}
+
+#[tauri::command]
+async fn cc_fetch_sentry_organizations(token: String) -> Result<Vec<SentryOrganization>, String> {
+    if token.is_empty() {
+        return Err("Sentry token is required".to_string());
+    }
+    let client = reqwest::Client::new();
+    command_center::sentry::fetch_organizations(&client, &token).await
+}
+
+#[tauri::command]
+async fn cc_fetch_sentry_projects(token: String, org: String) -> Result<Vec<SentryProject>, String> {
+    if token.is_empty() {
+        return Err("Sentry token is required".to_string());
+    }
+    if org.is_empty() {
+        return Err("Sentry organization is required".to_string());
+    }
+    let client = reqwest::Client::new();
+    command_center::sentry::fetch_projects(&client, &token, &org).await
+}
+
+#[tauri::command]
+async fn fetch_command_center_data(state: State<'_, AppState>) -> Result<CommandCenterData, String> {
+    let settings = state.settings.lock().await;
+    let enabled = settings.command_center_enabled.unwrap_or(false);
+    let sentry_token_set = settings.sentry_token.is_some();
+    let sentry_org = settings.sentry_organization.clone();
+    let sentry_projects = settings.sentry_watched_projects.clone();
+    drop(settings);
+
+    eprintln!("[CommandCenter] Fetching data - enabled: {}, sentry_token_set: {}, sentry_org: {:?}, sentry_projects: {:?}",
+        enabled, sentry_token_set, sentry_org, sentry_projects);
+
+    if !enabled {
+        eprintln!("[CommandCenter] Command Center is disabled, returning empty data");
+        return Ok(CommandCenterData::default());
+    }
+
+    let mut data = CommandCenterData::default();
+    let mut errors = Vec::new();
+
+    // Fetch GitHub data
+    match fetch_github_issues(state.clone()).await {
+        Ok(issues) => data.github_issues = issues,
+        Err(e) => errors.push(format!("GitHub issues: {}", e)),
+    }
+
+    match fetch_github_workflows(state.clone()).await {
+        Ok(workflows) => data.github_workflows = workflows,
+        Err(e) => errors.push(format!("GitHub workflows: {}", e)),
+    }
+
+    // Fetch Linear data
+    match fetch_linear_issues(state.clone()).await {
+        Ok(issues) => data.linear_issues = issues,
+        Err(e) if !e.contains("not configured") => errors.push(format!("Linear: {}", e)),
+        _ => {}
+    }
+
+    // Fetch Sentry data
+    eprintln!("[CommandCenter] Fetching Sentry errors...");
+    match fetch_sentry_errors(state.clone()).await {
+        Ok(errs) => {
+            eprintln!("[CommandCenter] Sentry returned {} errors", errs.len());
+            data.sentry_errors = errs;
+        },
+        Err(e) => {
+            eprintln!("[CommandCenter] Sentry fetch error: {}", e);
+            if !e.contains("not configured") {
+                errors.push(format!("Sentry: {}", e));
+            }
+        }
+    }
+
+    data.last_updated = chrono::Utc::now().to_rfc3339();
+    data.errors = errors;
+
+    eprintln!("[CommandCenter] Data fetch complete - sentry_errors: {}, data_errors: {:?}",
+        data.sentry_errors.len(), data.errors);
+
+    Ok(data)
 }
 
 fn main() {
@@ -11553,11 +11941,32 @@ fn main() {
             get_pending_attachments,
             delete_attachment,
             get_attachment_base64,
+            // Transcription commands
+            check_transcription_available,
+            transcribe_audio_file,
+            transcribe_audio_bytes,
             // Code review commands
             gather_code_review_context,
             // Auto-update commands
             check_for_updates,
-            install_update
+            install_update,
+            // Command Center commands
+            check_gh_cli_auth,
+            get_github_repo_from_path,
+            fetch_github_issues,
+            fetch_github_workflows,
+            rerun_github_workflow,
+            fetch_linear_projects,
+            fetch_linear_cycles,
+            fetch_linear_issues,
+            fetch_sentry_organizations,
+            fetch_sentry_projects,
+            fetch_sentry_errors,
+            resolve_sentry_issue,
+            cc_fetch_linear_projects,
+            cc_fetch_sentry_organizations,
+            cc_fetch_sentry_projects,
+            fetch_command_center_data
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
