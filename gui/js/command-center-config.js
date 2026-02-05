@@ -169,20 +169,26 @@
     // GitHub
     var ghAuthMethod = document.querySelector('input[name="ghAuthMethod"]:checked');
     settings.githubAuthMethod = ghAuthMethod ? ghAuthMethod.value : 'gh-cli';
-    settings.githubToken = document.getElementById('ccGithubToken')?.value || '';
+    settings.githubToken = emptyToNull(document.getElementById('ccGithubToken')?.value);
     settings.githubWatchedRepos = state.githubRepos.slice();
 
     // Linear
-    settings.linearToken = document.getElementById('ccLinearToken')?.value || '';
+    settings.linearToken = emptyToNull(document.getElementById('ccLinearToken')?.value);
     settings.linearWatchedProjects = getCheckedValues('ccLinearProjectsList');
 
     // Sentry
-    settings.sentryToken = document.getElementById('ccSentryToken')?.value || '';
+    settings.sentryToken = emptyToNull(document.getElementById('ccSentryToken')?.value);
     var sentryOrgSelect = document.getElementById('ccSentryOrg');
-    settings.sentryOrganization = sentryOrgSelect ? sentryOrgSelect.value : '';
+    settings.sentryOrganization = emptyToNull(sentryOrgSelect ? sentryOrgSelect.value : '');
     settings.sentryWatchedProjects = getCheckedValues('ccSentryProjectsList');
 
     return settings;
+  }
+
+  function emptyToNull(value) {
+    if (value == null) return null;
+    var trimmed = String(value).trim();
+    return trimmed.length ? trimmed : null;
   }
 
   /**
