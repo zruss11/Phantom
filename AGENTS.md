@@ -8,6 +8,7 @@
 
 ## Build, Test, and Development Commands
 Run from the repository root unless noted.
+- `cd gui && python3 -m http.server 8000` (or `npx serve gui -l 8000`) — serve the GUI locally for dev.
 - `cd src-tauri && cargo tauri dev` — run the desktop app in development mode.
 - `cd src-tauri && cargo build` — build the Tauri binary.
 - `cd src-tauri && cargo test` — run Rust unit tests (see `src-tauri/src/namegen.rs`, `src-tauri/src/worktree.rs`).
