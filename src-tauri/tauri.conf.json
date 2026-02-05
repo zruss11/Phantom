@@ -22,7 +22,7 @@
     ],
     "macOS": {
       "dmg": {
-        "background": "dist/images/phantom-bg.png",
+        "background": "./icons/dmg-background.png",
         "windowSize": {
           "width": 540,
           "height": 380
@@ -40,7 +40,7 @@
   },
   "productName": "Phantom",
   "mainBinaryName": "Phantom",
-  "version": "1.0.3-alpha2",
+  "version": "1.0.3-alpha3",
   "identifier": "com.phantom.app",
   "plugins": {
     "updater": {
