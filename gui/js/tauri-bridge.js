@@ -425,6 +425,12 @@
         if (channel === 'pickProjectPath') {
           return tauriInvoke('pick_project_path');
         }
+        if (channel === 'listDirectory') {
+          return tauriInvoke('list_directory', { path: args[0] || null });
+        }
+        if (channel === 'getQuickAccessPaths') {
+          return tauriInvoke('get_quick_access_paths');
+        }
         if (channel === 'getRepoBranches') {
           return tauriInvoke('get_repo_branches', { projectPath: args[0] || null });
         }
@@ -816,6 +822,27 @@
           }
           case 'pickProjectPath':
             resolve(mockData.projectPath || '~');
+            break;
+          case 'listDirectory':
+            // Mock: return home directory with sample folders
+            resolve([
+              '/Users/mock',
+              [
+                { name: 'Desktop', path: '/Users/mock/Desktop', is_dir: true, is_hidden: false, is_git_repo: false },
+                { name: 'Documents', path: '/Users/mock/Documents', is_dir: true, is_hidden: false, is_git_repo: false },
+                { name: 'Development', path: '/Users/mock/Development', is_dir: true, is_hidden: false, is_git_repo: false },
+                { name: '.config', path: '/Users/mock/.config', is_dir: true, is_hidden: true, is_git_repo: false }
+              ]
+            ]);
+            break;
+          case 'getQuickAccessPaths':
+            // Mock: return common quick access paths
+            resolve([
+              ['Home', '/Users/mock'],
+              ['Desktop', '/Users/mock/Desktop'],
+              ['Documents', '/Users/mock/Documents'],
+              ['Development', '/Users/mock/Development']
+            ]);
             break;
           case 'getRepoBranches':
             resolve({

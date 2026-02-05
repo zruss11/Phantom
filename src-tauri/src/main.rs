@@ -1,7 +1,6 @@
+mod amp_cli;
 mod claude_local_usage;
 mod claude_usage_watcher;
-mod amp_cli;
-mod opencode_cli;
 mod db;
 mod debug_http;
 mod discord_bot;
@@ -9,6 +8,7 @@ mod local_usage;
 mod logger;
 mod mcp_server;
 mod namegen;
+mod opencode_cli;
 mod summarize;
 mod utils;
 mod webhook;
@@ -137,10 +137,29 @@ fn is_auth_error(error: &str) -> bool {
         || error_lower.contains("access token could not be refreshed")
 }
 
+/// Check if an error indicates Docker is installed but the daemon isn't running/reachable.
+fn is_docker_daemon_unavailable_error(error: &str) -> bool {
+    let error_lower = error.to_lowercase();
+
+    // Common Docker CLI stderr when the daemon/socket isn't available.
+    error_lower.contains("cannot connect to the docker daemon")
+        || error_lower.contains("is the docker daemon running")
+        || (error_lower.contains("docker.sock") && error_lower.contains("cannot connect"))
+        || (error_lower.contains("docker")
+            && error_lower.contains("cannot connect")
+            && error_lower.contains("daemon"))
+}
+
 /// Format an Agent error for display to the user
 /// Returns (formatted_message, error_type) where error_type is "terminated", "auth_expired", or "error"
 fn format_agent_error(error: &str) -> (String, &'static str) {
-    if is_auth_error(error) {
+    if is_docker_daemon_unavailable_error(error) {
+        (
+            "Docker isn't running. Start Docker (Docker Desktop or OrbStack) and try again."
+                .to_string(),
+            "error",
+        )
+    } else if is_auth_error(error) {
         (
             "Authentication expired. Please run 'codex login' in your terminal or sign in again from Settings.".to_string(),
             "auth_expired"
@@ -157,6 +176,19 @@ fn format_agent_error(error: &str) -> (String, &'static str) {
         )
     } else {
         (error.to_string(), "error")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_agent_error;
+
+    #[test]
+    fn formats_docker_daemon_unavailable_error() {
+        let raw = "agent CLI exited with exit status: 125: docker: Cannot connect to the Docker daemon at unix:///Users/zachrussell/.orbstack/run/docker.sock. Is the docker daemon running?";
+        let (formatted, kind) = format_agent_error(raw);
+        assert_eq!(kind, "error");
+        assert!(formatted.contains("Start Docker"), "{formatted}");
     }
 }
 
@@ -1144,7 +1176,6 @@ fn auth_env_for(
     }
     env
 }
-
 
 fn resolve_codex_account_home(
     conn: &rusqlite::Connection,
@@ -2358,12 +2389,7 @@ struct ClaudeOauthSpawnSpec {
     env: Vec<(String, String)>,
 }
 
-fn push_docker_env(
-    args: &mut Vec<String>,
-    env_keys: &mut HashSet<String>,
-    key: &str,
-    value: &str,
-) {
+fn push_docker_env(args: &mut Vec<String>, env_keys: &mut HashSet<String>, key: &str, value: &str) {
     if env_keys.insert(key.to_string()) {
         args.push("-e".to_string());
         args.push(format!("{}={}", key, value));
@@ -2446,7 +2472,8 @@ fn build_claude_docker_spawn_spec(
         }
     }
 
-    let workspace_root = std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace_root =
+        std::fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     args.push("-v".to_string());
     args.push(format!(
         "{}:{}",
@@ -2782,7 +2809,10 @@ fn validate_claude_oauth_url(url: &str) -> bool {
 fn extract_oauth_url(line: &str, validator: fn(&str) -> bool) -> Option<String> {
     for token in line.split_whitespace() {
         let trimmed = token.trim_matches(|c: char| {
-            matches!(c, '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | '.' | ';')
+            matches!(
+                c,
+                '"' | '\'' | '(' | ')' | '[' | ']' | '<' | '>' | ',' | '.' | ';'
+            )
         });
         if trimmed.starts_with("https://") && validator(trimmed) {
             return Some(trimmed.to_string());
@@ -2827,7 +2857,15 @@ async fn spawn_agent_client(
     env: &[(String, String)],
     spawn_spec: AgentSpawnSpec,
 ) -> Result<Arc<AgentProcessClient>, String> {
-    match AgentProcessClient::spawn(&spawn_spec.command, &spawn_spec.args, cwd, env, spawn_spec.cli_kind).await {
+    match AgentProcessClient::spawn(
+        &spawn_spec.command,
+        &spawn_spec.args,
+        cwd,
+        env,
+        spawn_spec.cli_kind,
+    )
+    .await
+    {
         Ok(client) => {
             tracing::info!(agent_id = %agent.id, command = %spawn_spec.command, "Agent CLI spawned");
             Ok(Arc::new(client))
@@ -3589,6 +3627,143 @@ async fn pick_project_path(app: tauri::AppHandle) -> Option<String> {
 
     let result = app.dialog().file().blocking_pick_folder();
     result.map(|file_path| file_path.to_string())
+}
+
+/// Entry for the custom file browser
+#[derive(Debug, Clone, Serialize)]
+struct FileBrowserEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    is_hidden: bool,
+    is_git_repo: bool,
+}
+
+/// List directory contents for the custom file browser
+#[tauri::command]
+async fn list_directory(path: Option<String>) -> Result<(String, Vec<FileBrowserEntry>), String> {
+    use std::fs;
+    use std::path::PathBuf;
+
+    // Determine the directory to list
+    let dir_path = match path {
+        Some(p) if !p.is_empty() => {
+            let expanded = if p.starts_with('~') {
+                dirs::home_dir()
+                    .map(|home| home.join(&p[1..].trim_start_matches('/')))
+                    .unwrap_or_else(|| PathBuf::from(&p))
+            } else {
+                PathBuf::from(&p)
+            };
+            expanded
+        }
+        _ => dirs::home_dir().unwrap_or_else(|| PathBuf::from("/")),
+    };
+
+    // Canonicalize to resolve symlinks and get absolute path
+    let canonical_path = dir_path
+        .canonicalize()
+        .map_err(|e| format!("Cannot access path: {}", e))?;
+
+    let current_path = canonical_path.to_string_lossy().to_string();
+
+    // Read directory entries
+    let read_dir =
+        fs::read_dir(&canonical_path).map_err(|e| format!("Cannot read directory: {}", e))?;
+
+    let mut entries: Vec<FileBrowserEntry> = Vec::new();
+
+    for entry in read_dir.flatten() {
+        let entry_path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        let is_hidden = file_name.starts_with('.');
+
+        // Get metadata, following symlinks
+        let metadata = match fs::metadata(&entry_path) {
+            Ok(m) => m,
+            Err(_) => continue, // Skip entries we can't read
+        };
+
+        let is_dir = metadata.is_dir();
+
+        // Check if this directory is a git repo
+        let is_git_repo = if is_dir {
+            entry_path.join(".git").exists()
+        } else {
+            false
+        };
+
+        entries.push(FileBrowserEntry {
+            name: file_name,
+            path: entry_path.to_string_lossy().to_string(),
+            is_dir,
+            is_hidden,
+            is_git_repo,
+        });
+    }
+
+    // Sort: directories first, then alphabetically (case-insensitive)
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    Ok((current_path, entries))
+}
+
+/// Get common quick-access locations for the file browser
+#[tauri::command]
+async fn get_quick_access_paths() -> Vec<(String, String)> {
+    let mut paths = Vec::new();
+
+    if let Some(home) = dirs::home_dir() {
+        paths.push(("Home".to_string(), home.to_string_lossy().to_string()));
+
+        let desktop = home.join("Desktop");
+        if desktop.exists() {
+            paths.push(("Desktop".to_string(), desktop.to_string_lossy().to_string()));
+        }
+
+        let documents = home.join("Documents");
+        if documents.exists() {
+            paths.push((
+                "Documents".to_string(),
+                documents.to_string_lossy().to_string(),
+            ));
+        }
+
+        let downloads = home.join("Downloads");
+        if downloads.exists() {
+            paths.push((
+                "Downloads".to_string(),
+                downloads.to_string_lossy().to_string(),
+            ));
+        }
+
+        let development = home.join("Development");
+        if development.exists() {
+            paths.push((
+                "Development".to_string(),
+                development.to_string_lossy().to_string(),
+            ));
+        }
+
+        let projects = home.join("Projects");
+        if projects.exists() {
+            paths.push((
+                "Projects".to_string(),
+                projects.to_string_lossy().to_string(),
+            ));
+        }
+
+        let code = home.join("Code");
+        if code.exists() {
+            paths.push(("Code".to_string(), code.to_string_lossy().to_string()));
+        }
+    }
+
+    paths
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -6925,7 +7100,9 @@ async fn claude_login(
 }
 
 #[tauri::command]
-async fn start_claude_oauth(state: State<'_, AppState>) -> Result<ClaudeOauthStartResponse, String> {
+async fn start_claude_oauth(
+    state: State<'_, AppState>,
+) -> Result<ClaudeOauthStartResponse, String> {
     start_claude_oauth_internal(state.inner()).await
 }
 
@@ -7276,8 +7453,8 @@ fn ensure_claude_credentials_file() -> Result<(), String> {
         "subscriptionType": subscription_type,
         "rateLimitTier": rate_limit_tier,
     });
-    let serialized =
-        serde_json::to_string(&payload).map_err(|e| format!("Failed to encode credentials: {}", e))?;
+    let serialized = serde_json::to_string(&payload)
+        .map_err(|e| format!("Failed to encode credentials: {}", e))?;
 
     std::fs::write(&credentials_path, serialized)
         .map_err(|e| format!("Failed to write credentials: {}", e))?;
@@ -11213,26 +11390,31 @@ fn main() {
                     // Clone handles needed for async work
                     let app = window.app_handle().clone();
                     let window_clone = window.clone();
-                    let db_arc = window
-                        .try_state::<AppState>()
-                        .map(|s| Arc::clone(&s.db));
+                    let db_arc = window.try_state::<AppState>().map(|s| Arc::clone(&s.db));
 
                     tauri::async_runtime::spawn(async move {
                         // Run DB optimization in blocking thread to avoid holding mutex on main thread
                         if let Some(db) = db_arc {
-                            let result = tauri::async_runtime::spawn_blocking(move || {
-                                match db.lock() {
+                            let result =
+                                tauri::async_runtime::spawn_blocking(move || match db.lock() {
                                     Ok(conn) => crate::db::optimize_and_shutdown(&conn)
                                         .map_err(|e| anyhow::anyhow!("{e}")),
-                                    Err(e) => Err(anyhow::anyhow!("Failed to acquire DB lock: {e}")),
-                                }
-                            })
-                            .await;
+                                    Err(e) => {
+                                        Err(anyhow::anyhow!("Failed to acquire DB lock: {e}"))
+                                    }
+                                })
+                                .await;
 
                             match result {
-                                Ok(Ok(())) => tracing::info!("[Harness] DB shutdown optimization completed"),
-                                Ok(Err(e)) => tracing::error!("[Harness] DB shutdown optimization failed: {e}"),
-                                Err(e) => tracing::error!("[Harness] DB shutdown task panicked: {e}"),
+                                Ok(Ok(())) => {
+                                    tracing::info!("[Harness] DB shutdown optimization completed")
+                                }
+                                Ok(Err(e)) => tracing::error!(
+                                    "[Harness] DB shutdown optimization failed: {e}"
+                                ),
+                                Err(e) => {
+                                    tracing::error!("[Harness] DB shutdown task panicked: {e}")
+                                }
                             }
                         }
 
@@ -11303,6 +11485,8 @@ fn main() {
             get_all_cached_modes_cmd,
             refresh_agent_modes,
             pick_project_path,
+            list_directory,
+            get_quick_access_paths,
             get_repo_branches,
             get_pr_ready_state,
             check_existing_pr,

@@ -3703,19 +3703,35 @@ init();
   });
 
   $("#pickProjectPath").on("click", async () => {
-    try {
-      const picked = await ipcRenderer.invoke("pickProjectPath");
-      if (picked) {
-        setProjectPath(picked);
-        saveTaskSettings();
-        refreshBaseBranchOptions();
-        addRecentProjectPath(picked);
-        renderProjectAllowlist();
-        refreshCodexCommands();
-        refreshClaudeCommands();
+    // Use custom file browser instead of native dialog
+    if (typeof window.openFileBrowser === 'function') {
+      window.openFileBrowser(function(picked) {
+        if (picked) {
+          setProjectPath(picked);
+          saveTaskSettings();
+          refreshBaseBranchOptions();
+          addRecentProjectPath(picked);
+          renderProjectAllowlist();
+          refreshCodexCommands();
+          refreshClaudeCommands();
+        }
+      });
+    } else {
+      // Fallback to native picker
+      try {
+        const picked = await ipcRenderer.invoke("pickProjectPath");
+        if (picked) {
+          setProjectPath(picked);
+          saveTaskSettings();
+          refreshBaseBranchOptions();
+          addRecentProjectPath(picked);
+          renderProjectAllowlist();
+          refreshCodexCommands();
+          refreshClaudeCommands();
+        }
+      } catch (err) {
+        console.log("[Harness] Project picker unavailable");
       }
-    } catch (err) {
-      console.log("[Harness] Project picker unavailable");
     }
   });
 
@@ -5846,4 +5862,300 @@ init();
   });
 
   console.log('[Auto-Update] Module initialized');
+})();
+
+// =====================================================================
+// Custom File Browser Module
+// =====================================================================
+(function() {
+  'use strict';
+
+  let currentPath = '';
+  let selectedPath = null;
+  let showHiddenFiles = false;
+  let onSelectCallback = null;
+
+  // Initialize file browser
+  function initFileBrowser() {
+    // Toggle hidden files
+    $('#fileBrowserToggleHidden').on('click', function() {
+      showHiddenFiles = !showHiddenFiles;
+      $(this).toggleClass('active', showHiddenFiles);
+      $(this).find('i').toggleClass('fa-eye fa-eye-slash');
+      loadDirectory(currentPath);
+    });
+
+    // Go to path input
+    $('#fileBrowserGoToPath').on('click', function() {
+      const path = $('#fileBrowserPathInput').val().trim();
+      if (path) {
+        loadDirectory(path);
+      }
+    });
+
+    // Enter key in path input
+    $('#fileBrowserPathInput').on('keypress', function(e) {
+      if (e.which === 13) {
+        const path = $(this).val().trim();
+        if (path) {
+          loadDirectory(path);
+        }
+      }
+    });
+
+    // Select button
+    $('#fileBrowserSelectBtn').on('click', function() {
+      if (selectedPath && onSelectCallback) {
+        onSelectCallback(selectedPath);
+        $('#fileBrowserModal').modal('hide');
+      }
+    });
+
+    // Reset state when modal is hidden
+    $('#fileBrowserModal').on('hidden.bs.modal', function() {
+      selectedPath = null;
+      onSelectCallback = null;
+      updateSelectedDisplay();
+    });
+
+    // Load quick access and initial directory when modal opens
+    $('#fileBrowserModal').on('show.bs.modal', function() {
+      loadQuickAccess();
+      loadRecentProjects();
+      loadDirectory(null); // Start at home directory
+    });
+  }
+
+  // Load quick access locations
+  async function loadQuickAccess() {
+    try {
+      const paths = await ipcRenderer.invoke('getQuickAccessPaths');
+      const container = $('#fileBrowserQuickAccess');
+      container.empty();
+
+      const icons = {
+        'Home': 'fa-home',
+        'Desktop': 'fa-desktop',
+        'Documents': 'fa-file-alt',
+        'Downloads': 'fa-download',
+        'Development': 'fa-code',
+        'Projects': 'fa-project-diagram',
+        'Code': 'fa-code'
+      };
+
+      paths.forEach(function([name, path]) {
+        const icon = icons[name] || 'fa-folder';
+        const item = $(`
+          <div class="quick-access-item" data-path="${escapeHtml(path)}">
+            <i class="fal ${icon}"></i>
+            <span>${escapeHtml(name)}</span>
+          </div>
+        `);
+        item.on('click', function() {
+          loadDirectory($(this).data('path'));
+        });
+        container.append(item);
+      });
+    } catch (err) {
+      console.error('[FileBrowser] Failed to load quick access:', err);
+    }
+  }
+
+  // Load recent projects into sidebar
+  function loadRecentProjects() {
+    const container = $('#fileBrowserRecentProjects');
+    container.empty();
+
+    // Use the global recentProjectPaths array
+    const recentPaths = window.recentProjectPaths || recentProjectPaths || [];
+    const displayPaths = recentPaths.slice(0, 5);
+
+    if (displayPaths.length === 0) {
+      container.append('<div class="quick-access-item" style="opacity: 0.5; cursor: default;"><i class="fal fa-clock"></i><span>No recent projects</span></div>');
+      return;
+    }
+
+    displayPaths.forEach(function(path) {
+      const name = path.split('/').pop() || path;
+      const item = $(`
+        <div class="quick-access-item" data-path="${escapeHtml(path)}" title="${escapeHtml(path)}">
+          <i class="fal fa-folder"></i>
+          <span>${escapeHtml(name)}</span>
+        </div>
+      `);
+      item.on('click', function() {
+        // For recent projects, select directly instead of navigating
+        selectPath($(this).data('path'));
+      });
+      container.append(item);
+    });
+  }
+
+  // Load directory contents
+  async function loadDirectory(path) {
+    const loadingEl = $('#fileBrowserLoading');
+    const emptyEl = $('#fileBrowserEmpty');
+    const entriesEl = $('#fileBrowserEntries');
+
+    loadingEl.show();
+    emptyEl.hide();
+    entriesEl.empty();
+
+    try {
+      const [newPath, entries] = await ipcRenderer.invoke('listDirectory', path);
+      currentPath = newPath;
+
+      // Update breadcrumb
+      updateBreadcrumb(newPath);
+
+      // Update path input
+      $('#fileBrowserPathInput').val(newPath);
+
+      loadingEl.hide();
+
+      // Filter hidden files if needed
+      let filteredEntries = entries;
+      if (!showHiddenFiles) {
+        filteredEntries = entries.filter(function(e) { return !e.is_hidden; });
+      }
+
+      // Only show directories
+      const directories = filteredEntries.filter(function(e) { return e.is_dir; });
+
+      if (directories.length === 0) {
+        emptyEl.show();
+        return;
+      }
+
+      // Add parent directory entry if not at root
+      if (newPath !== '/') {
+        const parentPath = newPath.split('/').slice(0, -1).join('/') || '/';
+        const parentEntry = $(`
+          <div class="file-entry parent-dir is-dir" data-path="${escapeHtml(parentPath)}">
+            <div class="file-entry-icon"><i class="fal fa-level-up-alt"></i></div>
+            <div class="file-entry-info">
+              <div class="file-entry-name">..</div>
+            </div>
+          </div>
+        `);
+        parentEntry.on('dblclick', function() {
+          loadDirectory($(this).data('path'));
+        });
+        entriesEl.append(parentEntry);
+      }
+
+      // Render directory entries
+      directories.forEach(function(entry) {
+        const entryEl = createEntryElement(entry);
+        entriesEl.append(entryEl);
+      });
+
+    } catch (err) {
+      loadingEl.hide();
+      entriesEl.html(`<div class="file-browser-empty"><i class="fal fa-exclamation-triangle"></i><p>Error: ${escapeHtml(err.toString())}</p></div>`);
+      console.error('[FileBrowser] Failed to load directory:', err);
+    }
+  }
+
+  // Create a file entry element
+  function createEntryElement(entry) {
+    const isGitRepo = entry.is_git_repo;
+    const classes = ['file-entry', 'is-dir'];
+    if (entry.is_hidden) classes.push('hidden-file');
+    if (isGitRepo) classes.push('is-git-repo');
+
+    const icon = isGitRepo ? 'fa-code-branch' : 'fa-folder';
+    const gitBadge = isGitRepo ? '<span class="git-badge">Git</span>' : '';
+
+    const el = $(`
+      <div class="${classes.join(' ')}" data-path="${escapeHtml(entry.path)}">
+        <div class="file-entry-icon"><i class="fal ${icon}"></i></div>
+        <div class="file-entry-info">
+          <div class="file-entry-name">${escapeHtml(entry.name)}${gitBadge}</div>
+        </div>
+        <div class="file-entry-arrow"><i class="fal fa-chevron-right"></i></div>
+      </div>
+    `);
+
+    // Single click to select
+    el.on('click', function(e) {
+      e.stopPropagation();
+      selectPath(entry.path);
+      $('.file-entry').removeClass('selected');
+      $(this).addClass('selected');
+    });
+
+    // Double click to navigate into
+    el.on('dblclick', function(e) {
+      e.stopPropagation();
+      loadDirectory(entry.path);
+    });
+
+    return el;
+  }
+
+  // Update breadcrumb navigation
+  function updateBreadcrumb(path) {
+    const container = $('#fileBrowserBreadcrumb');
+    container.empty();
+
+    const parts = path.split('/').filter(function(p) { return p.length > 0; });
+
+    // Root
+    const rootEl = $('<span class="breadcrumb-item" data-path="/"><i class="fal fa-hdd"></i></span>');
+    rootEl.on('click', function() { loadDirectory('/'); });
+    container.append(rootEl);
+
+    // Build path progressively
+    let currentBuildPath = '';
+    parts.forEach(function(part, index) {
+      container.append('<span class="breadcrumb-separator"><i class="fal fa-chevron-right"></i></span>');
+
+      currentBuildPath += '/' + part;
+      const isLast = index === parts.length - 1;
+      const partEl = $(`<span class="breadcrumb-item ${isLast ? 'active' : ''}" data-path="${escapeHtml(currentBuildPath)}">${escapeHtml(part)}</span>`);
+
+      if (!isLast) {
+        partEl.on('click', function() {
+          loadDirectory($(this).data('path'));
+        });
+      }
+
+      container.append(partEl);
+    });
+  }
+
+  // Select a path
+  function selectPath(path) {
+    selectedPath = path;
+    updateSelectedDisplay();
+  }
+
+  // Update the selected path display
+  function updateSelectedDisplay() {
+    const displayEl = $('#fileBrowserSelectedPath');
+    const selectBtn = $('#fileBrowserSelectBtn');
+
+    if (selectedPath) {
+      displayEl.text(selectedPath);
+      selectBtn.prop('disabled', false);
+    } else {
+      displayEl.text('None');
+      selectBtn.prop('disabled', true);
+    }
+  }
+
+  // Public function to open file browser
+  window.openFileBrowser = function(callback) {
+    onSelectCallback = callback;
+    selectedPath = null;
+    updateSelectedDisplay();
+    $('#fileBrowserModal').modal('show');
+  };
+
+  // Initialize when document is ready
+  $(document).ready(function() {
+    initFileBrowser();
+    console.log('[FileBrowser] Module initialized');
+  });
 })();

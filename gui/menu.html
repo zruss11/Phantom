@@ -1786,6 +1786,85 @@
       </div>
     </div>
 
+    <!-- Custom File Browser Modal -->
+    <div class="modal fade" id="fileBrowserModal" tabindex="-1" role="dialog" aria-labelledby="fileBrowserModalLabel" aria-hidden="true">
+      <div class="modal-dialog modal-lg file-browser-dialog" role="document">
+        <div class="modal-content file-browser-content">
+          <div class="modal-header file-browser-header">
+            <h5 class="modal-title" id="fileBrowserModalLabel">
+              <i class="fal fa-folder-open"></i> Select Project Folder
+            </h5>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+              <span aria-hidden="true"><i class="fal fa-times"></i></span>
+            </button>
+          </div>
+          <div class="modal-body file-browser-body p-0">
+            <!-- Breadcrumb navigation -->
+            <div class="file-browser-breadcrumb">
+              <div class="breadcrumb-path" id="fileBrowserBreadcrumb"></div>
+              <div class="breadcrumb-actions">
+                <button type="button" class="btn btn-sm btn-icon" id="fileBrowserToggleHidden" title="Show hidden files">
+                  <i class="fal fa-eye-slash"></i>
+                </button>
+              </div>
+            </div>
+
+            <!-- Main content area -->
+            <div class="file-browser-main">
+              <!-- Quick access sidebar -->
+              <div class="file-browser-sidebar">
+                <div class="sidebar-section">
+                  <div class="sidebar-title">Quick Access</div>
+                  <div id="fileBrowserQuickAccess" class="quick-access-list"></div>
+                </div>
+                <div class="sidebar-section">
+                  <div class="sidebar-title">Recent Projects</div>
+                  <div id="fileBrowserRecentProjects" class="quick-access-list"></div>
+                </div>
+              </div>
+
+              <!-- File listing -->
+              <div class="file-browser-listing">
+                <div id="fileBrowserLoading" class="file-browser-loading">
+                  <i class="fal fa-spinner fa-spin"></i> Loading...
+                </div>
+                <div id="fileBrowserEmpty" class="file-browser-empty" style="display: none;">
+                  <i class="fal fa-folder-open"></i>
+                  <p>This folder is empty</p>
+                </div>
+                <div id="fileBrowserEntries" class="file-entries"></div>
+              </div>
+            </div>
+
+            <!-- Path input -->
+            <div class="file-browser-path-input">
+              <div class="input-group">
+                <div class="input-group-prepend">
+                  <span class="input-group-text"><i class="fal fa-folder"></i></span>
+                </div>
+                <input type="text" class="form-control" id="fileBrowserPathInput" placeholder="Enter path..." />
+                <div class="input-group-append">
+                  <button class="btn btn-sm" type="button" id="fileBrowserGoToPath">Go</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer file-browser-footer">
+            <div class="selected-path-display">
+              <span class="selected-label">Selected:</span>
+              <span id="fileBrowserSelectedPath" class="selected-path">None</span>
+            </div>
+            <div class="footer-actions">
+              <button type="button" class="btn btn-sm btn-secondary" data-dismiss="modal">Cancel</button>
+              <button type="button" class="btn btn-sm btn-brand" id="fileBrowserSelectBtn" disabled>
+                <i class="fal fa-check"></i> Select Folder
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!--Universal Footer-->
     <footer class="footer">
       <div class="container-fluid">
