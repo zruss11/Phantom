@@ -1536,6 +1536,113 @@
                 </div>
               </div>
 
+              <!-- Codex Card -->
+              <div class="card settings-card">
+                <div class="card-body">
+                  <h5 class="settings-card-title mb-3">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 8px; opacity: 0.7;">
+                      <path d="M12 2l7 4v6c0 5-3 9-7 10-4-1-7-5-7-10V6l7-4Z"></path>
+                      <path d="M9 12h6"></path>
+                      <path d="M10 16h4"></path>
+                    </svg>
+                    Codex
+                  </h5>
+
+                  <div class="form-group mb-3">
+                    <label class="settings-label">Codex Path</label>
+                    <input
+                      type="text"
+                      class="form-control"
+                      id="codexPath"
+                      placeholder="/opt/homebrew/bin/codex"
+                    />
+                    <small class="text-muted d-block mt-2">
+                      Optional override for the <code>codex</code> executable.
+                    </small>
+                  </div>
+
+                  <div class="form-group mb-3">
+                    <label class="settings-label">Default Access Mode</label>
+                    <div id="codexAccessModeDropdown" class="custom-dropdown-wrapper"></div>
+                    <small class="text-muted d-block mt-2">
+                      Used for Codex tasks created in Phantom.
+                    </small>
+                  </div>
+
+                  <div class="form-group mb-3">
+                    <label class="settings-label">UI Scale</label>
+                    <input
+                      type="number"
+                      class="form-control"
+                      id="uiScale"
+                      min="0.75"
+                      max="1.5"
+                      step="0.05"
+                      placeholder="1.00"
+                    />
+                    <small class="text-muted d-block mt-2">
+                      Best-effort scaling for the Phantom UI (applies immediately).
+                    </small>
+                  </div>
+
+                  <div class="form-group mb-3">
+                    <label class="settings-label">Personality</label>
+                    <input
+                      type="text"
+                      class="form-control"
+                      id="codexPersonality"
+                      placeholder="default"
+                    />
+                    <small class="text-muted d-block mt-2">
+                      Synced to the active Codex account's <code>CODEX_HOME/config.toml</code>.
+                    </small>
+                  </div>
+
+                  <div class="settings-toggles">
+                    <div class="settings-toggle-row">
+                      <span class="settings-toggle-label">Collaboration Modes</span>
+                      <div class="toggle-buttons" data-toggle="codex-collaboration-modes">
+                        <button class="toggle-button" type="button" data-value="false">Off</button>
+                        <button class="toggle-button" type="button" data-value="true">On</button>
+                        <input type="checkbox" id="codexFeatureCollaborationModes" />
+                      </div>
+                    </div>
+                    <div class="settings-toggle-row">
+                      <span class="settings-toggle-label">Steer</span>
+                      <div class="toggle-buttons" data-toggle="codex-steer">
+                        <button class="toggle-button" type="button" data-value="false">Off</button>
+                        <button class="toggle-button" type="button" data-value="true">On</button>
+                        <input type="checkbox" id="codexFeatureSteer" />
+                      </div>
+                    </div>
+                    <div class="settings-toggle-row">
+                      <span class="settings-toggle-label">Unified Exec</span>
+                      <div class="toggle-buttons" data-toggle="codex-unified-exec">
+                        <button class="toggle-button" type="button" data-value="false">Off</button>
+                        <button class="toggle-button" type="button" data-value="true">On</button>
+                        <input type="checkbox" id="codexFeatureUnifiedExec" />
+                      </div>
+                    </div>
+                    <div class="settings-toggle-row">
+                      <span class="settings-toggle-label">Collab (Experimental)</span>
+                      <div class="toggle-buttons" data-toggle="codex-collab">
+                        <button class="toggle-button" type="button" data-value="false">Off</button>
+                        <button class="toggle-button" type="button" data-value="true">On</button>
+                        <input type="checkbox" id="codexFeatureCollab" />
+                      </div>
+                    </div>
+                    <div class="settings-toggle-row">
+                      <span class="settings-toggle-label">Apps (Experimental)</span>
+                      <div class="toggle-buttons" data-toggle="codex-apps">
+                        <button class="toggle-button" type="button" data-value="false">Off</button>
+                        <button class="toggle-button" type="button" data-value="true">On</button>
+                        <input type="checkbox" id="codexFeatureApps" />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               <!-- Task Projects Card -->
               <div class="card settings-card">
                 <div class="card-body">

@@ -2221,7 +2221,7 @@
     }
   }
 
-  // Merge streaming text, handling potential overlap (borrowed from CodexMonitor)
+  // Merge streaming text, handling potential overlap
   function mergeStreamingText(existing, delta) {
     if (!delta) return existing;
     if (!existing) return delta;
