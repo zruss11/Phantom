@@ -1,6 +1,7 @@
 mod amp_cli;
 mod claude_local_usage;
 mod claude_usage_watcher;
+mod command_center;
 mod db;
 mod debug_http;
 mod discord_bot;
