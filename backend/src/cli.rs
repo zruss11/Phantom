@@ -1572,6 +1572,13 @@ impl AgentProcessClient {
             .await
     }
 
+    fn is_docker_daemon_unavailable_error(stderr: &str) -> bool {
+        let stderr_lower = stderr.to_lowercase();
+        stderr_lower.contains("cannot connect to the docker daemon")
+            || stderr_lower.contains("is the docker daemon running")
+            || (stderr_lower.contains("docker.sock") && stderr_lower.contains("cannot connect"))
+    }
+
     async fn run_prompt<F>(
         &self,
         session_id: &str,
@@ -2005,7 +2012,7 @@ impl AgentProcessClient {
                     // TodoWrite is preferred when present (explicit user-facing progress).
                     // Task tracking is for sub-agent work when no TodoWrite is used.
                     let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    
+
                     if event_type == "assistant" {
                         if let Some(items) = value
                             .get("message")
@@ -2013,10 +2020,12 @@ impl AgentProcessClient {
                             .and_then(|c| c.as_array())
                         {
                             for item in items {
-                                let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                let item_type =
+                                    item.get("type").and_then(|v| v.as_str()).unwrap_or("");
                                 if item_type == "tool_use" {
-                                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                    
+                                    let name =
+                                        item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
                                     // Handle TodoWrite - extract todos directly as PlanSteps
                                     if name == "TodoWrite" {
                                         if let Some(todos) = item
@@ -2027,8 +2036,11 @@ impl AgentProcessClient {
                                             let steps: Vec<PlanStep> = todos
                                                 .iter()
                                                 .filter_map(|t| {
-                                                    let content = t.get("content").and_then(|c| c.as_str())?;
-                                                    let status = t.get("status")
+                                                    let content = t
+                                                        .get("content")
+                                                        .and_then(|c| c.as_str())?;
+                                                    let status = t
+                                                        .get("status")
                                                         .and_then(|s| s.as_str())
                                                         .unwrap_or("pending")
                                                         .to_string();
@@ -2049,7 +2061,11 @@ impl AgentProcessClient {
                                     }
                                     // Handle Task - track sub-agent spawn
                                     else if name == "Task" {
-                                        let tool_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                        let tool_id = item
+                                            .get("id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
                                         let desc = item
                                             .get("input")
                                             .and_then(|i| i.get("description"))
@@ -2057,10 +2073,18 @@ impl AgentProcessClient {
                                             .unwrap_or("Working…")
                                             .to_string();
                                         if !tool_id.is_empty() {
-                                            claude_tasks.push((tool_id, desc, "in_progress".to_string()));
-                                            let steps: Vec<PlanStep> = claude_tasks.iter().map(|(_, d, s)| {
-                                                PlanStep { step: d.clone(), status: s.clone() }
-                                            }).collect();
+                                            claude_tasks.push((
+                                                tool_id,
+                                                desc,
+                                                "in_progress".to_string(),
+                                            ));
+                                            let steps: Vec<PlanStep> = claude_tasks
+                                                .iter()
+                                                .map(|(_, d, s)| PlanStep {
+                                                    step: d.clone(),
+                                                    status: s.clone(),
+                                                })
+                                                .collect();
                                             on_update(StreamingUpdate::PlanUpdate {
                                                 turn_id: None,
                                                 explanation: None,
@@ -2080,7 +2104,7 @@ impl AgentProcessClient {
                             .get("tool_use_result")
                             .and_then(|r| r.get("status"))
                             .and_then(|s| s.as_str());
-                        
+
                         // Only mark complete when parent_tool_use_id is null AND status is "completed"
                         if parent_id.is_none() && result_status == Some("completed") {
                             if let Some(items) = value
@@ -2090,7 +2114,9 @@ impl AgentProcessClient {
                             {
                                 let mut changed = false;
                                 for item in items {
-                                    if let Some(tool_use_id) = item.get("tool_use_id").and_then(|v| v.as_str()) {
+                                    if let Some(tool_use_id) =
+                                        item.get("tool_use_id").and_then(|v| v.as_str())
+                                    {
                                         for task in claude_tasks.iter_mut() {
                                             if task.0 == tool_use_id && task.2 != "completed" {
                                                 task.2 = "completed".to_string();
@@ -2100,9 +2126,13 @@ impl AgentProcessClient {
                                     }
                                 }
                                 if changed {
-                                    let steps: Vec<PlanStep> = claude_tasks.iter().map(|(_, d, s)| {
-                                        PlanStep { step: d.clone(), status: s.clone() }
-                                    }).collect();
+                                    let steps: Vec<PlanStep> = claude_tasks
+                                        .iter()
+                                        .map(|(_, d, s)| PlanStep {
+                                            step: d.clone(),
+                                            status: s.clone(),
+                                        })
+                                        .collect();
                                     on_update(StreamingUpdate::PlanUpdate {
                                         turn_id: None,
                                         explanation: None,
@@ -2160,10 +2190,21 @@ impl AgentProcessClient {
                     .lock()
                     .map(|s| s.clone())
                     .unwrap_or_else(|_| String::new());
+
+                let stderr_trimmed = stderr_output.trim();
+                if status.code() == Some(125)
+                    && Self::is_docker_daemon_unavailable_error(stderr_trimmed)
+                {
+                    return Err(anyhow::anyhow!(
+                        "Docker isn't running. Start Docker (Docker Desktop or OrbStack) and try again. (details: {})",
+                        stderr_trimmed
+                    ));
+                }
+
                 return Err(anyhow::anyhow!(
                     "agent CLI exited with {}: {}",
                     status,
-                    stderr_output.trim()
+                    stderr_trimmed
                 ));
             }
         }
