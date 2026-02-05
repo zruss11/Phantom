@@ -74,6 +74,11 @@
                 <i class="fal fa-code-merge"></i> Review
               </a>
             </li>
+            <li class="nav-item">
+              <a class="nav-link" data-page="commandPage">
+                <i class="fal fa-terminal"></i> Command
+              </a>
+            </li>
           </ul>
           <ul class="navbar-nav ml-auto">
             <li class="nav-item mt-2 mr-0">
@@ -1238,6 +1243,156 @@
         </div>
       </section>
 
+      <!--Command Center-->
+      <section id="commandPage" class="command-page page container-fluid" hidden>
+        <!-- Header -->
+        <div class="command-header">
+          <h5 class="command-title">
+            <i class="fal fa-terminal"></i>
+            Command Center
+          </h5>
+          <div class="command-header-actions">
+            <button class="command-header-btn" id="commandRefreshBtn">
+              <i class="fal fa-sync-alt"></i> Refresh
+            </button>
+            <button class="command-header-btn" id="commandConfigureBtn">
+              <i class="fal fa-cog"></i> Configure
+            </button>
+          </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="command-quick-actions-row">
+          <span class="command-quick-actions-label">Quick Actions</span>
+          <div class="command-quick-action" id="quickFixTopError">
+            <div class="command-quick-action-icon sentry">
+              <i class="fal fa-bug"></i>
+            </div>
+            <div class="command-quick-action-text">
+              <div class="command-quick-action-title">Fix Top Error</div>
+              <div class="command-quick-action-desc" id="quickFixTopErrorDesc">No errors detected</div>
+            </div>
+            <i class="fal fa-arrow-right command-quick-action-arrow"></i>
+          </div>
+          <div class="command-quick-action" id="quickStartNextIssue">
+            <div class="command-quick-action-icon linear">
+              <i class="fal fa-ticket"></i>
+            </div>
+            <div class="command-quick-action-text">
+              <div class="command-quick-action-title">Start Next Issue</div>
+              <div class="command-quick-action-desc" id="quickStartNextIssueDesc">No issues assigned</div>
+            </div>
+            <i class="fal fa-arrow-right command-quick-action-arrow"></i>
+          </div>
+          <div class="command-quick-action" id="quickRerunFailedCI">
+            <div class="command-quick-action-icon ci">
+              <i class="fal fa-redo"></i>
+            </div>
+            <div class="command-quick-action-text">
+              <div class="command-quick-action-title">Re-run Failed CI</div>
+              <div class="command-quick-action-desc" id="quickRerunFailedCIDesc">All builds passing</div>
+            </div>
+            <i class="fal fa-arrow-right command-quick-action-arrow"></i>
+          </div>
+        </div>
+
+        <!-- Main Grid -->
+        <div class="command-grid">
+          <!-- Linear Issues Panel -->
+          <div class="command-panel">
+            <div class="command-panel-header">
+              <span class="command-panel-title">
+                <i class="fab fa-linear command-icon-linear"></i>
+                Linear Issues
+              </span>
+              <span class="command-panel-badge command-badge-purple" id="linearIssueCount">0 active</span>
+            </div>
+            <div class="command-panel-content" id="linearIssuesList">
+              <div class="command-empty-state">
+                <i class="fal fa-ticket"></i>
+                <p>No issues assigned</p>
+                <small>Connect Linear to see your issues</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sentry Errors Panel -->
+          <div class="command-panel">
+            <div class="command-panel-header">
+              <span class="command-panel-title">
+                <i class="fal fa-exclamation-triangle command-icon-sentry"></i>
+                Sentry Errors
+              </span>
+              <span class="command-panel-badge command-badge-orange" id="sentryErrorCount">0 unresolved</span>
+            </div>
+            <div class="command-panel-content" id="sentryErrorsList">
+              <div class="command-empty-state">
+                <i class="fal fa-bug"></i>
+                <p>No unresolved errors</p>
+                <small>Connect Sentry to see errors</small>
+              </div>
+            </div>
+          </div>
+
+          <!-- CI/CD Status Panel -->
+          <div class="command-panel">
+            <div class="command-panel-header">
+              <span class="command-panel-title">
+                <i class="fab fa-github command-icon-ci"></i>
+                CI / CD
+              </span>
+              <span class="command-panel-badge command-badge-green" id="ciStatusCount">0 running</span>
+            </div>
+            <div class="command-panel-content" id="ciStatusList">
+              <div class="command-empty-state">
+                <i class="fal fa-code-branch"></i>
+                <p>No recent workflows</p>
+                <small>Connect GitHub to see CI status</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Agent Task Popup (for Command Center) -->
+      <div class="command-agent-popup" id="commandAgentPopup" hidden>
+        <div class="command-agent-popup-header">
+          <span class="command-agent-popup-title">
+            <i class="fal fa-robot"></i>
+            Create Fix Task
+          </span>
+          <button class="command-agent-popup-close" id="commandAgentPopupClose">
+            <i class="fal fa-times"></i>
+          </button>
+        </div>
+        <div class="command-agent-popup-body">
+          <div class="command-agent-error-preview" id="commandAgentErrorPreview">
+            <div class="command-agent-error-title" id="commandAgentErrorTitle">Error</div>
+            <div class="command-agent-error-file" id="commandAgentErrorFile">file.ts:0 · 0 events</div>
+          </div>
+          <div class="command-agent-select-label">Select an agent</div>
+          <div class="command-agent-select-grid">
+            <div class="command-agent-option selected" data-agent="claude-code">
+              <img src="images/claude-color.png" alt="Claude" onerror="this.style.display='none'">
+              <span class="command-agent-option-name">Claude</span>
+            </div>
+            <div class="command-agent-option" data-agent="codex">
+              <img src="images/chatgpt.png" alt="Codex" onerror="this.style.display='none'">
+              <span class="command-agent-option-name">Codex</span>
+            </div>
+            <div class="command-agent-option" data-agent="amp">
+              <img src="images/ampcode.png" alt="Amp" onerror="this.style.display='none'">
+              <span class="command-agent-option-name">Amp</span>
+            </div>
+          </div>
+          <textarea class="command-agent-prompt-input" id="commandAgentPromptInput" placeholder="Additional context..."></textarea>
+          <div class="command-agent-popup-actions">
+            <button class="command-agent-btn cancel" id="commandAgentCancelBtn">Cancel</button>
+            <button class="command-agent-btn create" id="commandAgentCreateBtn">Create Task</button>
+          </div>
+        </div>
+      </div>
+
       <!--Settings Page-->
       <section
         id="settingsPage"
@@ -1248,7 +1403,7 @@
           <!-- Settings Cards Container -->
           <div class="col-12">
             <div class="settings-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px;">
-              
+
               <!-- Notifications Card -->
               <div class="card settings-card">
                 <div class="card-body">
@@ -1491,6 +1646,18 @@
                       <div class="keybind-row" data-action="nav.analytics">
                         <span class="keybind-label">Analytics</span>
                         <button class="keybind-input" data-keybind="nav.analytics">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="nav.review">
+                        <span class="keybind-label">Review</span>
+                        <button class="keybind-input" data-keybind="nav.review">
+                          <span class="keybind-keys"></span>
+                        </button>
+                      </div>
+                      <div class="keybind-row" data-action="nav.command">
+                        <span class="keybind-label">Command</span>
+                        <button class="keybind-input" data-keybind="nav.command">
                           <span class="keybind-keys"></span>
                         </button>
                       </div>
