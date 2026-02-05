@@ -62,8 +62,8 @@ async fn execute_with_model_fallback(prompt: &str) -> Result<String, String> {
 }
 
 async fn execute_with_model(prompt: &str, model: Option<&str>) -> Result<String, String> {
-    let command_path = resolve_command_path("opencode")
-        .unwrap_or_else(|| PathBuf::from("opencode"));
+    let command_path =
+        resolve_command_path("opencode").unwrap_or_else(|| PathBuf::from("opencode"));
     let mut cmd = Command::new(command_path);
     cmd.args(["run", "--format", "json"]);
     if let Some(model) = model {

@@ -92,7 +92,10 @@ pub async fn execute(prompt: &str) -> Result<String, String> {
         }
         let stderr_preview = stderr_output.trim();
         if !stderr_preview.is_empty() {
-            return Err(format!("No text in Amp response (stderr: {})", stderr_preview));
+            return Err(format!(
+                "No text in Amp response (stderr: {})",
+                stderr_preview
+            ));
         }
         return Err("No text in Amp response".to_string());
     }
@@ -245,6 +248,9 @@ mod tests {
             "is_error": true,
             "error": "402 payment required"
         });
-        assert_eq!(extract_error_from_event(&json), Some("402 payment required".to_string()));
+        assert_eq!(
+            extract_error_from_event(&json),
+            Some("402 payment required".to_string())
+        );
     }
 }

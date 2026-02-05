@@ -379,7 +379,11 @@ pub fn get_cached_models(conn: &Connection, agent_id: &str) -> Result<Vec<Cached
 }
 
 /// Save models to cache (replaces all models for agent)
-pub fn save_cached_models(conn: &mut Connection, agent_id: &str, models: &[CachedModel]) -> Result<()> {
+pub fn save_cached_models(
+    conn: &mut Connection,
+    agent_id: &str,
+    models: &[CachedModel],
+) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
     let tx = conn.transaction()?;
 
@@ -436,7 +440,11 @@ pub fn get_cached_modes(conn: &Connection, agent_id: &str) -> Result<Vec<CachedM
 }
 
 /// Save modes to cache (replaces all modes for agent)
-pub fn save_cached_modes(conn: &mut Connection, agent_id: &str, modes: &[CachedMode]) -> Result<()> {
+pub fn save_cached_modes(
+    conn: &mut Connection,
+    agent_id: &str,
+    modes: &[CachedMode],
+) -> Result<()> {
     let now = chrono::Utc::now().timestamp();
     let tx = conn.transaction()?;
 

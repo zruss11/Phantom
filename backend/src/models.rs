@@ -1,6 +1,6 @@
 use crate::cli::{
-    AgentCliKind, AgentProcessClient, AvailableMode, CodexModeInfo, ConfigOption, ConfigOptionValue,
-    ModelInfo, NewSessionResult,
+    AgentCliKind, AgentProcessClient, AvailableMode, CodexModeInfo, ConfigOption,
+    ConfigOptionValue, ModelInfo, NewSessionResult,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
