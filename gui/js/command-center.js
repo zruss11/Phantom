@@ -11,6 +11,12 @@
   // ============================================================================
   var state = {
     data: null,           // CommandCenterData from backend
+    hasLoadedOnce: false,
+    isFetching: false,
+    fetchPromise: null,
+    lastFetchStartedAt: 0,
+    lastFetchCompletedAt: 0,
+    lastFetchError: null,
     config: {
       refreshInterval: 15 // minutes, default
     },
@@ -180,24 +186,92 @@
   // Data Fetching
   // ============================================================================
 
+  function shouldRefetchOnVisible() {
+    if (!state.hasLoadedOnce) return true;
+    if (!state.lastFetchCompletedAt) return true;
+    // If we preloaded on startup, avoid re-fetching immediately when user opens the tab.
+    return (Date.now() - state.lastFetchCompletedAt) > 60 * 1000;
+  }
+
+  function buildSkeletonList(rowCount) {
+    var rows = [];
+    for (var i = 0; i < rowCount; i++) {
+      rows.push(
+        '<div class="command-skeleton-item">' +
+          '<div class="command-skeleton-line" style="width: 35%"></div>' +
+          '<div class="command-skeleton-line" style="width: 90%"></div>' +
+          '<div class="command-skeleton-line" style="width: 60%"></div>' +
+        '</div>'
+      );
+    }
+    return rows.join('');
+  }
+
+  function renderSkeleton() {
+    // Badges
+    var linearCount = document.getElementById('linearIssueCount');
+    if (linearCount) linearCount.textContent = 'Loading…';
+    var sentryCount = document.getElementById('sentryErrorCount');
+    if (sentryCount) sentryCount.textContent = 'Loading…';
+    var ciCount = document.getElementById('ciStatusCount');
+    if (ciCount) ciCount.textContent = 'Loading…';
+
+    // Quick actions
+    var fixDesc = document.getElementById('quickFixTopErrorDesc');
+    if (fixDesc) fixDesc.textContent = 'Loading…';
+    var issueDesc = document.getElementById('quickStartNextIssueDesc');
+    if (issueDesc) issueDesc.textContent = 'Loading…';
+    var ciDesc = document.getElementById('quickRerunFailedCIDesc');
+    if (ciDesc) ciDesc.textContent = 'Loading…';
+
+    // Panel skeletons
+    var linearList = document.getElementById('linearIssuesList');
+    if (linearList) linearList.innerHTML = buildSkeletonList(5);
+    var sentryList = document.getElementById('sentryErrorsList');
+    if (sentryList) sentryList.innerHTML = buildSkeletonList(4);
+    var ciList = document.getElementById('ciStatusList');
+    if (ciList) ciList.innerHTML = buildSkeletonList(4);
+  }
+
   /**
    * Fetch all command center data from backend
    */
-  function fetchData() {
+  function fetchData(opts) {
+    opts = opts || {};
+
+    if (state.fetchPromise) return state.fetchPromise;
+
+    state.isFetching = true;
+    state.lastFetchStartedAt = Date.now();
+    state.lastFetchError = null;
+
+    if (opts.showSkeleton && state.isVisible && !state.hasLoadedOnce) {
+      renderSkeleton();
+    }
+
     console.log('[CommandCenter] Fetching data...');
-    return tauriInvoke('fetch_command_center_data')
+    state.fetchPromise = tauriInvoke('fetch_command_center_data')
       .then(function(data) {
         console.log('[CommandCenter] Data received:', data);
         state.data = data;
+        state.hasLoadedOnce = true;
+        state.lastFetchCompletedAt = Date.now();
         render();
         return data;
       })
       .catch(function(err) {
         console.error('[CommandCenter] Failed to fetch data:', err);
+        state.lastFetchError = err;
         // Show error state in UI
         showFetchError(err);
         return null;
+      })
+      .finally(function() {
+        state.isFetching = false;
+        state.fetchPromise = null;
       });
+
+    return state.fetchPromise;
   }
 
   /**
@@ -796,7 +870,19 @@
   function onPageVisible() {
     console.log('[CommandCenter] Page visible');
     state.isVisible = true;
-    fetchData();
+
+    // Render immediately if we already have data (e.g., preloaded on startup)
+    if (state.data) {
+      render();
+    }
+
+    // If a fetch is already in-flight, show skeleton on first load and let it complete
+    if (state.fetchPromise) {
+      if (!state.hasLoadedOnce) renderSkeleton();
+    } else if (shouldRefetchOnVisible()) {
+      fetchData({ showSkeleton: true, reason: 'visible' });
+    }
+
     startAutoRefresh();
   }
 
@@ -851,7 +937,7 @@
     if (refreshBtn) {
       refreshBtn.addEventListener('click', function() {
         refreshBtn.classList.add('spinning');
-        fetchData().finally(function() {
+        fetchData({ showSkeleton: true, reason: 'manual_refresh' }).finally(function() {
           setTimeout(function() {
             refreshBtn.classList.remove('spinning');
           }, 500);
@@ -944,6 +1030,12 @@
     var commandPage = document.getElementById('commandPage');
     if (commandPage && !commandPage.hasAttribute('hidden')) {
       onPageVisible();
+    } else {
+      // Preload on startup so the Command Center is ready when the user opens the tab.
+      // Delay slightly to avoid competing with initial UI setup.
+      setTimeout(function() {
+        fetchData({ showSkeleton: false, reason: 'startup' });
+      }, 250);
     }
 
     console.log('[CommandCenter] Initialized');
