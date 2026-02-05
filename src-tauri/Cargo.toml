@@ -1,6 +1,6 @@
 [package]
 name = "phantom_harness"
-version = "0.1.0"
+version = "1.0.3-alpha1"
 description = "Phantom Harness Tauri app"
 edition = "2021"
 
