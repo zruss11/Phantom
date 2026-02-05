@@ -686,17 +686,36 @@
 
     // Use the tauri bridge to create a session
     if (window.tauriBridge && window.tauriBridge.ipcRenderer) {
+      // Get last-used settings from the main app's currentSettings
+      var settings = window.currentSettings || {};
+      var agentModels = settings.taskAgentModels || {};
+      var agentPrefs = agentModels[agent] || {};
+
+      // Agents with their own permission mechanisms always use bypass
+      var agentsWithOwnPermissions = ['codex', 'claude-code', 'droid', 'factory-droid', 'amp', 'opencode'];
+      var permissionMode = agentsWithOwnPermissions.indexOf(agent) !== -1
+        ? 'bypassPermissions'
+        : (agentPrefs.permissionMode || 'default');
+
       var payload = {
         agentId: agent,
         prompt: prompt,
-        projectPath: null, // Will use current project
-        planMode: false,
-        thinking: false,
-        useWorktree: false,
-        permissionMode: 'default',
-        execModel: 'default'
+        projectPath: window.getProjectPath ? window.getProjectPath() : null,
+        baseBranch: null,
+        planMode: settings.taskPlanMode || false,
+        thinking: true,
+        useWorktree: settings.taskUseWorktree || false,
+        permissionMode: permissionMode,
+        execModel: agentPrefs.execModel || 'default',
+        reasoningEffort: agent === 'codex' ? (agentPrefs.reasoningEffort || null) : null,
+        agentMode: agent === 'opencode' ? (agentPrefs.agentMode || 'build') : null,
+        codexMode: agent === 'codex' ? (agentPrefs.agentMode || 'default') : null,
+        claudeRuntime: null,
+        attachments: [],
+        multiCreate: false
       };
 
+      console.log('[CommandCenter] CreateAgentSession', payload);
       window.tauriBridge.ipcRenderer.send('CreateAgentSession', payload);
       closeAgentPopup();
 
