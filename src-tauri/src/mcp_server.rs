@@ -626,9 +626,14 @@ async fn tool_create_task(arguments: Value, server_state: McpServerState) -> Res
         attachments: Vec::new(),
     };
 
-    let created =
-        create_agent_session_internal(server_state.app.clone(), payload, &server_state.state, true)
-            .await?;
+    let created = create_agent_session_internal(
+        server_state.app.clone(),
+        payload,
+        &server_state.state,
+        true,
+        true,
+    )
+    .await?;
 
     let should_start = args.start.unwrap_or(true);
     if should_start {

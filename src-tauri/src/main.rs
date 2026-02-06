@@ -4038,7 +4038,7 @@ async fn create_agent_session(
     state: State<'_, AppState>,
 ) -> Result<CreateAgentResult, String> {
     let emit_to_main = window.label() != "main";
-    create_agent_session_internal(app, payload, state.inner(), emit_to_main).await
+    create_agent_session_internal(app, payload, state.inner(), emit_to_main, true).await
 }
 
 pub(crate) async fn create_agent_session_internal(
@@ -4046,6 +4046,7 @@ pub(crate) async fn create_agent_session_internal(
     mut payload: CreateAgentPayload,
     state: &AppState,
     emit_to_main: bool,
+    include_local_changes_in_worktree: bool,
 ) -> Result<CreateAgentResult, String> {
     let agent = find_agent(&state.config, &payload.agent_id)
         .ok_or_else(|| format!("Unknown agent id: {}", payload.agent_id))?;
@@ -4093,12 +4094,30 @@ pub(crate) async fn create_agent_session_internal(
 
             // Preflight: if repo has uncommitted changes and base branch differs,
             // warn early instead of failing during patch application.
-            if worktree::has_uncommitted_changes(repo_root).await? {
+            if include_local_changes_in_worktree
+                && worktree::has_uncommitted_changes(repo_root).await?
+            {
                 if let Ok(current_branch) = worktree::current_branch(repo_root).await {
                     if current_branch != base_branch {
+                        let status =
+                            worktree::run_git_command(repo_root, &["status", "--porcelain"])
+                                .await
+                                .unwrap_or_default();
+                        let mut status_preview = status
+                            .lines()
+                            .take(12)
+                            .map(|line| line.trim_end().to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        if !status_preview.is_empty() {
+                            status_preview = format!("\n\nUncommitted:\n{}", status_preview);
+                            if status.lines().count() > 12 {
+                                status_preview.push_str("\n...");
+                            }
+                        }
                         return Err(format!(
-                            "Uncommitted changes detected on branch '{}'. Base branch '{}' differs, so changes may not apply cleanly. Stash/commit changes, switch base branch to '{}', or disable worktrees.",
-                            current_branch, base_branch, current_branch
+                            "Uncommitted changes detected on branch '{}'. Base branch '{}' differs, so changes may not apply cleanly. Stash/commit changes, switch base branch to '{}', or disable worktrees.{}",
+                            current_branch, base_branch, current_branch, status_preview
                         ));
                     }
                 }
@@ -4117,27 +4136,30 @@ pub(crate) async fn create_agent_session_internal(
             let (created_path, created_branch) =
                 worktree::create_worktree_with_animal_name(repo_root, &repo_slug, &base_ref)
                     .await?;
-            if let Err(err) = worktree::apply_uncommitted_changes(sync_source, &created_path).await
-            {
-                let conflict = err.contains("Applied with conflicts")
-                    || err.contains("Patch applied partially")
-                    || err.contains("Resolve conflicts");
-                if conflict {
+            if include_local_changes_in_worktree {
+                if let Err(err) =
+                    worktree::apply_uncommitted_changes(sync_source, &created_path).await
+                {
+                    let conflict = err.contains("Applied with conflicts")
+                        || err.contains("Patch applied partially")
+                        || err.contains("Resolve conflicts");
+                    if conflict {
+                        eprintln!(
+                            "[worktree] Apply uncommitted changes failed (conflicts): {}",
+                            err
+                        );
+                        let _ = worktree::remove_worktree(repo_root, &created_path).await;
+                        return Err(format!(
+                            "Uncommitted changes could not be applied to the new worktree. Resolve conflicts or disable worktree creation. Details: {}",
+                            err
+                        ));
+                    }
                     eprintln!(
-                        "[worktree] Apply uncommitted changes failed (conflicts): {}",
+                        "[worktree] Apply uncommitted changes failed, falling back to full sync: {}",
                         err
                     );
-                    let _ = worktree::remove_worktree(repo_root, &created_path).await;
-                    return Err(format!(
-                        "Uncommitted changes could not be applied to the new worktree. Resolve conflicts or disable worktree creation. Details: {}",
-                        err
-                    ));
+                    worktree::sync_workspace_from_source(sync_source, &created_path).await?;
                 }
-                eprintln!(
-                    "[worktree] Apply uncommitted changes failed, falling back to full sync: {}",
-                    err
-                );
-                worktree::sync_workspace_from_source(sync_source, &created_path).await?;
             }
 
             // Store info for deferred branch rename
@@ -4701,7 +4723,7 @@ pub(crate) async fn create_task_from_discord(
         multi_create: false,
     };
 
-    let result = create_agent_session_internal(app.clone(), payload, state, false).await?;
+    let result = create_agent_session_internal(app.clone(), payload, state, false, true).await?;
     if let Some(window) = app.get_webview_window("main") {
         let task_snapshot = if let Ok(conn) = state.db.lock() {
             db::list_tasks(&conn)
@@ -4780,9 +4802,13 @@ pub(crate) async fn start_task_internal(
     let window_ref = window.as_ref();
     let emit_status = |message: &str, color: &str, status_state: &str| -> Result<(), String> {
         if let Some(window) = window_ref {
-            window
-                .emit("StatusUpdate", (&task_id, message, color, status_state))
-                .map_err(|e| e.to_string())?;
+            if let Err(e) = window.emit("StatusUpdate", (&task_id, message, color, status_state)) {
+                // Don't fail task execution because the UI can't receive events.
+                eprintln!(
+                    "[Harness] Failed to emit StatusUpdate to window: task_id={} err={}",
+                    task_id, e
+                );
+            }
         } else if let Some(main_window) = app.get_webview_window("main") {
             let _ = main_window.emit("StatusUpdate", (&task_id, message, color, status_state));
         }
@@ -8484,7 +8510,14 @@ async fn run_automation_and_start_task(
         attachments: Vec::new(),
     };
 
-    let result = match create_agent_session_internal(app.clone(), create_payload, state, true).await
+    let result = match create_agent_session_internal(
+        app.clone(),
+        create_payload,
+        state,
+        true,
+        false,
+    )
+    .await
     {
         Ok(result) => result,
         Err(err) => {
@@ -8510,7 +8543,31 @@ async fn run_automation_and_start_task(
 
     let task_id = result.task_id.clone();
 
-    // Record run in history.
+    // Auto-start the task.
+    let window = app.get_webview_window("main");
+    if let Err(err) = start_task_internal(task_id.clone(), state, app, window).await {
+        // Persist the error so it shows up in the Automations UI.
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+        let mut updated = automation.clone();
+        updated.last_error = Some(err.clone());
+        updated.updated_at = now;
+        let _ = db::update_automation(&conn, &updated);
+
+        let run = db::AutomationRunRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            automation_id: automation.id.clone(),
+            task_id: Some(task_id.clone()),
+            scheduled_for,
+            created_at: now,
+            error: Some(err.clone()),
+        };
+        let _ = db::insert_automation_run(&conn, &run);
+
+        return Err(err);
+    }
+
+    // Record successful run in history.
     {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         let run = db::AutomationRunRecord {
@@ -8523,10 +8580,6 @@ async fn run_automation_and_start_task(
         };
         db::insert_automation_run(&conn, &run).map_err(|e| e.to_string())?;
     }
-
-    // Auto-start the task.
-    let window = app.get_webview_window("main");
-    start_task_internal(task_id.clone(), state, app, window).await?;
 
     Ok(Some(task_id))
 }
