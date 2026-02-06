@@ -16,6 +16,8 @@
     automations: [],
     selectedId: null,
     refreshing: false,
+    // When editing an existing schedule, we keep its saved prompt unless the user opts into using the draft.
+    editPromptOverride: null,
   };
 
   function byId(id) {
@@ -108,6 +110,33 @@
     var el = byId('initialPrompt');
     var raw = el ? (el.innerText || el.textContent || '') : '';
     return (raw || '').toString();
+  }
+
+  function setPromptPreview(text) {
+    var el = byId('taskSchedulerPromptPreview');
+    if (!el) return;
+    el.value = (text || '').toString();
+  }
+
+  async function copyToClipboard(text) {
+    var t = (text || '').toString();
+    if (!t) return;
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        await navigator.clipboard.writeText(t);
+        notify('Copied', 'green');
+        return;
+      }
+    } catch (e) {}
+    // Fallback
+    var ta = byId('taskSchedulerPromptPreview');
+    if (!ta) return;
+    try {
+      ta.focus();
+      ta.select();
+      document.execCommand('copy');
+      notify('Copied', 'green');
+    } catch (e) {}
   }
 
   function getExecModel() {
@@ -240,6 +269,7 @@
 
   function setSelected(id) {
     state.selectedId = id || null;
+    state.editPromptOverride = null;
     renderList();
     syncActionButtons();
   }
@@ -310,6 +340,13 @@
     syncFormVisibility();
     schedulePreviewRefresh();
     syncActionButtons();
+
+    // Prompt preview: show saved prompt for existing schedules, otherwise show current draft.
+    if (a && a.prompt) {
+      setPromptPreview(a.prompt);
+    } else {
+      setPromptPreview(getPromptText());
+    }
   }
 
   function syncFormVisibility() {
@@ -397,6 +434,8 @@
       if (a.execModel && a.execModel !== 'default') metaParts.push(a.execModel);
       if (!getProjectPath() && a.projectPath) metaParts.push(basename(a.projectPath));
       var meta = metaParts.join(' · ');
+      var prompt = (a.prompt || '').toString().replace(/\s+/g, ' ').trim();
+      if (prompt.length > 120) prompt = prompt.slice(0, 120) + '...';
 
       div.innerHTML =
         '<div class="task-scheduler-item-top">' +
@@ -407,6 +446,7 @@
           '<div class="task-scheduler-item-meta">' + escapeHtml(meta) + '</div>' +
           '<div class="task-scheduler-pill ' + (a.enabled ? '' : 'off') + '">' + (a.enabled ? 'On' : 'Off') + '</div>' +
         '</div>' +
+        (prompt ? ('<div class="task-scheduler-item-prompt">' + escapeHtml(prompt) + '</div>') : '') +
         (a.lastError ? ('<div class="task-scheduler-item-error">Last error: ' + escapeHtml(String(a.lastError)) + '</div>') : '');
 
       div.addEventListener('click', function () {
@@ -434,11 +474,16 @@
     }
     var enabled = list.filter(function (a) { return a && a.enabled; }).length;
     var total = list.length;
+    var soonest = null;
+    list.forEach(function (a) {
+      if (!a || !a.enabled || !a.nextRunAt) return;
+      if (!soonest || a.nextRunAt < soonest) soonest = a.nextRunAt;
+    });
     if (enabled === total) {
-      el.textContent = total === 1 ? '1 schedule' : (total + ' schedules');
+      el.textContent = (total === 1 ? '1 schedule' : (total + ' schedules')) + (soonest ? (' · Next ' + formatRelative(soonest)) : '');
       return;
     }
-    el.textContent = enabled + ' on' + ' / ' + total;
+    el.textContent = enabled + ' on / ' + total + (soonest ? (' · Next ' + formatRelative(soonest)) : '');
   }
 
   async function refreshAutomations() {
@@ -507,9 +552,18 @@
   }
 
   async function saveSchedule() {
-    var promptText = getPromptText();
+    var promptText = null;
+    if (state.selectedId) {
+      // When editing, prefer the saved prompt unless the user explicitly opts into using the draft.
+      var aSel = getSelectedAutomation();
+      promptText = (state.editPromptOverride !== null)
+        ? state.editPromptOverride
+        : (aSel ? (aSel.prompt || '') : '');
+    } else {
+      promptText = getPromptText();
+    }
     if (!promptText || !promptText.trim()) {
-      notify('Add a prompt first (left side).', 'red');
+      notify('Prompt is empty. Add a draft prompt first.', 'red');
       return;
     }
 
@@ -642,6 +696,10 @@
     var toggleBtn = byId('taskSchedulerToggleBtn');
     var deleteBtn = byId('taskSchedulerDeleteBtn');
 
+    var inlineMeta = byId('taskSchedulerInlineMeta');
+    var useDraftBtn = byId('taskSchedulerUseDraftPromptBtn');
+    var copyPromptBtn = byId('taskSchedulerCopyPromptBtn');
+
     function openModal() {
       try {
         if (window.$ && typeof window.$ === 'function') {
@@ -653,9 +711,25 @@
     }
 
     if (openBtn) openBtn.addEventListener('click', function () {
-      // Default to a fresh form when opening.
+      // "+ New" always starts from the current draft prompt.
       clearForm();
+      setPromptPreview(getPromptText());
       openModal();
+    });
+    if (inlineMeta) inlineMeta.addEventListener('click', function () {
+      // Clicking the meta is "Manage": open and keep selection (or auto-select first).
+      openModal();
+    });
+
+    if (useDraftBtn) useDraftBtn.addEventListener('click', function () {
+      var draft = getPromptText();
+      state.editPromptOverride = draft;
+      setPromptPreview(draft);
+      notify('Using draft prompt for this schedule update', 'green');
+    });
+    if (copyPromptBtn) copyPromptBtn.addEventListener('click', function () {
+      var ta = byId('taskSchedulerPromptPreview');
+      copyToClipboard(ta ? ta.value : '');
     });
 
     if (modeEl) {
@@ -694,6 +768,24 @@
       window.$('#taskSchedulerModal').on('shown.bs.modal', function () {
         refreshAutomations();
         schedulePreviewRefresh();
+
+        // If nothing is selected, select the first schedule for easier scanning.
+        if (!state.selectedId) {
+          var projectPath = getProjectPath();
+          var list = (state.automations || []).slice();
+          if (projectPath) {
+            list = list.filter(function (a) { return a && (a.projectPath || null) === projectPath; });
+          }
+          if (list.length && list[0] && list[0].id) {
+            setSelected(list[0].id);
+            setFormFromAutomation(list[0]);
+          } else {
+            setPromptPreview(getPromptText());
+          }
+        } else {
+          var cur = getSelectedAutomation();
+          if (cur) setFormFromAutomation(cur);
+        }
       });
     }
 
