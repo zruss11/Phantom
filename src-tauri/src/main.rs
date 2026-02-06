@@ -1147,67 +1147,165 @@ fn write_codex_config_overlay(
     config_path: &Path,
     overlay: &CodexConfigOverlay,
 ) -> Result<(), String> {
-    let mut root: toml::Value = if let Ok(raw) = std::fs::read_to_string(config_path) {
-        toml::from_str(&raw).unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()))
-    } else {
-        toml::Value::Table(toml::map::Map::new())
-    };
-
-    if !root.is_table() {
-        root = toml::Value::Table(toml::map::Map::new());
+    // Preserve user formatting/comments by editing the raw file text in-place rather than
+    // re-serializing the entire TOML document.
+    fn escape_toml_basic_string(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for ch in s.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ => out.push(ch),
+            }
+        }
+        out
     }
 
-    {
-        let table = root.as_table_mut().expect("table ensured");
-        // personality at top-level
-        match overlay
-            .personality
-            .as_ref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
+    fn is_table_header_line(line: &str) -> bool {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            return false;
+        }
+        t.starts_with('[')
+    }
+
+    fn find_key_line(lines: &[String], key: &str, start: usize, end: usize) -> Option<usize> {
+        for i in start..end {
+            let t = lines[i].trim_start();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if let Some((lhs, _)) = t.split_once('=') {
+                if lhs.trim() == key {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    let raw = std::fs::read_to_string(config_path).unwrap_or_default();
+    let newline = if raw.contains("\r\n") { "\r\n" } else { "\n" };
+    let had_trailing_newline = raw.ends_with('\n');
+    let mut lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
+
+    let first_table_idx = lines
+        .iter()
+        .position(|l| is_table_header_line(l))
+        .unwrap_or(lines.len());
+
+    // Update/remove top-level `personality`.
+    let personality = overlay
+        .personality
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("\"{}\"", escape_toml_basic_string(s)));
+    if let Some(idx) = find_key_line(&lines, "personality", 0, first_table_idx) {
+        match personality {
             Some(value) => {
-                table.insert(
-                    "personality".to_string(),
-                    toml::Value::String(value.to_string()),
-                );
+                let prefix_len = lines[idx].len() - lines[idx].trim_start().len();
+                let prefix = &lines[idx][..prefix_len];
+                // Best-effort: keep inline comment if present.
+                let comment = lines[idx]
+                    .find('#')
+                    .map(|pos| &lines[idx][pos..])
+                    .unwrap_or("");
+                lines[idx] = format!("{prefix}personality = {value}{comment}");
             }
             None => {
-                table.remove("personality");
+                lines.remove(idx);
             }
         }
+    } else if let Some(value) = personality {
+        // Insert near the top, after any leading comment/blank lines, but before the first table.
+        let mut insert_idx = 0usize;
+        while insert_idx < first_table_idx {
+            let t = lines[insert_idx].trim_start();
+            if t.is_empty() || t.starts_with('#') {
+                insert_idx += 1;
+                continue;
+            }
+            break;
+        }
+        lines.insert(insert_idx, format!("personality = {value}"));
+    }
 
-        // features table
-        let features_entry = table
-            .entry("features".to_string())
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-        if !features_entry.is_table() {
-            *features_entry = toml::Value::Table(toml::map::Map::new());
-        }
-        let features = features_entry.as_table_mut().expect("table ensured");
+    // Update `[features]` table booleans (only for fields set in overlay).
+    let mut feature_updates: Vec<(&str, bool)> = Vec::new();
+    if let Some(v) = overlay.feature_collaboration_modes {
+        feature_updates.push(("collaboration_modes", v));
+    }
+    if let Some(v) = overlay.feature_steer {
+        feature_updates.push(("steer", v));
+    }
+    if let Some(v) = overlay.feature_unified_exec {
+        feature_updates.push(("unified_exec", v));
+    }
+    if let Some(v) = overlay.feature_collab {
+        feature_updates.push(("collab", v));
+    }
+    if let Some(v) = overlay.feature_apps {
+        feature_updates.push(("apps", v));
+    }
 
-        if let Some(v) = overlay.feature_collaboration_modes {
-            features.insert("collaboration_modes".to_string(), toml::Value::Boolean(v));
-        }
-        if let Some(v) = overlay.feature_steer {
-            features.insert("steer".to_string(), toml::Value::Boolean(v));
-        }
-        if let Some(v) = overlay.feature_unified_exec {
-            features.insert("unified_exec".to_string(), toml::Value::Boolean(v));
-        }
-        if let Some(v) = overlay.feature_collab {
-            features.insert("collab".to_string(), toml::Value::Boolean(v));
-        }
-        if let Some(v) = overlay.feature_apps {
-            features.insert("apps".to_string(), toml::Value::Boolean(v));
+    if !feature_updates.is_empty() {
+        let features_header_idx = lines
+            .iter()
+            .position(|l| l.trim() == "[features]");
+
+        let (body_start, mut body_end) = if let Some(h) = features_header_idx {
+            let start = h + 1;
+            let end = lines
+                .iter()
+                .enumerate()
+                .skip(start)
+                .find(|(_, l)| is_table_header_line(l))
+                .map(|(i, _)| i)
+                .unwrap_or(lines.len());
+            (start, end)
+        } else {
+            // Append a new features table at the end.
+            if !lines.is_empty() {
+                // Ensure a blank line before the new table for readability.
+                if lines.last().map(|l| !l.trim().is_empty()).unwrap_or(false) {
+                    lines.push(String::new());
+                }
+            }
+            lines.push("[features]".to_string());
+            let start = lines.len();
+            (start, start)
+        };
+
+        for (key, val) in feature_updates {
+            let value = if val { "true" } else { "false" };
+            if let Some(idx) = find_key_line(&lines, key, body_start, body_end) {
+                let prefix_len = lines[idx].len() - lines[idx].trim_start().len();
+                let prefix = &lines[idx][..prefix_len];
+                let comment = lines[idx]
+                    .find('#')
+                    .map(|pos| &lines[idx][pos..])
+                    .unwrap_or("");
+                lines[idx] = format!("{prefix}{key} = {value}{comment}");
+            } else {
+                lines.insert(body_end, format!("{key} = {value}"));
+                body_end += 1;
+            }
         }
     }
 
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create config dir failed: {e}"))?;
     }
-    let payload =
-        toml::to_string_pretty(&root).map_err(|e| format!("serialize config.toml failed: {e}"))?;
+
+    let mut payload = lines.join(newline);
+    if had_trailing_newline {
+        payload.push_str(newline);
+    }
+
     std::fs::write(config_path, payload).map_err(|e| format!("write config.toml failed: {e}"))?;
     Ok(())
 }
