@@ -453,6 +453,40 @@
         if (channel === 'getSettings') {
           return tauriInvoke('get_settings');
         }
+        // OpenClaw / Connections
+        if (channel === 'openclawProbe') {
+          return tauriInvoke('openclaw_probe');
+        }
+        if (channel === 'openclawInstallBrew') {
+          return tauriInvoke('openclaw_install_brew');
+        }
+        if (channel === 'openclawInstallNode') {
+          return tauriInvoke('openclaw_install_node');
+        }
+        if (channel === 'openclawInstallCli') {
+          return tauriInvoke('openclaw_install_cli');
+        }
+        if (channel === 'openclawGatewayInstall') {
+          return tauriInvoke('openclaw_gateway_install');
+        }
+        if (channel === 'openclawGatewayStart') {
+          return tauriInvoke('openclaw_gateway_start');
+        }
+        if (channel === 'openclawGatewayStop') {
+          return tauriInvoke('openclaw_gateway_stop');
+        }
+        if (channel === 'openclawGatewayRestart') {
+          return tauriInvoke('openclaw_gateway_restart');
+        }
+        if (channel === 'openclawGatewayUninstall') {
+          return tauriInvoke('openclaw_gateway_uninstall');
+        }
+        if (channel === 'openclawDoctorFix') {
+          return tauriInvoke('openclaw_doctor_fix');
+        }
+        if (channel === 'openclawDashboardUrl') {
+          return tauriInvoke('openclaw_dashboard_url');
+        }
         if (channel === 'saveSettings') {
           return tauriInvoke('save_settings', { settings: args[0] });
         }
