@@ -17,12 +17,13 @@ mod webhook;
 mod worktree;
 
 use command_center::{
-    CommandCenterData, GhCliAuthStatus, GithubIssue, GithubWorkflow,
-    LinearCycle, LinearIssue, LinearProject, SentryError, SentryOrganization, SentryProject,
+    CommandCenterData, GhCliAuthStatus, GithubIssue, GithubWorkflow, LinearCycle, LinearIssue,
+    LinearProject, SentryError, SentryOrganization, SentryProject,
 };
 use utils::{default_search_paths, resolve_command_path, resolve_gh_binary, truncate_str};
 
-use chrono::TimeZone;
+use chrono::{Local, TimeZone};
+use croner::Cron;
 use phantom_harness_backend::cli::{
     AgentCliKind, AgentProcessClient, AvailableCommand, ImageContent, StreamingUpdate,
     TokenUsageInfo, UserInputQuestion,
@@ -43,6 +44,7 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::process::Stdio;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Instant;
 use tauri::{
@@ -399,6 +401,10 @@ pub(crate) struct AgentConfig {
 const MAX_ATTACHMENT_BYTES: u64 = 5 * 1024 * 1024; // 5MB cap to avoid base64 memory spikes
 const MAX_SESSION_MESSAGES: usize = 200;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct AttachmentRef {
     id: String,
@@ -478,6 +484,57 @@ pub(crate) struct CreateAgentPayload {
     pub(crate) multi_create: bool,
     #[serde(default)]
     pub(crate) attachments: Vec<AttachmentRef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateAutomationPayload {
+    name: String,
+    agent_id: String,
+    exec_model: String,
+    prompt: String,
+    project_path: Option<String>,
+    base_branch: Option<String>,
+    #[serde(default)]
+    plan_mode: bool,
+    #[serde(default = "default_true")]
+    thinking: bool,
+    #[serde(default = "default_true")]
+    use_worktree: bool,
+    #[serde(default)]
+    permission_mode: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+    #[serde(default)]
+    agent_mode: Option<String>,
+    #[serde(default)]
+    codex_mode: Option<String>,
+    #[serde(default)]
+    claude_runtime: Option<String>,
+    cron: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct UpdateAutomationPayload {
+    name: Option<String>,
+    enabled: Option<bool>,
+    agent_id: Option<String>,
+    exec_model: Option<String>,
+    prompt: Option<String>,
+    project_path: Option<String>,
+    base_branch: Option<String>,
+    plan_mode: Option<bool>,
+    thinking: Option<bool>,
+    use_worktree: Option<bool>,
+    permission_mode: Option<String>,
+    reasoning_effort: Option<String>,
+    agent_mode: Option<String>,
+    codex_mode: Option<String>,
+    claude_runtime: Option<String>,
+    cron: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -839,8 +896,8 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
 }
 
 fn read_attachment_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|e| format!("Failed to stat attachment: {}", e))?;
+    let metadata =
+        std::fs::metadata(path).map_err(|e| format!("Failed to stat attachment: {}", e))?;
     if metadata.len() > max_bytes {
         return Err(format!(
             "Attachment too large ({} bytes). Max allowed is {} bytes.",
@@ -1337,6 +1394,143 @@ fn resolve_project_path(project_path: &Option<String>) -> Result<PathBuf, String
     } else {
         std::env::current_dir().map_err(|err| format!("cwd error: {}", err))
     }
+}
+
+fn expand_tilde_path(path: &str) -> PathBuf {
+    let trimmed = path.trim();
+    if trimmed.starts_with('~') {
+        if let Some(home) = dirs::home_dir() {
+            let rest = trimmed.trim_start_matches('~').trim_start_matches('/');
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(trimmed)
+}
+
+fn resolve_project_path_with_settings(
+    project_path: &Option<String>,
+    settings: &Settings,
+) -> Result<(PathBuf, Option<String>), String> {
+    let raw = project_path
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let Some(raw) = raw else {
+        let cwd = std::env::current_dir().map_err(|err| format!("cwd error: {}", err))?;
+        return Ok((cwd, None));
+    };
+
+    let input_path = expand_tilde_path(&raw);
+
+    let mut tried: Vec<PathBuf> = Vec::new();
+    let mut consider = |candidate: PathBuf| -> Option<PathBuf> {
+        tried.push(candidate.clone());
+        if candidate.exists() && candidate.is_dir() {
+            Some(candidate)
+        } else {
+            None
+        }
+    };
+
+    if input_path.is_absolute() {
+        if let Some(found) = consider(input_path.clone()) {
+            return Ok((found.clone(), Some(found.to_string_lossy().to_string())));
+        }
+        return Err(format!(
+            "Project path does not exist: {}",
+            input_path.to_string_lossy()
+        ));
+    }
+
+    // Try relative to current directory first.
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(found) = consider(cwd.join(&input_path)) {
+            return Ok((found.clone(), Some(found.to_string_lossy().to_string())));
+        }
+    }
+
+    // Try resolving against the user's last task project path (and a couple parents).
+    if let Some(base) = settings
+        .task_project_path
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        let base_path = expand_tilde_path(&base);
+
+        let mut bases: Vec<PathBuf> = Vec::new();
+        bases.push(base_path.clone());
+        if let Some(parent) = base_path.parent() {
+            bases.push(parent.to_path_buf());
+            if let Some(grandparent) = parent.parent() {
+                bases.push(grandparent.to_path_buf());
+            }
+        }
+
+        for base in bases {
+            // If the base itself matches the requested folder name, accept it.
+            if base
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n == raw)
+                .unwrap_or(false)
+            {
+                if let Some(found) = consider(base.clone()) {
+                    return Ok((found.clone(), Some(found.to_string_lossy().to_string())));
+                }
+            }
+
+            if let Some(found) = consider(base.join(&input_path)) {
+                return Ok((found.clone(), Some(found.to_string_lossy().to_string())));
+            }
+        }
+    }
+
+    // Try resolving against allowlist roots.
+    let allowlist = settings
+        .task_project_allowlist
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    for entry in allowlist {
+        let base = expand_tilde_path(&entry);
+
+        if base
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == raw)
+            .unwrap_or(false)
+        {
+            if let Some(found) = consider(base.clone()) {
+                return Ok((found.clone(), Some(found.to_string_lossy().to_string())));
+            }
+        }
+
+        if let Some(found) = consider(base.join(&input_path)) {
+            return Ok((found.clone(), Some(found.to_string_lossy().to_string())));
+        }
+    }
+
+    tried.sort();
+    tried.dedup();
+    let mut message = format!("Project path does not exist: {}", raw);
+    if !tried.is_empty() {
+        let shown = tried
+            .iter()
+            .take(5)
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        message.push_str(&format!(". Tried: {}", shown.join(", ")));
+        if tried.len() > 5 {
+            message.push_str(&format!(" (and {} more)", tried.len() - 5));
+        }
+    }
+    message.push_str(". Tip: use an absolute path (Browse) or set a default project in Settings.");
+    Err(message)
 }
 
 fn normalize_allowlist_path(path: &str) -> PathBuf {
@@ -3849,17 +4043,31 @@ async fn create_agent_session(
 
 pub(crate) async fn create_agent_session_internal(
     app: AppHandle,
-    payload: CreateAgentPayload,
+    mut payload: CreateAgentPayload,
     state: &AppState,
     emit_to_main: bool,
 ) -> Result<CreateAgentResult, String> {
     let agent = find_agent(&state.config, &payload.agent_id)
         .ok_or_else(|| format!("Unknown agent id: {}", payload.agent_id))?;
 
-    let source_path = resolve_project_path(&payload.project_path)?;
+    let settings = state.settings.lock().await.clone();
+    let (source_path, normalized_project_path) =
+        resolve_project_path_with_settings(&payload.project_path, &settings)?;
+    payload.project_path = normalized_project_path;
+    if !source_path.exists() {
+        return Err(format!(
+            "Project path does not exist: {}",
+            source_path.to_string_lossy()
+        ));
+    }
+    if !source_path.is_dir() {
+        return Err(format!(
+            "Project path is not a directory: {}",
+            source_path.to_string_lossy()
+        ));
+    }
     let mut cwd = source_path.clone();
     let mut worktree_path: Option<PathBuf> = None;
-    let settings = state.settings.lock().await.clone();
 
     // Variables for deferred branch rename (populated if worktree is created)
     let mut deferred_branch_rename: Option<(PathBuf, String, PathBuf)> = None; // (repo_root, animal_name, workspace_path)
@@ -4804,11 +5012,14 @@ pub(crate) async fn start_task_internal(
             .take()
             .ok_or("No prompt pending - task may have already started")?;
         let attachments = std::mem::take(&mut handle.pending_attachments);
-        push_session_message(&mut handle.messages, serde_json::json!({
-            "message_type": "user_message",
-            "content": prompt,
-            "timestamp": user_timestamp
-        }));
+        push_session_message(
+            &mut handle.messages,
+            serde_json::json!({
+                "message_type": "user_message",
+                "content": prompt,
+                "timestamp": user_timestamp
+            }),
+        );
         // Create a fresh cancellation token for this generation
         handle.cancel_token = CancellationToken::new();
         (
@@ -5589,15 +5800,18 @@ pub(crate) async fn start_task_internal(
         // Store message in memory
         {
             let mut handle = handle_ref.lock().await;
-            push_session_message(&mut handle.messages, serde_json::json!({
-                "message_type": msg.message_type,
-                "content": msg.content,
-                "reasoning": msg.reasoning,
-                "name": msg.name,
-                "arguments": msg.arguments,
-                "tool_return": msg.tool_return,
-                "timestamp": msg_timestamp
-            }));
+            push_session_message(
+                &mut handle.messages,
+                serde_json::json!({
+                    "message_type": msg.message_type,
+                    "content": msg.content,
+                    "reasoning": msg.reasoning,
+                    "name": msg.name,
+                    "arguments": msg.arguments,
+                    "tool_return": msg.tool_return,
+                    "timestamp": msg_timestamp
+                }),
+            );
         }
 
         // Persist to DB
@@ -8187,6 +8401,380 @@ fn load_tasks(state: State<'_, AppState>) -> Result<Vec<db::TaskRecord>, String>
     db::list_tasks(&conn).map_err(|e| e.to_string())
 }
 
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn compute_next_run_at(cron_expr: &str, from: chrono::DateTime<Local>) -> Result<i64, String> {
+    let expr = cron_expr.trim();
+    if expr.is_empty() {
+        return Err("Cron expression is required.".to_string());
+    }
+    let cron = Cron::from_str(expr).map_err(|e| format!("Invalid cron expression: {}", e))?;
+    let next = cron
+        .find_next_occurrence(&from, false)
+        .map_err(|e| format!("Unable to compute next run time: {}", e))?;
+    Ok(next.timestamp())
+}
+
+#[tauri::command]
+fn preview_automation_next_run(cron: String) -> Result<i64, String> {
+    compute_next_run_at(&cron, Local::now())
+}
+
+fn normalize_permission_mode(agent_id: &str, permission_mode: Option<String>) -> String {
+    // Agents with their own permission mechanisms always use bypass.
+    // Matches create task behavior in the GUI.
+    let agents_with_own_permissions = [
+        "codex",
+        "claude-code",
+        "droid",
+        "factory-droid",
+        "amp",
+        "opencode",
+    ];
+    if agents_with_own_permissions.contains(&agent_id) {
+        return "bypassPermissions".to_string();
+    }
+    permission_mode
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+async fn run_automation_and_start_task(
+    app: AppHandle,
+    state: &AppState,
+    automation: &db::AutomationRecord,
+    scheduled_for: i64,
+) -> Result<Option<String>, String> {
+    let now = chrono::Utc::now().timestamp();
+
+    // Always advance the schedule so we don't rerun the same tick if something fails.
+    let next_run_at = compute_next_run_at(&automation.cron, Local::now())?;
+
+    // Update automation bookkeeping.
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let mut updated = automation.clone();
+        updated.next_run_at = Some(next_run_at);
+        updated.last_run_at = Some(now);
+        updated.last_error = None;
+        updated.updated_at = now;
+        db::update_automation(&conn, &updated).map_err(|e| e.to_string())?;
+    }
+
+    let create_payload = CreateAgentPayload {
+        agent_id: automation.agent_id.clone(),
+        prompt: automation.prompt.clone(),
+        project_path: automation.project_path.clone(),
+        base_branch: automation.base_branch.clone(),
+        plan_mode: automation.plan_mode,
+        thinking: automation.thinking,
+        use_worktree: automation.use_worktree,
+        permission_mode: automation.permission_mode.clone(),
+        exec_model: automation.exec_model.clone(),
+        reasoning_effort: automation.reasoning_effort.clone(),
+        agent_mode: automation.agent_mode.clone(),
+        codex_mode: automation.codex_mode.clone(),
+        claude_runtime: automation.claude_runtime.clone(),
+        multi_create: false,
+        attachments: Vec::new(),
+    };
+
+    let result = match create_agent_session_internal(app.clone(), create_payload, state, true).await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            let mut updated = automation.clone();
+            updated.last_error = Some(err.clone());
+            updated.updated_at = now;
+            let _ = db::update_automation(&conn, &updated);
+
+            let run = db::AutomationRunRecord {
+                id: uuid::Uuid::new_v4().to_string(),
+                automation_id: automation.id.clone(),
+                task_id: None,
+                scheduled_for,
+                created_at: now,
+                error: Some(err.clone()),
+            };
+            let _ = db::insert_automation_run(&conn, &run);
+
+            return Err(err);
+        }
+    };
+
+    let task_id = result.task_id.clone();
+
+    // Record run in history.
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let run = db::AutomationRunRecord {
+            id: uuid::Uuid::new_v4().to_string(),
+            automation_id: automation.id.clone(),
+            task_id: Some(task_id.clone()),
+            scheduled_for,
+            created_at: now,
+            error: None,
+        };
+        db::insert_automation_run(&conn, &run).map_err(|e| e.to_string())?;
+    }
+
+    // Auto-start the task.
+    let window = app.get_webview_window("main");
+    start_task_internal(task_id.clone(), state, app, window).await?;
+
+    Ok(Some(task_id))
+}
+
+async fn run_due_automations(app: AppHandle, state: &AppState) -> Result<(), String> {
+    let now = chrono::Utc::now().timestamp();
+    let due = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::list_due_automations(&conn, now).map_err(|e| e.to_string())?
+    };
+
+    for automation in due {
+        let scheduled_for = automation.next_run_at.unwrap_or(now);
+        if let Err(err) =
+            run_automation_and_start_task(app.clone(), state, &automation, scheduled_for).await
+        {
+            eprintln!(
+                "[Automations] run failed: automation_id={} name={} err={}",
+                automation.id, automation.name, err
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn automation_scheduler_loop(app: AppHandle, state: AppState) {
+    // Give the app a moment to finish booting (windows/events).
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    let mut interval = tokio::time::interval(Duration::from_secs(15));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        interval.tick().await;
+        if let Err(err) = run_due_automations(app.clone(), &state).await {
+            eprintln!("[Automations] scheduler tick failed: {}", err);
+        }
+    }
+}
+
+#[tauri::command]
+fn load_automations(state: State<'_, AppState>) -> Result<Vec<db::AutomationRecord>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_automations(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn load_automation_runs(
+    state: State<'_, AppState>,
+    limit: Option<u32>,
+) -> Result<Vec<db::AutomationRunRecord>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let limit = limit.unwrap_or(25).clamp(1, 200) as usize;
+    db::list_automation_runs(&conn, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_automation(
+    payload: CreateAutomationPayload,
+    state: State<'_, AppState>,
+) -> Result<db::AutomationRecord, String> {
+    let now = chrono::Utc::now().timestamp();
+    let agent_id = payload.agent_id.trim().to_string();
+    if agent_id.is_empty() {
+        return Err("Agent is required.".to_string());
+    }
+
+    let name = payload.name.trim().to_string();
+    if name.is_empty() {
+        return Err("Name is required.".to_string());
+    }
+
+    let prompt = payload.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("Prompt is required.".to_string());
+    }
+
+    let exec_model = payload.exec_model.trim().to_string();
+    let exec_model = if exec_model.is_empty() {
+        "default".to_string()
+    } else {
+        exec_model
+    };
+
+    let cron = payload.cron.trim().to_string();
+    let enabled = payload.enabled;
+    let next_run_at = if enabled {
+        Some(compute_next_run_at(&cron, Local::now())?)
+    } else {
+        None
+    };
+
+    let automation = db::AutomationRecord {
+        id: uuid::Uuid::new_v4().to_string(),
+        name,
+        enabled,
+        agent_id: agent_id.clone(),
+        exec_model,
+        prompt,
+        project_path: normalize_optional_text(payload.project_path),
+        base_branch: normalize_optional_text(payload.base_branch),
+        plan_mode: payload.plan_mode,
+        thinking: payload.thinking,
+        use_worktree: payload.use_worktree,
+        permission_mode: normalize_permission_mode(&agent_id, payload.permission_mode),
+        reasoning_effort: normalize_optional_text(payload.reasoning_effort),
+        agent_mode: normalize_optional_text(payload.agent_mode),
+        codex_mode: normalize_optional_text(payload.codex_mode),
+        claude_runtime: normalize_optional_text(payload.claude_runtime),
+        cron,
+        next_run_at,
+        last_run_at: None,
+        last_error: None,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::insert_automation(&conn, &automation).map_err(|e| e.to_string())?;
+    Ok(automation)
+}
+
+#[tauri::command]
+fn update_automation(
+    automation_id: String,
+    payload: UpdateAutomationPayload,
+    state: State<'_, AppState>,
+) -> Result<db::AutomationRecord, String> {
+    let now = chrono::Utc::now().timestamp();
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let Some(existing) = db::get_automation(&conn, &automation_id).map_err(|e| e.to_string())?
+    else {
+        return Err("Automation not found.".to_string());
+    };
+
+    let mut updated = existing.clone();
+    if let Some(name) = payload.name {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("Name is required.".to_string());
+        }
+        updated.name = name;
+    }
+    if let Some(enabled) = payload.enabled {
+        updated.enabled = enabled;
+    }
+    if let Some(agent_id) = payload.agent_id {
+        let agent_id = agent_id.trim().to_string();
+        if agent_id.is_empty() {
+            return Err("Agent is required.".to_string());
+        }
+        updated.agent_id = agent_id;
+        // If agent changes, normalize permission mode (agents with their own permissions always bypass).
+        updated.permission_mode =
+            normalize_permission_mode(&updated.agent_id, payload.permission_mode.clone());
+    } else if payload.permission_mode.is_some() {
+        updated.permission_mode =
+            normalize_permission_mode(&updated.agent_id, payload.permission_mode.clone());
+    }
+    if let Some(exec_model) = payload.exec_model {
+        let exec_model = exec_model.trim().to_string();
+        updated.exec_model = if exec_model.is_empty() {
+            "default".to_string()
+        } else {
+            exec_model
+        };
+    }
+    if let Some(prompt) = payload.prompt {
+        let prompt = prompt.trim().to_string();
+        if prompt.is_empty() {
+            return Err("Prompt is required.".to_string());
+        }
+        updated.prompt = prompt;
+    }
+    if payload.project_path.is_some() {
+        updated.project_path = normalize_optional_text(payload.project_path);
+    }
+    if payload.base_branch.is_some() {
+        updated.base_branch = normalize_optional_text(payload.base_branch);
+    }
+    if let Some(plan_mode) = payload.plan_mode {
+        updated.plan_mode = plan_mode;
+    }
+    if let Some(thinking) = payload.thinking {
+        updated.thinking = thinking;
+    }
+    if let Some(use_worktree) = payload.use_worktree {
+        updated.use_worktree = use_worktree;
+    }
+    if payload.reasoning_effort.is_some() {
+        updated.reasoning_effort = normalize_optional_text(payload.reasoning_effort);
+    }
+    if payload.agent_mode.is_some() {
+        updated.agent_mode = normalize_optional_text(payload.agent_mode);
+    }
+    if payload.codex_mode.is_some() {
+        updated.codex_mode = normalize_optional_text(payload.codex_mode);
+    }
+    if payload.claude_runtime.is_some() {
+        updated.claude_runtime = normalize_optional_text(payload.claude_runtime);
+    }
+
+    let mut cron_changed = false;
+    if let Some(cron) = payload.cron {
+        let cron = cron.trim().to_string();
+        if cron.is_empty() {
+            return Err("Cron expression is required.".to_string());
+        }
+        if cron != updated.cron {
+            updated.cron = cron;
+            cron_changed = true;
+        }
+    }
+
+    // Maintain next_run_at intelligently.
+    if !updated.enabled {
+        updated.next_run_at = None;
+    } else if cron_changed || updated.next_run_at.is_none() {
+        updated.next_run_at = Some(compute_next_run_at(&updated.cron, Local::now())?);
+    }
+
+    updated.updated_at = now;
+    db::update_automation(&conn, &updated).map_err(|e| e.to_string())?;
+    Ok(updated)
+}
+
+#[tauri::command]
+fn delete_automation(automation_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::delete_automation(&conn, &automation_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn run_automation_now(
+    automation_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Option<String>, String> {
+    let automation = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::get_automation(&conn, &automation_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Automation not found.".to_string())?
+    };
+    let scheduled_for = chrono::Utc::now().timestamp();
+    run_automation_and_start_task(app, state.inner(), &automation, scheduled_for).await
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct UncommittedChangesResult {
@@ -10163,11 +10751,14 @@ pub(crate) async fn send_chat_message_internal(
             .pending_prompt
             .take()
             .unwrap_or_else(|| message.clone());
-        push_session_message(&mut handle.messages, serde_json::json!({
-            "message_type": "user_message",
-            "content": message,
-            "timestamp": user_timestamp
-        }));
+        push_session_message(
+            &mut handle.messages,
+            serde_json::json!({
+                "message_type": "user_message",
+                "content": message,
+                "timestamp": user_timestamp
+            }),
+        );
         // Create a fresh cancellation token for this generation
         handle.cancel_token = CancellationToken::new();
         (
@@ -11370,7 +11961,9 @@ async fn check_gh_cli_auth() -> Result<GhCliAuthStatus, String> {
 }
 
 #[tauri::command]
-async fn get_github_repo_from_path(path: String) -> Result<command_center::github::GitRepoInfo, String> {
+async fn get_github_repo_from_path(
+    path: String,
+) -> Result<command_center::github::GitRepoInfo, String> {
     command_center::github::get_github_repo_from_path(&path)
 }
 
@@ -11378,7 +11971,10 @@ async fn get_github_repo_from_path(path: String) -> Result<command_center::githu
 async fn fetch_github_issues(state: State<'_, AppState>) -> Result<Vec<GithubIssue>, String> {
     let settings = state.settings.lock().await;
     let repos = settings.github_watched_repos.clone().unwrap_or_default();
-    let auth_method = settings.github_auth_method.clone().unwrap_or_else(|| "gh-cli".to_string());
+    let auth_method = settings
+        .github_auth_method
+        .clone()
+        .unwrap_or_else(|| "gh-cli".to_string());
     let token = settings.github_token.clone();
     drop(settings);
 
@@ -11418,7 +12014,10 @@ async fn fetch_github_issues(state: State<'_, AppState>) -> Result<Vec<GithubIss
 async fn fetch_github_workflows(state: State<'_, AppState>) -> Result<Vec<GithubWorkflow>, String> {
     let settings = state.settings.lock().await;
     let repos = settings.github_watched_repos.clone().unwrap_or_default();
-    let auth_method = settings.github_auth_method.clone().unwrap_or_else(|| "gh-cli".to_string());
+    let auth_method = settings
+        .github_auth_method
+        .clone()
+        .unwrap_or_else(|| "gh-cli".to_string());
     let token = settings.github_token.clone();
     drop(settings);
 
@@ -11494,7 +12093,9 @@ async fn fetch_linear_issues(state: State<'_, AppState>) -> Result<Vec<LinearIss
 }
 
 #[tauri::command]
-async fn fetch_sentry_organizations(state: State<'_, AppState>) -> Result<Vec<SentryOrganization>, String> {
+async fn fetch_sentry_organizations(
+    state: State<'_, AppState>,
+) -> Result<Vec<SentryOrganization>, String> {
     let settings = state.settings.lock().await;
     let token = settings.sentry_token.clone();
     drop(settings);
@@ -11525,8 +12126,12 @@ async fn fetch_sentry_errors(state: State<'_, AppState>) -> Result<Vec<SentryErr
     let project_slugs = settings.sentry_watched_projects.clone().unwrap_or_default();
     drop(settings);
 
-    eprintln!("[Sentry] fetch_sentry_errors - token_set: {}, org: {:?}, projects: {:?}",
-        token.is_some(), org, project_slugs);
+    eprintln!(
+        "[Sentry] fetch_sentry_errors - token_set: {}, org: {:?}, projects: {:?}",
+        token.is_some(),
+        org,
+        project_slugs
+    );
 
     let token = token.ok_or("Sentry token not configured")?;
     let org = org.ok_or("Sentry organization not configured")?;
@@ -11536,7 +12141,10 @@ async fn fetch_sentry_errors(state: State<'_, AppState>) -> Result<Vec<SentryErr
         return Ok(vec![]);
     }
 
-    eprintln!("[Sentry] Fetching errors for org: {}, projects: {:?}", org, project_slugs);
+    eprintln!(
+        "[Sentry] Fetching errors for org: {}, projects: {:?}",
+        org, project_slugs
+    );
     let client = reqwest::Client::new();
     let result = command_center::sentry::fetch_errors(&client, &token, &org, &project_slugs).await;
 
@@ -11579,7 +12187,10 @@ async fn cc_fetch_sentry_organizations(token: String) -> Result<Vec<SentryOrgani
 }
 
 #[tauri::command]
-async fn cc_fetch_sentry_projects(token: String, org: String) -> Result<Vec<SentryProject>, String> {
+async fn cc_fetch_sentry_projects(
+    token: String,
+    org: String,
+) -> Result<Vec<SentryProject>, String> {
     if token.is_empty() {
         return Err("Sentry token is required".to_string());
     }
@@ -11591,7 +12202,9 @@ async fn cc_fetch_sentry_projects(token: String, org: String) -> Result<Vec<Sent
 }
 
 #[tauri::command]
-async fn fetch_command_center_data(state: State<'_, AppState>) -> Result<CommandCenterData, String> {
+async fn fetch_command_center_data(
+    state: State<'_, AppState>,
+) -> Result<CommandCenterData, String> {
     let settings = state.settings.lock().await;
     let enabled = settings.command_center_enabled.unwrap_or(false);
     let sentry_token_set = settings.sentry_token.is_some();
@@ -11634,7 +12247,7 @@ async fn fetch_command_center_data(state: State<'_, AppState>) -> Result<Command
         Ok(errs) => {
             eprintln!("[CommandCenter] Sentry returned {} errors", errs.len());
             data.sentry_errors = errs;
-        },
+        }
         Err(e) => {
             eprintln!("[CommandCenter] Sentry fetch error: {}", e);
             if !e.contains("not configured") {
@@ -11646,8 +12259,11 @@ async fn fetch_command_center_data(state: State<'_, AppState>) -> Result<Command
     data.last_updated = chrono::Utc::now().to_rfc3339();
     data.errors = errors;
 
-    eprintln!("[CommandCenter] Data fetch complete - sentry_errors: {}, data_errors: {:?}",
-        data.sentry_errors.len(), data.errors);
+    eprintln!(
+        "[CommandCenter] Data fetch complete - sentry_errors: {}, data_errors: {:?}",
+        data.sentry_errors.len(),
+        data.errors
+    );
 
     Ok(data)
 }
@@ -11777,6 +12393,14 @@ fn main() {
             tauri::async_runtime::spawn(async move {
                 prewarm_opencode_models().await;
             });
+
+            {
+                let app_handle = app.handle().clone();
+                let state = app.state::<AppState>().inner().clone();
+                tauri::async_runtime::spawn(async move {
+                    automation_scheduler_loop(app_handle, state).await;
+                });
+            }
 
             Ok(())
         })
@@ -11935,6 +12559,14 @@ fn main() {
             check_claude_auth,
             claude_rate_limits,
             load_tasks,
+            // Automations
+            load_automations,
+            load_automation_runs,
+            create_automation,
+            update_automation,
+            delete_automation,
+            run_automation_now,
+            preview_automation_next_run,
             check_task_uncommitted_changes,
             get_task_diff_stats,
             get_review_projects,

@@ -55,6 +55,11 @@
               </a>
             </li>
             <li class="nav-item">
+              <a class="nav-link" data-page="automationsPage">
+                <i class="fal fa-clock"></i> Automations
+              </a>
+            </li>
+            <li class="nav-item">
               <a class="nav-link" data-page="accountsPage">
                 <i class="fal fa-key"></i> Accounts
               </a>
@@ -448,6 +453,149 @@
                         </thead>
                         <tbody id="tasks-table"></tbody>
                       </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+      <!-- Automations Page -->
+      <section
+        id="automationsPage"
+        class="automations-page page container-fluid"
+        hidden
+      >
+        <div class="row no-gutters">
+          <div class="col-12">
+            <div class="card mt-4 mr-4 mb-0 ml-4 automations-shell">
+              <div class="card-body pb-3">
+                <div class="automations-header">
+                  <div>
+                    <h5 class="mb-1">Automations</h5>
+                    <p class="muted-text mb-0">
+                      Cron-based schedules that run while Phantom is open.
+                    </p>
+                  </div>
+                  <div class="automations-actions">
+                    <button
+                      class="btn btn-default btn-brand btn-sm"
+                      id="createAutomationBtn"
+                      type="button"
+                    >
+                      <i class="fal fa-plus"></i> New
+                    </button>
+                  </div>
+                </div>
+
+                <div class="automations-layout">
+                  <div class="automations-list">
+                    <div class="automations-section">
+                      <div class="automations-section-title">Scheduled</div>
+                      <div id="automationsScheduledList" class="automations-items"></div>
+                    </div>
+                    <div class="automations-section">
+                      <div class="automations-section-title">Recent runs</div>
+                      <div id="automationsRunsList" class="automations-items"></div>
+                    </div>
+                  </div>
+
+                  <div class="automations-detail">
+                    <div id="automationsEmpty" class="automations-empty">
+                      <div class="automations-empty-icon">
+                        <i class="fal fa-clock"></i>
+                      </div>
+                      <div class="automations-empty-title">
+                        No automations yet
+                      </div>
+                      <div class="automations-empty-sub">
+                        Pick an agent, write a prompt, and schedule it with cron.
+                        Phantom will automatically create and start tasks when
+                        they're due.
+                      </div>
+                      <button
+                        class="btn btn-default btn-brand btn-sm mt-3"
+                        id="createFirstAutomationBtn"
+                        type="button"
+                      >
+                        <i class="fal fa-plus"></i> Create automation
+                      </button>
+                    </div>
+
+                    <div id="automationDetail" class="automation-detail" hidden>
+                      <div class="automation-detail-header">
+                        <div>
+                          <div class="automation-detail-title" id="automationDetailTitle">
+                            --
+                          </div>
+                          <div class="automation-detail-meta" id="automationDetailMeta">
+                            --
+                          </div>
+                        </div>
+                        <div class="automation-detail-actions">
+                          <button
+                            class="btn btn-default btn-brand btn-sm"
+                            id="automationRunNowBtn"
+                            type="button"
+                          >
+                            <i class="fal fa-play"></i> Run now
+                          </button>
+                          <button
+                            class="btn btn-outline-secondary btn-sm"
+                            id="automationEditBtn"
+                            type="button"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            class="btn btn-outline-secondary btn-sm"
+                            id="automationToggleBtn"
+                            type="button"
+                          >
+                            Disable
+                          </button>
+                          <button
+                            class="btn btn-danger btn-sm"
+                            id="automationDeleteBtn"
+                            type="button"
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </div>
+
+                      <div class="automation-detail-grid">
+                        <div class="automation-kv">
+                          <div class="automation-k">Agent</div>
+                          <div class="automation-v" id="automationDetailAgent">--</div>
+                        </div>
+                        <div class="automation-kv">
+                          <div class="automation-k">Model</div>
+                          <div class="automation-v" id="automationDetailModel">--</div>
+                        </div>
+                        <div class="automation-kv">
+                          <div class="automation-k">Project</div>
+                          <div class="automation-v" id="automationDetailProject">--</div>
+                        </div>
+                        <div class="automation-kv">
+                          <div class="automation-k">Cron</div>
+                          <div class="automation-v" id="automationDetailCron">--</div>
+                        </div>
+                        <div class="automation-kv">
+                          <div class="automation-k">Next run</div>
+                          <div class="automation-v" id="automationDetailNextRun">--</div>
+                        </div>
+                        <div class="automation-kv">
+                          <div class="automation-k">Last run</div>
+                          <div class="automation-v" id="automationDetailLastRun">--</div>
+                        </div>
+                      </div>
+
+                      <div class="automation-prompt-preview">
+                        <div class="automation-k">Prompt</div>
+                        <pre class="automation-prompt-pre" id="automationDetailPrompt">--</pre>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1961,6 +2109,174 @@
       </div>
     </div>
 
+    <!-- Create/Edit Automation Modal -->
+    <div
+      class="modal fade mt-5"
+      id="automationModal"
+      tabindex="-1"
+      role="dialog"
+      aria-labelledby="automationModalLabel"
+      aria-hidden="true"
+    >
+      <div class="modal-dialog modal-lg mt-5" role="document">
+        <div class="modal-content automation-modal">
+          <div class="modal-header">
+            <h5 class="modal-title" id="automationModalLabel">
+              Create automation
+            </h5>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+              <span aria-hidden="true"><i class="fal fa-times"></i></span>
+            </button>
+          </div>
+          <div class="modal-body">
+            <div class="automation-modal-banner">
+              <div class="automation-modal-banner-title">
+                Automations run as tasks
+              </div>
+              <div class="automation-modal-banner-sub">
+                When an automation is due, Phantom creates a task and auto-starts it.
+                These runs only happen while the app is open.
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label class="muted-label">Name</label>
+              <input
+                type="text"
+                class="form-control"
+                id="automationNameInput"
+                placeholder="e.g. Check for Sentry issues"
+              />
+            </div>
+
+            <div class="form-group">
+              <label class="muted-label">Project</label>
+              <div class="input-group project-picker">
+                <input
+                  type="text"
+                  class="form-control"
+                  id="automationProjectPath"
+                  placeholder="/path/to/project"
+                />
+                <div class="input-group-append">
+                  <button
+                    class="btn btn-default btn-brand btn-sm"
+                    id="automationPickProjectPath"
+                    type="button"
+                  >
+                    Browse
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="form-group col-6">
+                <label class="muted-label">Agent</label>
+                <div id="automationAgentDropdown" class="custom-dropdown-wrapper"></div>
+              </div>
+              <div class="form-group col-6">
+                <label class="muted-label">Model</label>
+                <div id="automationModelDropdown" class="custom-dropdown-wrapper"></div>
+              </div>
+            </div>
+
+            <div class="form-group mb-3 prompt-container">
+              <label class="muted-label">Prompt</label>
+              <div
+                class="form-control automation-prompt"
+                id="automationPrompt"
+                contenteditable="true"
+                data-placeholder="What should Phantom do?"
+              ></div>
+              <div class="prompt-hint text-muted">
+                Type <kbd>/</kbd> for slash commands
+              </div>
+            </div>
+
+            <div class="automation-schedule">
+              <div class="automation-schedule-header">
+                <label class="muted-label mb-2">Schedule</label>
+                <div class="schedule-mode-toggle">
+                  <button
+                    type="button"
+                    class="schedule-mode-btn selected"
+                    data-schedule-mode="simple"
+                  >
+                    Builder
+                  </button>
+                  <button
+                    type="button"
+                    class="schedule-mode-btn"
+                    data-schedule-mode="cron"
+                  >
+                    Cron
+                  </button>
+                </div>
+              </div>
+
+              <div id="automationScheduleSimple" class="automation-schedule-simple">
+                <div class="schedule-row">
+                  <input
+                    type="time"
+                    id="automationTimeInput"
+                    class="form-control schedule-time"
+                    value="09:00"
+                  />
+                  <div class="dow-pills" id="automationDowPills">
+                    <button type="button" class="dow-pill selected" data-dow="1">Mo</button>
+                    <button type="button" class="dow-pill selected" data-dow="2">Tu</button>
+                    <button type="button" class="dow-pill selected" data-dow="3">We</button>
+                    <button type="button" class="dow-pill selected" data-dow="4">Th</button>
+                    <button type="button" class="dow-pill selected" data-dow="5">Fr</button>
+                    <button type="button" class="dow-pill selected" data-dow="6">Sa</button>
+                    <button type="button" class="dow-pill selected" data-dow="0">Su</button>
+                  </div>
+                </div>
+                <div class="schedule-cron-preview text-muted">
+                  Cron:
+                  <code id="automationCronPreview">0 9 * * *</code>
+                </div>
+              </div>
+
+              <div id="automationScheduleCron" class="automation-schedule-cron" hidden>
+                <input
+                  type="text"
+                  class="form-control"
+                  id="automationCronInput"
+                  placeholder="0 9 * * 1-5"
+                />
+                <div class="text-muted small mt-2">
+                  5-part cron: minute hour day month dow
+                </div>
+              </div>
+
+              <div class="schedule-next text-muted small mt-2" id="automationNextRunPreview">
+                Next run: --
+              </div>
+            </div>
+
+            <div class="setting-row mt-3">
+              <div class="setting-label">Enabled</div>
+              <div class="toggle-buttons" data-toggle="automation-enabled">
+                <button class="toggle-button" type="button" data-value="false">Off</button>
+                <button class="toggle-button" type="button" data-value="true">On</button>
+                <input type="checkbox" id="automationEnabledToggle" checked />
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-sm btn-secondary" data-dismiss="modal">
+              Cancel
+            </button>
+            <button type="button" class="btn btn-default btn-sm btn-brand" id="automationSaveBtn">
+              Create
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Custom File Browser Modal -->
     <div class="modal fade" id="fileBrowserModal" tabindex="-1" role="dialog" aria-labelledby="fileBrowserModalLabel" aria-hidden="true">
       <div class="modal-dialog modal-lg file-browser-dialog" role="document">
@@ -2275,6 +2591,7 @@
     <script src="js/command-center.js"></script>
     <script src="js/command-center-config.js"></script>
     <script src="js/application.js"></script>
+    <script src="js/automations.js"></script>
 
     <script src="js/vendor/jquery.color-2.1.2.min.js"></script>
 

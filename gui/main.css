@@ -173,7 +173,8 @@ textarea {
 .settings-page,
 .skills-page,
 .view-tasks-page,
-.create-tasks-page {
+.create-tasks-page,
+.automations-page {
   overflow-y: auto;
   overflow-x: hidden;
 }
@@ -192,7 +193,10 @@ textarea {
 .view-tasks-page > .row > .col-12,
 .create-tasks-page > .row,
 .create-tasks-page > .row > .col,
-.create-tasks-page > .row > .col-12 {
+.create-tasks-page > .row > .col-12,
+.automations-page > .row,
+.automations-page > .row > .col,
+.automations-page > .row > .col-12 {
   height: auto;
   min-height: auto;
 }
@@ -233,6 +237,18 @@ textarea {
   margin-top: 16px !important;
 }
 #createTasksPage .col-12:last-child .card {
+  margin-bottom: 0 !important;
+}
+
+/* Automations page - 8px gap between cards */
+#automationsPage .card {
+  margin-top: 0 !important;
+  margin-bottom: 8px !important;
+}
+#automationsPage .col-12:first-child .card {
+  margin-top: 16px !important;
+}
+#automationsPage .col-12:last-child .card {
   margin-bottom: 0 !important;
 }
 
@@ -7464,4 +7480,568 @@ input:checked + .slider:before {
   pointer-events: none;
   z-index: 1000;
   margin-bottom: 6px;
+}
+
+/* ============================================
+   Automations Page
+   ============================================ */
+
+.automations-page .muted-text {
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.automations-page .automations-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.automations-page .automations-actions .btn i {
+  margin-right: 6px;
+}
+
+.automations-page .automations-layout {
+  display: flex;
+  gap: 16px;
+  margin-top: 14px;
+  height: calc(100vh - 240px);
+  min-height: 520px;
+}
+
+.automations-page .automations-list {
+  width: 380px;
+  min-width: 320px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  padding-right: 14px;
+  overflow-y: auto;
+}
+
+.automations-page .automations-detail {
+  flex: 1;
+  overflow-y: auto;
+  padding-left: 2px;
+}
+
+.automations-page .automations-section {
+  margin-bottom: 16px;
+}
+
+.automations-page .automations-section-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: rgba(255, 255, 255, 0.55);
+  margin: 10px 0 10px 0;
+}
+
+.automations-page .automations-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.automations-page .automations-placeholder {
+  padding: 14px 12px;
+  color: rgba(255, 255, 255, 0.45);
+  background: rgba(0, 0, 0, 0.14);
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.automations-page .automation-item {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 12px;
+  padding: 12px 12px;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  transition:
+    transform 0.12s ease,
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.automations-page .automation-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(247, 138, 151, 0.35);
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.automations-page .automation-item.selected {
+  border-color: rgba(247, 138, 151, 0.65);
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.35);
+}
+
+.automations-page .automation-item.disabled {
+  opacity: 0.72;
+}
+
+.automations-page .automation-item-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.automations-page .automation-item-name {
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.automations-page .automation-item-when {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+
+.automations-page .automation-item-sub {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.automations-page .automation-item-project {
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 12px;
+}
+
+.automations-page .automation-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(247, 138, 151, 0.18);
+  border: 1px solid rgba(247, 138, 151, 0.28);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.automations-page .automations-empty {
+  height: 100%;
+  min-height: 520px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 16px;
+  border-radius: 16px;
+  background: radial-gradient(
+    900px 420px at 30% 0%,
+    rgba(247, 138, 151, 0.12),
+    rgba(0, 0, 0, 0.08) 55%,
+    rgba(0, 0, 0, 0.16)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.automations-page .automations-empty-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  margin-bottom: 14px;
+}
+
+.automations-page .automations-empty-icon i {
+  font-size: 26px;
+  color: rgba(247, 138, 151, 0.9);
+}
+
+.automations-page .automations-empty-title {
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 16px;
+  margin-bottom: 6px;
+}
+
+.automations-page .automations-empty-sub {
+  max-width: 440px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.automations-page .automation-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+
+.automations-page .automation-detail-title {
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.automations-page .automation-detail-meta {
+  margin-top: 4px;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 12px;
+}
+
+.automations-page .automation-detail-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.automations-page .automation-detail-actions .btn i {
+  margin-right: 6px;
+}
+
+.automations-page .automation-detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 14px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.automations-page .automation-kv .automation-k {
+  font-size: 10px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.automations-page .automation-kv .automation-v {
+  margin-top: 3px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.9);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automations-page .automation-prompt-preview {
+  margin-top: 12px;
+}
+
+.automations-page .automation-prompt-pre {
+  margin-top: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.automations-page .automation-run-item {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.14);
+  border-radius: 12px;
+  padding: 10px 12px;
+  text-align: left;
+  color: rgba(255, 255, 255, 0.9);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.automations-page .automation-run-item:hover {
+  border-color: rgba(247, 138, 151, 0.28);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.automations-page .automation-run-item.failed {
+  border-color: rgba(220, 53, 69, 0.35);
+}
+
+.automations-page .automation-run-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.automations-page .automation-run-title {
+  font-size: 13px;
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+}
+
+.automations-page .automation-run-when {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+}
+
+.automations-page .automation-run-sub {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.automations-page .automation-run-status {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.65);
+}
+
+.automations-page .automation-run-error {
+  font-size: 11px;
+  color: rgba(255, 180, 190, 0.85);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 230px;
+}
+
+@media (max-width: 980px) {
+  .automations-page .automations-layout {
+    flex-direction: column;
+    height: auto;
+    min-height: auto;
+  }
+  .automations-page .automations-list {
+    width: 100%;
+    min-width: 0;
+    border-right: 0;
+    padding-right: 0;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .automations-page .automation-detail-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ============================================
+   Automation Modal
+   ============================================ */
+
+.automation-modal .muted-label {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.automation-modal .automation-modal-banner {
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 14px;
+}
+
+.automation-modal .automation-modal-banner-title {
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.automation-modal .automation-modal-banner-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  line-height: 1.5;
+}
+
+.automation-modal .automation-prompt {
+  min-height: 170px;
+  max-height: 240px;
+  overflow-y: auto;
+  resize: none;
+  font-size: 14px;
+  line-height: 1.6;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  cursor: text;
+}
+
+.automation-modal .automation-prompt:focus {
+  border-color: rgba(247, 138, 151, 0.6);
+  box-shadow: 0 0 0 3px rgba(247, 138, 151, 0.15);
+  outline: none;
+}
+
+.automation-modal .automation-prompt:empty:before,
+.automation-modal .automation-prompt.is-empty:before {
+  content: attr(data-placeholder);
+  color: rgba(255, 255, 255, 0.35);
+  font-weight: 500;
+  font-size: 15px;
+  pointer-events: none;
+}
+
+.automation-modal .prompt-hint kbd {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: inherit;
+  font-size: 10px;
+}
+
+.automation-modal .setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.automation-modal .setting-label {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.75);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.automation-modal .toggle-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: 152px;
+  height: 30px;
+  padding: 2px;
+  border-radius: 999px;
+  background: rgba(15, 14, 16, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 10px 18px rgba(0, 0, 0, 0.28);
+}
+
+.automation-modal .toggle-buttons input {
+  display: none;
+}
+
+.automation-modal .toggle-button {
+  flex: 1;
+  height: 100%;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.automation-modal .toggle-button.is-active {
+  background: linear-gradient(135deg, #2c2a31, #1d1b21);
+  color: rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 6px 14px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.automation-modal .toggle-button:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px rgba(247, 138, 151, 0.45),
+    0 6px 14px rgba(208, 109, 126, 0.35);
+}
+
+.automation-modal .automation-schedule {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.automation-modal .automation-schedule-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.automation-modal .schedule-mode-toggle {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.automation-modal .schedule-mode-btn {
+  border: 0;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+}
+
+.automation-modal .schedule-mode-btn.selected {
+  background: linear-gradient(135deg, rgba(247, 138, 151, 0.35), rgba(208, 109, 126, 0.25));
+  border: 1px solid rgba(247, 138, 151, 0.35);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.automation-modal .schedule-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.automation-modal .schedule-time {
+  width: 140px;
+  font-variant-numeric: tabular-nums;
+}
+
+.automation-modal .dow-pills {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.automation-modal .dow-pill {
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(0, 0, 0, 0.18);
+  color: rgba(255, 255, 255, 0.75);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  letter-spacing: 0.4px;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.automation-modal .dow-pill.selected {
+  background: rgba(247, 138, 151, 0.18);
+  border-color: rgba(247, 138, 151, 0.35);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.automation-modal .schedule-cron-preview code {
+  color: rgba(255, 255, 255, 0.85);
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 11px;
 }

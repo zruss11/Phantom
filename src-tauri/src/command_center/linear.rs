@@ -52,7 +52,9 @@ async fn graphql_query<T: for<'de> Deserialize<'de>>(
         return Err(format!("Linear GraphQL errors: {}", messages.join(", ")));
     }
 
-    gql_response.data.ok_or_else(|| "No data in Linear response".to_string())
+    gql_response
+        .data
+        .ok_or_else(|| "No data in Linear response".to_string())
 }
 
 /// Fetch all teams the user has access to
@@ -244,7 +246,8 @@ pub async fn fetch_issues(
         format!("filter: {{ {} }}", filters.join(", "))
     };
 
-    let query = format!(r#"
+    let query = format!(
+        r#"
         query {{
             issues(first: 50, {}) {{
                 nodes {{
@@ -278,7 +281,9 @@ pub async fn fetch_issues(
                 }}
             }}
         }}
-    "#, filter_str);
+    "#,
+        filter_str
+    );
 
     let response: Response = graphql_query(client, token, &query, None).await?;
 
@@ -296,7 +301,15 @@ pub async fn fetch_issues(
                 color: i.state.color,
                 state_type: i.state.state_type,
             },
-            labels: i.labels.nodes.into_iter().map(|l| LinearLabel { name: l.name, color: l.color }).collect(),
+            labels: i
+                .labels
+                .nodes
+                .into_iter()
+                .map(|l| LinearLabel {
+                    name: l.name,
+                    color: l.color,
+                })
+                .collect(),
             assignee: i.assignee.map(|a| a.name),
             created_at: i.created_at,
             updated_at: i.updated_at,

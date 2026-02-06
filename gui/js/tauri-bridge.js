@@ -541,6 +541,30 @@
         if (channel === 'loadTasks') {
           return tauriInvoke('load_tasks');
         }
+        if (channel === 'loadAutomations') {
+          return tauriInvoke('load_automations');
+        }
+        if (channel === 'loadAutomationRuns') {
+          return tauriInvoke('load_automation_runs', { limit: args[0] || null });
+        }
+        if (channel === 'createAutomation') {
+          return tauriInvoke('create_automation', { payload: args[0] || {} });
+        }
+        if (channel === 'updateAutomation') {
+          return tauriInvoke('update_automation', {
+            automationId: args[0],
+            payload: args[1] || {}
+          });
+        }
+        if (channel === 'deleteAutomation') {
+          return tauriInvoke('delete_automation', { automationId: args[0] });
+        }
+        if (channel === 'runAutomationNow') {
+          return tauriInvoke('run_automation_now', { automationId: args[0] });
+        }
+        if (channel === 'previewAutomationNextRun') {
+          return tauriInvoke('preview_automation_next_run', { cron: args[0] || '' });
+        }
         if (channel === 'checkTaskUncommittedChanges') {
           return tauriInvoke('check_task_uncommitted_changes', { taskId: args[0] });
         }
@@ -800,6 +824,52 @@
           case 'loadTasks':
             resolve(mockData.tasks);
             break;
+          case 'loadAutomations':
+            resolve(mockData.automations || []);
+            break;
+          case 'loadAutomationRuns':
+            resolve(mockData.automationRuns || []);
+            break;
+          case 'createAutomation': {
+            var automationPayload = args[0] || {};
+            var newAuto = Object.assign({
+              id: 'auto-' + Date.now() + '-' + Math.random().toString(36).substr(2, 6),
+              enabled: true,
+              createdAt: Date.now() / 1000,
+              updatedAt: Date.now() / 1000
+            }, automationPayload);
+            mockData.automations = mockData.automations || [];
+            mockData.automations.unshift(newAuto);
+            resolve(newAuto);
+            break;
+          }
+          case 'updateAutomation': {
+            var autoId = args[0];
+            var patch = args[1] || {};
+            mockData.automations = mockData.automations || [];
+            var idx = mockData.automations.findIndex(function(a) { return a.id === autoId; });
+            if (idx >= 0) {
+              mockData.automations[idx] = Object.assign({}, mockData.automations[idx], patch, { updatedAt: Date.now() / 1000 });
+              resolve(mockData.automations[idx]);
+            } else {
+              resolve(null);
+            }
+            break;
+          }
+          case 'deleteAutomation': {
+            var deleteId = args[0];
+            mockData.automations = (mockData.automations || []).filter(function(a) { return a.id !== deleteId; });
+            resolve();
+            break;
+          }
+          case 'runAutomationNow':
+            resolve('task-' + Date.now());
+            break;
+          case 'previewAutomationNextRun': {
+            var nowSec = Math.floor(Date.now() / 1000);
+            resolve(nowSec + 3600);
+            break;
+          }
           case 'getAgentModels': {
             var agentId = args[0];
             var modelMap = {

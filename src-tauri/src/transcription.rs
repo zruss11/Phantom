@@ -27,8 +27,8 @@ pub async fn transcribe_audio(audio_path: &str, language: Option<&str>) -> Resul
         .unwrap_or("audio.webm")
         .to_string();
 
-    let audio_bytes = std::fs::read(path)
-        .map_err(|e| format!("Failed to read audio file: {}", e))?;
+    let audio_bytes =
+        std::fs::read(path).map_err(|e| format!("Failed to read audio file: {}", e))?;
 
     // Detect content type from extension
     let content_type = match path.extension().and_then(|e| e.to_str()) {
@@ -41,7 +41,15 @@ pub async fn transcribe_audio(audio_path: &str, language: Option<&str>) -> Resul
         _ => "audio/webm", // Default
     };
 
-    transcribe_bytes(&audio_bytes, &filename, content_type, language, &token, &account_id).await
+    transcribe_bytes(
+        &audio_bytes,
+        &filename,
+        content_type,
+        language,
+        &token,
+        &account_id,
+    )
+    .await
 }
 
 /// Transcribe raw audio bytes using ChatGPT's transcription API
@@ -102,7 +110,9 @@ pub async fn transcribe_bytes(
     }
 
     if status == 403 {
-        return Err("Access forbidden. Ensure you have a valid ChatGPT Plus subscription.".to_string());
+        return Err(
+            "Access forbidden. Ensure you have a valid ChatGPT Plus subscription.".to_string(),
+        );
     }
 
     if !status.is_success() {
@@ -153,9 +163,7 @@ pub fn get_codex_auth() -> Result<(String, Option<String>), String> {
     let auth: serde_json::Value =
         serde_json::from_str(&content).map_err(|_| "Invalid auth.json format")?;
 
-    let account_id = auth["tokens"]["account_id"]
-        .as_str()
-        .map(|s| s.to_string());
+    let account_id = auth["tokens"]["account_id"].as_str().map(|s| s.to_string());
 
     let token = auth["tokens"]["access_token"]
         .as_str()
@@ -183,8 +191,11 @@ mod tests {
         // Either Ok or specific error message
         if let Err(e) = &result {
             assert!(
-                e.contains("auth not found") || e.contains("Cannot read") || e.contains("No access_token"),
-                "Unexpected error: {}", e
+                e.contains("auth not found")
+                    || e.contains("Cannot read")
+                    || e.contains("No access_token"),
+                "Unexpected error: {}",
+                e
             );
         }
     }

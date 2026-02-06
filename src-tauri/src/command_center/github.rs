@@ -1,8 +1,8 @@
 use super::types::*;
-use std::process::Command;
-use std::path::Path;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::process::Command;
 
 /// Check if gh CLI is authenticated and get username
 pub fn check_gh_cli_auth() -> GhCliAuthStatus {
@@ -48,12 +48,18 @@ pub fn check_gh_cli_auth() -> GhCliAuthStatus {
 pub async fn fetch_issues_gh_cli(repo: &str) -> Result<Vec<GithubIssue>, String> {
     let output = tokio::process::Command::new("gh")
         .args([
-            "issue", "list",
-            "--repo", repo,
-            "--state", "open",
-            "--assignee", "@me",
-            "--json", "id,number,title,state,url,labels,assignees,createdAt,updatedAt",
-            "--limit", "50",
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--assignee",
+            "@me",
+            "--json",
+            "id,number,title,state,url,labels,assignees,createdAt,updatedAt",
+            "--limit",
+            "50",
         ])
         .output()
         .await
@@ -102,7 +108,14 @@ pub async fn fetch_issues_gh_cli(repo: &str) -> Result<Vec<GithubIssue>, String>
             title: i.title,
             state: i.state,
             html_url: i.url,
-            labels: i.labels.into_iter().map(|l| GithubLabel { name: l.name, color: l.color }).collect(),
+            labels: i
+                .labels
+                .into_iter()
+                .map(|l| GithubLabel {
+                    name: l.name,
+                    color: l.color,
+                })
+                .collect(),
             assignee: i.assignees.first().map(|a| a.login.clone()),
             created_at: i.created_at,
             updated_at: i.updated_at,
@@ -112,7 +125,11 @@ pub async fn fetch_issues_gh_cli(repo: &str) -> Result<Vec<GithubIssue>, String>
 }
 
 /// Fetch issues using GitHub REST API with token
-pub async fn fetch_issues_rest(client: &Client, token: &str, repo: &str) -> Result<Vec<GithubIssue>, String> {
+pub async fn fetch_issues_rest(
+    client: &Client,
+    token: &str,
+    repo: &str,
+) -> Result<Vec<GithubIssue>, String> {
     #[derive(Deserialize)]
     struct ApiIssue {
         id: u64,
@@ -137,7 +154,10 @@ pub async fn fetch_issues_rest(client: &Client, token: &str, repo: &str) -> Resu
         login: String,
     }
 
-    let url = format!("https://api.github.com/repos/{}/issues?state=open&per_page=50", repo);
+    let url = format!(
+        "https://api.github.com/repos/{}/issues?state=open&per_page=50",
+        repo
+    );
     let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", token))
@@ -165,7 +185,14 @@ pub async fn fetch_issues_rest(client: &Client, token: &str, repo: &str) -> Resu
             title: i.title,
             state: i.state,
             html_url: i.html_url,
-            labels: i.labels.into_iter().map(|l| GithubLabel { name: l.name, color: l.color }).collect(),
+            labels: i
+                .labels
+                .into_iter()
+                .map(|l| GithubLabel {
+                    name: l.name,
+                    color: l.color,
+                })
+                .collect(),
             assignee: i.assignee.map(|a| a.login),
             created_at: i.created_at,
             updated_at: i.updated_at,
@@ -178,10 +205,14 @@ pub async fn fetch_issues_rest(client: &Client, token: &str, repo: &str) -> Resu
 pub async fn fetch_workflows_gh_cli(repo: &str) -> Result<Vec<GithubWorkflow>, String> {
     let output = tokio::process::Command::new("gh")
         .args([
-            "run", "list",
-            "--repo", repo,
-            "--json", "databaseId,displayTitle,status,conclusion,headBranch,number,url,createdAt",
-            "--limit", "20",
+            "run",
+            "list",
+            "--repo",
+            repo,
+            "--json",
+            "databaseId,displayTitle,status,conclusion,headBranch,number,url,createdAt",
+            "--limit",
+            "20",
         ])
         .output()
         .await
@@ -229,7 +260,11 @@ pub async fn fetch_workflows_gh_cli(repo: &str) -> Result<Vec<GithubWorkflow>, S
 }
 
 /// Fetch workflow runs using GitHub REST API
-pub async fn fetch_workflows_rest(client: &Client, token: &str, repo: &str) -> Result<Vec<GithubWorkflow>, String> {
+pub async fn fetch_workflows_rest(
+    client: &Client,
+    token: &str,
+    repo: &str,
+) -> Result<Vec<GithubWorkflow>, String> {
     #[derive(Deserialize)]
     struct ApiResponse {
         workflow_runs: Vec<ApiRun>,
@@ -247,7 +282,10 @@ pub async fn fetch_workflows_rest(client: &Client, token: &str, repo: &str) -> R
         created_at: String,
     }
 
-    let url = format!("https://api.github.com/repos/{}/actions/runs?per_page=20", repo);
+    let url = format!(
+        "https://api.github.com/repos/{}/actions/runs?per_page=20",
+        repo
+    );
     let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {}", token))
@@ -287,11 +325,7 @@ pub async fn fetch_workflows_rest(client: &Client, token: &str, repo: &str) -> R
 /// Re-run a failed workflow
 pub async fn rerun_workflow_gh_cli(repo: &str, run_id: u64) -> Result<(), String> {
     let output = tokio::process::Command::new("gh")
-        .args([
-            "run", "rerun",
-            "--repo", repo,
-            &run_id.to_string(),
-        ])
+        .args(["run", "rerun", "--repo", repo, &run_id.to_string()])
         .output()
         .await
         .map_err(|e| format!("gh CLI error: {}", e))?;
