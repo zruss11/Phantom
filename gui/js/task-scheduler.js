@@ -418,6 +418,29 @@
     });
   }
 
+  function updateInlineMeta() {
+    var el = byId('taskSchedulerInlineMeta');
+    if (!el) return;
+    var projectPath = getProjectPath();
+    var list = (state.automations || []).slice();
+    if (projectPath) {
+      list = list.filter(function (a) {
+        return a && (a.projectPath || null) === projectPath;
+      });
+    }
+    if (!list.length) {
+      el.textContent = 'No schedules';
+      return;
+    }
+    var enabled = list.filter(function (a) { return a && a.enabled; }).length;
+    var total = list.length;
+    if (enabled === total) {
+      el.textContent = total === 1 ? '1 schedule' : (total + ' schedules');
+      return;
+    }
+    el.textContent = enabled + ' on' + ' / ' + total;
+  }
+
   async function refreshAutomations() {
     if (state.refreshing) return;
     state.refreshing = true;
@@ -430,6 +453,7 @@
     state.refreshing = false;
     renderList();
     syncActionButtons();
+    updateInlineMeta();
   }
 
   var previewTimer = null;
@@ -602,8 +626,9 @@
   }
 
   function bind() {
-    var root = byId('taskScheduler');
-    if (!root) return;
+    var openBtn = byId('taskSchedulerOpenBtn');
+    var modalEl = byId('taskSchedulerModal');
+    if (!modalEl) return;
 
     var modeEl = byId('taskSchedulerModeSelect');
     var timeEl = byId('taskSchedulerTimeInput');
@@ -616,6 +641,22 @@
     var runBtn = byId('taskSchedulerRunNowBtn');
     var toggleBtn = byId('taskSchedulerToggleBtn');
     var deleteBtn = byId('taskSchedulerDeleteBtn');
+
+    function openModal() {
+      try {
+        if (window.$ && typeof window.$ === 'function') {
+          window.$('#taskSchedulerModal').modal('show');
+        } else {
+          modalEl.style.display = 'block';
+        }
+      } catch (e) {}
+    }
+
+    if (openBtn) openBtn.addEventListener('click', function () {
+      // Default to a fresh form when opening.
+      clearForm();
+      openModal();
+    });
 
     if (modeEl) {
       modeEl.addEventListener('change', function () {
@@ -643,7 +684,18 @@
     });
 
     var projectEl = byId('projectPath');
-    if (projectEl) projectEl.addEventListener('change', renderList);
+    if (projectEl) projectEl.addEventListener('change', function () {
+      renderList();
+      updateInlineMeta();
+    });
+
+    // Keep modal content fresh when opened.
+    if (window.$ && typeof window.$ === 'function') {
+      window.$('#taskSchedulerModal').on('shown.bs.modal', function () {
+        refreshAutomations();
+        schedulePreviewRefresh();
+      });
+    }
 
     syncFormVisibility();
     schedulePreviewRefresh();
