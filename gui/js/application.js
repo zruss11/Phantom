@@ -397,7 +397,6 @@ async function saveSettingsFromUi() {
   let mcpPortRaw = $("#mcpPort").val();
   let mcpTokenRaw = $("#mcpToken").val();
   let codexPathRaw = $("#codexPath").val();
-  let uiScaleRaw = $("#uiScale").val();
   let codexPersonalityRaw = $("#codexPersonality").val();
   let taskProjectAllowlist = getProjectAllowlist();
   let agentNotificationTimeoutValue = 0;
@@ -437,7 +436,6 @@ async function saveSettingsFromUi() {
       mcpToken: nextMcpToken,
       codexPath: (codexPathRaw || "").toString().trim(),
       codexAccessMode: codexAccessModeDropdown ? codexAccessModeDropdown.getValue() : (currentSettings.codexAccessMode || "bypassPermissions"),
-      uiScale: parseFloat(uiScaleRaw) || currentSettings.uiScale || 1.0,
       codexPersonality: (codexPersonalityRaw || "").toString().trim(),
       codexFeatureCollaborationModes: $("#codexFeatureCollaborationModes").is(":checked"),
       codexFeatureSteer: $("#codexFeatureSteer").is(":checked"),
@@ -448,7 +446,6 @@ async function saveSettingsFromUi() {
     collectAuthInputs(),
   );
   currentSettings = pl;
-  applyUiScale(pl.uiScale);
   try {
     await ipcRenderer.invoke("saveSettings", pl);
     sendNotification("Settings saved", "green");
@@ -458,22 +455,8 @@ async function saveSettingsFromUi() {
   }
 }
 
-function applyUiScale(scaleValue) {
-  const parsed = typeof scaleValue === "number" ? scaleValue : parseFloat(scaleValue);
-  const scale = Number.isFinite(parsed) ? parsed : 1.0;
-  const clamped = Math.max(0.75, Math.min(1.5, scale));
-  // WebKit supports CSS zoom; best-effort across webviews.
-  if (clamped === 1.0) {
-    document.documentElement.style.zoom = "";
-    document.body.style.zoom = "";
-    return;
-  }
-  document.documentElement.style.zoom = String(clamped);
-  document.body.style.zoom = String(clamped);
-}
-
 // Auto-save settings on any change (inputs and toggles)
-$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken, #codexPath, #uiScale, #codexPersonality").on("change", saveSettingsFromUi);
+$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken, #codexPath, #codexPersonality").on("change", saveSettingsFromUi);
 $("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #agentNotificationTimeout, #aiSummariesEnabled, #mcpEnabled, #codexFeatureCollaborationModes, #codexFeatureSteer, #codexFeatureUnifiedExec, #codexFeatureCollab, #codexFeatureApps").on("change", saveSettingsFromUi);
 
 // Show/hide summaries agent dropdown based on AI summaries toggle
@@ -2304,11 +2287,6 @@ async function getSettings() {
   if (settingsPayload.codexPath !== undefined) {
     $("#codexPath").val(settingsPayload.codexPath || "");
   }
-  if (settingsPayload.uiScale !== undefined) {
-    $("#uiScale").val(settingsPayload.uiScale || 1.0);
-  } else {
-    $("#uiScale").val(1.0);
-  }
   if (settingsPayload.codexPersonality !== undefined) {
     $("#codexPersonality").val(settingsPayload.codexPersonality || "");
   }
@@ -2457,9 +2435,6 @@ async function getSettings() {
 
   // Mark settings as loaded
   settingsLoaded = true;
-
-  // Apply UI scale last (so initial layout settles first).
-  applyUiScale(settingsPayload.uiScale || 1.0);
 }
 
 function copyToClipboard(text) {

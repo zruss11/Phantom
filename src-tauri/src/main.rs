@@ -516,9 +516,6 @@ struct Settings {
     /// Values align with ACP modes ("default", "bypassPermissions", "dontAsk", "acceptEdits", "plan").
     #[serde(rename = "codexAccessMode")]
     codex_access_mode: Option<String>,
-    /// UI scale factor applied in the webview (best-effort).
-    #[serde(rename = "uiScale")]
-    ui_scale: Option<f64>,
     /// Codex feature flags synced to `CODEX_HOME/config.toml`.
     #[serde(rename = "codexFeatureCollaborationModes")]
     codex_feature_collaboration_modes: Option<bool>,
