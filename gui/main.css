@@ -7465,3 +7465,395 @@ input:checked + .slider:before {
   z-index: 1000;
   margin-bottom: 6px;
 }
+
+/* ============================================
+   Task Scheduler (Create Tasks)
+   ============================================ */
+
+/* Inline row under "Use Worktree" */
+.task-scheduler-inline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.task-scheduler-inline .btn i {
+  margin-right: 6px;
+}
+
+.task-scheduler-inline-meta {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Modal container */
+.task-scheduler-modal {
+  background: linear-gradient(160deg, rgba(24, 20, 28, 0.98), rgba(38, 32, 42, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 16px;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.6);
+}
+
+.task-scheduler-modal .modal-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.task-scheduler-modal .modal-footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.task-scheduler-modal-titlewrap {
+  min-width: 0;
+}
+
+.task-scheduler-modal-sub {
+  margin-top: 4px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  line-height: 1.35;
+}
+
+.task-scheduler-modal-shell {
+  display: flex;
+  gap: 14px;
+}
+
+.task-scheduler-modal-left {
+  width: 320px;
+  min-width: 280px;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  padding-right: 12px;
+  display: flex;
+  flex-direction: column;
+}
+
+.task-scheduler-modal-left-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.task-scheduler-modal-left-title {
+  font-size: 11px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.task-scheduler-modal-right {
+  flex: 1;
+  min-width: 0;
+}
+
+.task-scheduler-modal-banner {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background:
+    radial-gradient(620px 260px at 35% 0%, rgba(247, 138, 151, 0.16), rgba(0, 0, 0, 0) 55%),
+    rgba(0, 0, 0, 0.18);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.task-scheduler-modal-banner-title {
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.task-scheduler-modal-banner-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.58);
+  line-height: 1.5;
+}
+
+.task-scheduler-prompt-block {
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background: rgba(0, 0, 0, 0.14);
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.task-scheduler-prompt-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.task-scheduler-prompt-title {
+  font-size: 11px;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.task-scheduler-prompt-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.task-scheduler-prompt-actions .btn i {
+  margin: 0;
+}
+
+.task-scheduler-prompt-textarea {
+  width: 100%;
+  min-height: 88px;
+  max-height: 160px;
+  resize: none;
+  overflow: auto;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 10px;
+}
+
+.task-scheduler-prompt-textarea:focus {
+  outline: none;
+  border-color: rgba(247, 138, 151, 0.45);
+  box-shadow: 0 0 0 3px rgba(247, 138, 151, 0.14);
+}
+
+.task-scheduler-prompt-note {
+  margin-top: 8px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.50);
+  line-height: 1.35;
+}
+
+.task-scheduler-modal .toggle-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: 152px;
+  height: 30px;
+  padding: 2px;
+  border-radius: 999px;
+  background: rgba(15, 14, 16, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 10px 18px rgba(0, 0, 0, 0.28);
+}
+
+.task-scheduler-modal .toggle-buttons input {
+  display: none;
+}
+
+.task-scheduler-modal .toggle-button {
+  flex: 1;
+  height: 100%;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.task-scheduler-modal .toggle-button.is-active {
+  background: linear-gradient(135deg, #2c2a31, #1d1b21);
+  color: rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 6px 14px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.task-scheduler-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+  padding: 7px 0;
+}
+
+.task-scheduler-unit {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.65);
+  padding: 7px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-scheduler-enabled-row {
+  margin-top: 6px;
+}
+
+.task-scheduler-preview {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.18);
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.75);
+  font-variant-numeric: tabular-nums;
+}
+
+.task-scheduler-preview.error {
+  border-color: rgba(220, 53, 69, 0.35);
+  color: rgba(255, 180, 190, 0.9);
+}
+
+.task-scheduler-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.task-scheduler-list-wrap {
+  margin-top: 12px;
+}
+
+.task-scheduler-list-title {
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+  margin-bottom: 8px;
+}
+
+.task-scheduler-list {
+  flex: 1;
+  min-height: 240px;
+  max-height: 420px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-right: 4px;
+  scrollbar-gutter: stable;
+}
+
+.task-scheduler-item {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 12px;
+  padding: 10px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, transform 0.12s ease;
+}
+
+.task-scheduler-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(247, 138, 151, 0.32);
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.task-scheduler-item.selected {
+  border-color: rgba(247, 138, 151, 0.65);
+  box-shadow: 0 14px 24px rgba(0, 0, 0, 0.35);
+}
+
+.task-scheduler-item-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.task-scheduler-item-name {
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-scheduler-item-when {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.task-scheduler-item-sub {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 7px;
+}
+
+.task-scheduler-item-meta {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.6);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-scheduler-item-prompt {
+  margin-top: 6px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.72);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-scheduler-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(247, 138, 151, 0.18);
+  border: 1px solid rgba(247, 138, 151, 0.28);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.task-scheduler-pill.off {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.task-scheduler-item-error {
+  margin-top: 6px;
+  font-size: 11px;
+  color: rgba(255, 180, 190, 0.85);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 980px) {
+  .task-scheduler-modal-shell {
+    flex-direction: column;
+  }
+  .task-scheduler-modal-left {
+    width: 100%;
+    min-width: 0;
+    border-right: 0;
+    padding-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    padding-bottom: 12px;
+  }
+  .task-scheduler-list {
+    max-height: 240px;
+  }
+}

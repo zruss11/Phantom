@@ -1,3 +1,4 @@
+use crate::automations;
 use crate::utils::safe_prefix;
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,44 @@ pub struct TaskRecord {
     /// Claude Code runtime ("native" or "docker")
     #[serde(rename = "claudeRuntime")]
     pub claude_runtime: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRecord {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    pub agent_id: String,
+    pub exec_model: String,
+    pub prompt: String,
+    pub project_path: Option<String>,
+    pub base_branch: Option<String>,
+    pub plan_mode: bool,
+    pub thinking: bool,
+    pub use_worktree: bool,
+    pub permission_mode: String,
+    pub reasoning_effort: Option<String>,
+    pub agent_mode: Option<String>,
+    pub codex_mode: Option<String>,
+    pub claude_runtime: Option<String>,
+    pub cron: String,
+    pub next_run_at: Option<i64>,
+    pub last_run_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutomationRunRecord {
+    pub id: String,
+    pub automation_id: String,
+    pub task_id: Option<String>,
+    pub scheduled_for: i64,
+    pub created_at: i64,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -119,6 +158,149 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         )",
         [],
     )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS automations (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            agent_id TEXT NOT NULL,
+            exec_model TEXT NOT NULL,
+            prompt TEXT NOT NULL,
+            project_path TEXT,
+            base_branch TEXT,
+            plan_mode INTEGER NOT NULL DEFAULT 0,
+            thinking INTEGER NOT NULL DEFAULT 1,
+            use_worktree INTEGER NOT NULL DEFAULT 1,
+            permission_mode TEXT NOT NULL DEFAULT 'default',
+            reasoning_effort TEXT,
+            agent_mode TEXT,
+            codex_mode TEXT,
+            claude_runtime TEXT,
+            cron TEXT NOT NULL,
+            next_run_at INTEGER,
+            last_run_at INTEGER,
+            last_error TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    // Add missing columns to automations table (migration).
+    // Some users may have an older schema from an early build/branch that created
+    // the table without all the fields we now depend on (like next_run_at).
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN agent_id TEXT NOT NULL DEFAULT 'codex'",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN exec_model TEXT NOT NULL DEFAULT 'default'",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN prompt TEXT NOT NULL DEFAULT ''",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE automations ADD COLUMN project_path TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE automations ADD COLUMN base_branch TEXT", [])
+        .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN plan_mode INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN thinking INTEGER NOT NULL DEFAULT 1",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN use_worktree INTEGER NOT NULL DEFAULT 1",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN permission_mode TEXT NOT NULL DEFAULT 'default'",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN reasoning_effort TEXT",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE automations ADD COLUMN agent_mode TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE automations ADD COLUMN codex_mode TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE automations ADD COLUMN claude_runtime TEXT", [])
+        .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN cron TEXT NOT NULL DEFAULT ''",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE automations ADD COLUMN next_run_at INTEGER", [])
+        .ok();
+    conn.execute("ALTER TABLE automations ADD COLUMN last_run_at INTEGER", [])
+        .ok();
+    conn.execute("ALTER TABLE automations ADD COLUMN last_error TEXT", [])
+        .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE automations ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .ok();
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS automation_runs (
+            id TEXT PRIMARY KEY,
+            automation_id TEXT NOT NULL,
+            task_id TEXT,
+            scheduled_for INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            error TEXT,
+            FOREIGN KEY (automation_id) REFERENCES automations(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+
+    // Add missing columns to automation_runs table (migration).
+    // Older databases may have automation_runs without created_at (and potentially other fields).
+    conn.execute(
+        "ALTER TABLE automation_runs ADD COLUMN automation_id TEXT NOT NULL DEFAULT ''",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE automation_runs ADD COLUMN task_id TEXT", [])
+        .ok();
+    conn.execute(
+        "ALTER TABLE automation_runs ADD COLUMN scheduled_for INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .ok();
+    conn.execute(
+        "ALTER TABLE automation_runs ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0",
+        [],
+    )
+    .ok();
+    conn.execute("ALTER TABLE automation_runs ADD COLUMN error TEXT", [])
+        .ok();
 
     // Model cache table for instant model selector UX
     conn.execute(
@@ -234,6 +416,16 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         [],
     )?;
     conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_automations_enabled_next_run_at
+         ON automations(enabled, next_run_at)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_automation_runs_automation_id_created_at
+         ON automation_runs(automation_id, created_at DESC)",
+        [],
+    )?;
+    conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_task_id_id ON messages(task_id, id)",
         [],
     )?;
@@ -282,7 +474,299 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     conn.execute("ALTER TABLE tasks ADD COLUMN claude_runtime TEXT", [])
         .ok();
 
+    // Backfill next_run_at for enabled automations that predate the column (migration).
+    // Older schemas added next_run_at without populating it, which would cause enabled
+    // schedules to never run unless a user edits/toggles them.
+    if let Ok(rows) = list_enabled_automations_missing_next_run_at(&conn) {
+        let now = chrono::Utc::now().timestamp();
+        for (automation_id, cron) in rows {
+            if let Ok(next_run_at) = automations::compute_next_run_at(&cron, chrono::Local::now()) {
+                let _ = backfill_automation_next_run_at(&conn, &automation_id, next_run_at, now);
+            }
+        }
+    }
+
     Ok(conn)
+}
+
+pub fn list_enabled_automations_missing_next_run_at(
+    conn: &Connection,
+) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, cron
+         FROM automations
+         WHERE enabled = 1
+           AND (next_run_at IS NULL OR next_run_at = 0)
+           AND TRIM(cron) <> ''",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+pub fn backfill_automation_next_run_at(
+    conn: &Connection,
+    automation_id: &str,
+    next_run_at: i64,
+    updated_at: i64,
+) -> Result<usize> {
+    conn.execute(
+        "UPDATE automations
+         SET next_run_at = ?1, updated_at = ?2
+         WHERE id = ?3
+           AND enabled = 1
+           AND (next_run_at IS NULL OR next_run_at = 0)",
+        params![next_run_at, updated_at, automation_id],
+    )
+}
+
+pub fn list_automations(conn: &Connection) -> Result<Vec<AutomationRecord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, name, enabled, agent_id, exec_model, prompt, project_path, base_branch, plan_mode, thinking, use_worktree, permission_mode, reasoning_effort, agent_mode, codex_mode, claude_runtime, cron, next_run_at, last_run_at, last_error, created_at, updated_at
+         FROM automations
+         ORDER BY enabled DESC, COALESCE(next_run_at, 0) ASC, created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(AutomationRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            enabled: row.get::<_, i64>(2)? != 0,
+            agent_id: row.get(3)?,
+            exec_model: row.get(4)?,
+            prompt: row.get(5)?,
+            project_path: row.get(6)?,
+            base_branch: row.get(7)?,
+            plan_mode: row.get::<_, i64>(8)? != 0,
+            thinking: row.get::<_, i64>(9)? != 0,
+            use_worktree: row.get::<_, i64>(10)? != 0,
+            permission_mode: row.get(11)?,
+            reasoning_effort: row.get(12)?,
+            agent_mode: row.get(13)?,
+            codex_mode: row.get(14)?,
+            claude_runtime: row.get(15)?,
+            cron: row.get(16)?,
+            next_run_at: row.get(17)?,
+            last_run_at: row.get(18)?,
+            last_error: row.get(19)?,
+            created_at: row.get(20)?,
+            updated_at: row.get(21)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_automation(conn: &Connection, automation_id: &str) -> Result<Option<AutomationRecord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, name, enabled, agent_id, exec_model, prompt, project_path, base_branch, plan_mode, thinking, use_worktree, permission_mode, reasoning_effort, agent_mode, codex_mode, claude_runtime, cron, next_run_at, last_run_at, last_error, created_at, updated_at
+         FROM automations
+         WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query(params![automation_id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(AutomationRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            enabled: row.get::<_, i64>(2)? != 0,
+            agent_id: row.get(3)?,
+            exec_model: row.get(4)?,
+            prompt: row.get(5)?,
+            project_path: row.get(6)?,
+            base_branch: row.get(7)?,
+            plan_mode: row.get::<_, i64>(8)? != 0,
+            thinking: row.get::<_, i64>(9)? != 0,
+            use_worktree: row.get::<_, i64>(10)? != 0,
+            permission_mode: row.get(11)?,
+            reasoning_effort: row.get(12)?,
+            agent_mode: row.get(13)?,
+            codex_mode: row.get(14)?,
+            claude_runtime: row.get(15)?,
+            cron: row.get(16)?,
+            next_run_at: row.get(17)?,
+            last_run_at: row.get(18)?,
+            last_error: row.get(19)?,
+            created_at: row.get(20)?,
+            updated_at: row.get(21)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn insert_automation(conn: &Connection, automation: &AutomationRecord) -> Result<()> {
+    conn.execute(
+        "INSERT INTO automations (id, name, enabled, agent_id, exec_model, prompt, project_path, base_branch, plan_mode, thinking, use_worktree, permission_mode, reasoning_effort, agent_mode, codex_mode, claude_runtime, cron, next_run_at, last_run_at, last_error, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+        params![
+            automation.id,
+            automation.name,
+            if automation.enabled { 1 } else { 0 },
+            automation.agent_id,
+            automation.exec_model,
+            automation.prompt,
+            automation.project_path,
+            automation.base_branch,
+            if automation.plan_mode { 1 } else { 0 },
+            if automation.thinking { 1 } else { 0 },
+            if automation.use_worktree { 1 } else { 0 },
+            automation.permission_mode,
+            automation.reasoning_effort,
+            automation.agent_mode,
+            automation.codex_mode,
+            automation.claude_runtime,
+            automation.cron,
+            automation.next_run_at,
+            automation.last_run_at,
+            automation.last_error,
+            automation.created_at,
+            automation.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn update_automation(conn: &Connection, automation: &AutomationRecord) -> Result<()> {
+    conn.execute(
+        "UPDATE automations SET
+            name = ?2,
+            enabled = ?3,
+            agent_id = ?4,
+            exec_model = ?5,
+            prompt = ?6,
+            project_path = ?7,
+            base_branch = ?8,
+            plan_mode = ?9,
+            thinking = ?10,
+            use_worktree = ?11,
+            permission_mode = ?12,
+            reasoning_effort = ?13,
+            agent_mode = ?14,
+            codex_mode = ?15,
+            claude_runtime = ?16,
+            cron = ?17,
+            next_run_at = ?18,
+            last_run_at = ?19,
+            last_error = ?20,
+            updated_at = ?21
+         WHERE id = ?1",
+        params![
+            automation.id,
+            automation.name,
+            if automation.enabled { 1 } else { 0 },
+            automation.agent_id,
+            automation.exec_model,
+            automation.prompt,
+            automation.project_path,
+            automation.base_branch,
+            if automation.plan_mode { 1 } else { 0 },
+            if automation.thinking { 1 } else { 0 },
+            if automation.use_worktree { 1 } else { 0 },
+            automation.permission_mode,
+            automation.reasoning_effort,
+            automation.agent_mode,
+            automation.codex_mode,
+            automation.claude_runtime,
+            automation.cron,
+            automation.next_run_at,
+            automation.last_run_at,
+            automation.last_error,
+            automation.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_automation(conn: &Connection, automation_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM automations WHERE id = ?1",
+        params![automation_id],
+    )?;
+    Ok(())
+}
+
+pub fn set_automation_last_error(
+    conn: &Connection,
+    automation_id: &str,
+    last_error: Option<String>,
+    updated_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE automations
+         SET last_error = ?1, updated_at = ?2
+         WHERE id = ?3",
+        params![last_error, updated_at, automation_id],
+    )?;
+    Ok(())
+}
+
+pub fn list_due_automations(conn: &Connection, now: i64) -> Result<Vec<AutomationRecord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, name, enabled, agent_id, exec_model, prompt, project_path, base_branch, plan_mode, thinking, use_worktree, permission_mode, reasoning_effort, agent_mode, codex_mode, claude_runtime, cron, next_run_at, last_run_at, last_error, created_at, updated_at
+         FROM automations
+         WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?1
+         ORDER BY next_run_at ASC",
+    )?;
+    let rows = stmt.query_map(params![now], |row| {
+        Ok(AutomationRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            enabled: row.get::<_, i64>(2)? != 0,
+            agent_id: row.get(3)?,
+            exec_model: row.get(4)?,
+            prompt: row.get(5)?,
+            project_path: row.get(6)?,
+            base_branch: row.get(7)?,
+            plan_mode: row.get::<_, i64>(8)? != 0,
+            thinking: row.get::<_, i64>(9)? != 0,
+            use_worktree: row.get::<_, i64>(10)? != 0,
+            permission_mode: row.get(11)?,
+            reasoning_effort: row.get(12)?,
+            agent_mode: row.get(13)?,
+            codex_mode: row.get(14)?,
+            claude_runtime: row.get(15)?,
+            cron: row.get(16)?,
+            next_run_at: row.get(17)?,
+            last_run_at: row.get(18)?,
+            last_error: row.get(19)?,
+            created_at: row.get(20)?,
+            updated_at: row.get(21)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn insert_automation_run(conn: &Connection, run: &AutomationRunRecord) -> Result<()> {
+    conn.execute(
+        "INSERT INTO automation_runs (id, automation_id, task_id, scheduled_for, created_at, error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            run.id,
+            run.automation_id,
+            run.task_id,
+            run.scheduled_for,
+            run.created_at,
+            run.error,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_automation_runs(conn: &Connection, limit: usize) -> Result<Vec<AutomationRunRecord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, automation_id, task_id, scheduled_for, created_at, error
+         FROM automation_runs
+         ORDER BY created_at DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit as i64], |row| {
+        Ok(AutomationRunRecord {
+            id: row.get(0)?,
+            automation_id: row.get(1)?,
+            task_id: row.get(2)?,
+            scheduled_for: row.get(3)?,
+            created_at: row.get(4)?,
+            error: row.get(5)?,
+        })
+    })?;
+    rows.collect()
 }
 
 pub fn save_discord_thread(
@@ -1133,4 +1617,190 @@ pub fn optimize_and_shutdown(conn: &Connection) -> Result<()> {
     // Merge WAL back into main database file
     conn.execute("PRAGMA wal_checkpoint(PASSIVE)", [])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn test_init_db_migrates_automations_schema() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "phantom-harness-automations-migration-{suffix}.sqlite"
+        ));
+
+        // Create an older automations schema (missing next_run_at and other newer fields).
+        {
+            let conn = Connection::open(&path).expect("open temp db");
+            conn.execute(
+                "CREATE TABLE automations (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    agent_id TEXT NOT NULL,
+                    exec_model TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    project_path TEXT,
+                    cron TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )",
+                [],
+            )
+            .expect("create old automations table");
+
+            let now = chrono::Utc::now().timestamp();
+            conn.execute(
+                "INSERT INTO automations
+                 (id, name, enabled, agent_id, exec_model, prompt, project_path, cron, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    "auto-1",
+                    "Test automation",
+                    1,
+                    "codex",
+                    "default",
+                    "hello",
+                    Option::<String>::None,
+                    "0 9 * * *",
+                    now,
+                    now
+                ],
+            )
+            .expect("insert old automation row");
+        }
+
+        // init_db should migrate the schema so list_automations can select all expected columns.
+        let conn = init_db(&path).expect("init_db should migrate");
+        let automations = list_automations(&conn).expect("list_automations should work");
+        assert_eq!(automations.len(), 1);
+        assert_eq!(automations[0].id, "auto-1");
+        assert_eq!(automations[0].cron, "0 9 * * *");
+        assert_eq!(automations[0].permission_mode, "default");
+        assert!(
+            automations[0].next_run_at.is_some(),
+            "init_db should backfill next_run_at for enabled automations"
+        );
+
+        // Best-effort cleanup.
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn test_init_db_migrates_automation_runs_schema() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "phantom-harness-automation-runs-migration-{suffix}.sqlite"
+        ));
+
+        // Create an older automation_runs schema (missing created_at).
+        {
+            let conn = Connection::open(&path).expect("open temp db");
+            conn.execute(
+                "CREATE TABLE automation_runs (
+                    id TEXT PRIMARY KEY,
+                    automation_id TEXT NOT NULL,
+                    task_id TEXT,
+                    scheduled_for INTEGER NOT NULL,
+                    error TEXT
+                )",
+                [],
+            )
+            .expect("create old automation_runs table");
+
+            let now = chrono::Utc::now().timestamp();
+            conn.execute(
+                "INSERT INTO automation_runs
+                 (id, automation_id, task_id, scheduled_for, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    "run-1",
+                    "auto-1",
+                    Option::<String>::None,
+                    now,
+                    Option::<String>::None
+                ],
+            )
+            .expect("insert old automation_runs row");
+        }
+
+        // init_db should migrate the schema so list_automation_runs can select created_at.
+        let conn = init_db(&path).expect("init_db should migrate");
+        let runs = list_automation_runs(&conn, 10).expect("list_automation_runs should work");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, "run-1");
+        assert_eq!(runs[0].automation_id, "auto-1");
+
+        // Best-effort cleanup.
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn test_set_automation_last_error_does_not_clobber_next_run_at() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "phantom-harness-automation-last-error-{suffix}.sqlite"
+        ));
+
+        let conn = init_db(&path).expect("init_db should create schema");
+
+        let now = chrono::Utc::now().timestamp();
+        let automation = AutomationRecord {
+            id: "auto-err-1".to_string(),
+            name: "Test".to_string(),
+            enabled: true,
+            agent_id: "codex".to_string(),
+            exec_model: "default".to_string(),
+            prompt: "hello".to_string(),
+            project_path: None,
+            base_branch: None,
+            plan_mode: false,
+            thinking: true,
+            use_worktree: true,
+            permission_mode: "default".to_string(),
+            reasoning_effort: None,
+            agent_mode: None,
+            codex_mode: None,
+            claude_runtime: None,
+            cron: "0 9 * * *".to_string(),
+            next_run_at: Some(now + 3600),
+            last_run_at: Some(now),
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        insert_automation(&conn, &automation).expect("insert automation");
+
+        set_automation_last_error(&conn, "auto-err-1", Some("boom".to_string()), now + 1)
+            .expect("set_automation_last_error should work");
+
+        let updated = get_automation(&conn, "auto-err-1")
+            .expect("get automation")
+            .expect("automation exists");
+        assert_eq!(updated.last_error.as_deref(), Some("boom"));
+        assert_eq!(updated.next_run_at, automation.next_run_at);
+
+        // Best-effort cleanup.
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
 }

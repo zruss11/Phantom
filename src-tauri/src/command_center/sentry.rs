@@ -5,7 +5,10 @@ use serde::Deserialize;
 const SENTRY_API_URL: &str = "https://sentry.io/api/0";
 
 /// Fetch organizations the user has access to
-pub async fn fetch_organizations(client: &Client, token: &str) -> Result<Vec<SentryOrganization>, String> {
+pub async fn fetch_organizations(
+    client: &Client,
+    token: &str,
+) -> Result<Vec<SentryOrganization>, String> {
     #[derive(Deserialize)]
     struct ApiOrg {
         slug: String,
@@ -39,7 +42,11 @@ pub async fn fetch_organizations(client: &Client, token: &str) -> Result<Vec<Sen
 }
 
 /// Fetch projects in an organization
-pub async fn fetch_projects(client: &Client, token: &str, org: &str) -> Result<Vec<SentryProject>, String> {
+pub async fn fetch_projects(
+    client: &Client,
+    token: &str,
+    org: &str,
+) -> Result<Vec<SentryProject>, String> {
     #[derive(Deserialize)]
     struct ApiProject {
         slug: String,
@@ -154,7 +161,11 @@ pub async fn fetch_errors(
             .await
             .map_err(|e| format!("Failed to parse Sentry response: {}", e))?;
 
-        eprintln!("[Sentry] Project {} returned {} issues", project_slug, issues.len());
+        eprintln!(
+            "[Sentry] Project {} returned {} issues",
+            project_slug,
+            issues.len()
+        );
 
         all_issues.extend(issues.into_iter().map(|i| SentryError {
             id: i.id,

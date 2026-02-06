@@ -338,7 +338,20 @@
                             />
                           </div>
                         </div>
+
+                        <div class="setting-row">
+                          <div class="setting-label">
+                            Schedule Task
+                          </div>
+                          <div class="task-scheduler-inline">
+                            <button class="btn btn-outline-secondary btn-sm" id="taskSchedulerOpenBtn" type="button">
+                              <i class="fal fa-plus"></i> New
+                            </button>
+                            <span class="task-scheduler-inline-meta" id="taskSchedulerInlineMeta">No schedules</span>
+                          </div>
+                        </div>
                       </div>
+
                       <div class="form-group mb-0 mt-3">
                         <a
                           id="createAgentButton"
@@ -2052,6 +2065,172 @@
       </div>
     </div>
 
+    <!-- Task Scheduler Modal -->
+    <div
+      class="modal fade mt-5"
+      id="taskSchedulerModal"
+      tabindex="-1"
+      role="dialog"
+      aria-labelledby="taskSchedulerModalLabel"
+      aria-hidden="true"
+    >
+      <div class="modal-dialog modal-lg mt-5" role="document">
+        <div class="modal-content task-scheduler-modal">
+          <div class="modal-header">
+            <div class="task-scheduler-modal-titlewrap">
+              <h5 class="modal-title" id="taskSchedulerModalLabel">Schedule task</h5>
+              <div class="task-scheduler-modal-sub" id="taskSchedulerModalSub">
+                Create and auto-start tasks on a schedule while Phantom is open.
+              </div>
+            </div>
+            <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+              <span aria-hidden="true"><i class="fal fa-times"></i></span>
+            </button>
+          </div>
+
+          <div class="modal-body">
+            <div class="task-scheduler-modal-shell">
+              <div class="task-scheduler-modal-left">
+                <div class="task-scheduler-modal-left-top">
+                  <div class="task-scheduler-modal-left-title">Saved schedules</div>
+                  <button class="btn btn-outline-secondary btn-sm" id="taskSchedulerNewBtn" type="button">
+                    <i class="fal fa-plus"></i> New
+                  </button>
+                </div>
+                <div id="taskSchedulerList" class="task-scheduler-list"></div>
+              </div>
+
+              <div class="task-scheduler-modal-right">
+                <div class="task-scheduler-modal-banner">
+                  <div class="task-scheduler-modal-banner-title">Runs as a task</div>
+                  <div class="task-scheduler-modal-banner-sub">
+                    When a schedule is due, Phantom creates a task (View Tasks) and auto-starts it.
+                    Nothing runs while Phantom is closed.
+                  </div>
+                </div>
+
+                <div class="task-scheduler-prompt-block">
+                  <div class="task-scheduler-prompt-header">
+                    <div class="task-scheduler-prompt-title">Prompt</div>
+                    <div class="task-scheduler-prompt-actions">
+                      <button class="btn btn-outline-secondary btn-sm" id="taskSchedulerUseDraftPromptBtn" type="button">
+                        Use draft
+                      </button>
+                      <button class="btn btn-outline-secondary btn-sm" id="taskSchedulerCopyPromptBtn" type="button">
+                        <i class="fal fa-copy"></i>
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    id="taskSchedulerPromptPreview"
+                    class="task-scheduler-prompt-textarea"
+                    placeholder="(Uses the current Create Tasks prompt when you save a new schedule.)"
+                  ></textarea>
+                  <div class="task-scheduler-prompt-note">
+                    You can edit the prompt here. Click “Use draft” to pull in the current Create Tasks prompt.
+                  </div>
+                </div>
+
+                <div class="form-group mb-2">
+                  <label class="muted-label" for="taskSchedulerNameInput">Name</label>
+                  <input
+                    type="text"
+                    class="form-control form-control-sm"
+                    id="taskSchedulerNameInput"
+                    placeholder="e.g. Morning triage"
+                  />
+                </div>
+
+                <div class="form-row">
+                  <div class="form-group col-7 mb-2">
+                    <label class="muted-label" for="taskSchedulerModeSelect">Schedule</label>
+                    <select id="taskSchedulerModeSelect" class="form-control form-control-sm">
+                      <option value="daily">Every day</option>
+                      <option value="weekdays">Weekdays</option>
+                      <option value="weekly">Weekly</option>
+                      <option value="every_minutes">Every N minutes</option>
+                      <option value="every_hours">Every N hours</option>
+                    </select>
+                  </div>
+                  <div class="form-group col-5 mb-2" id="taskSchedulerTimeGroup">
+                    <label class="muted-label" for="taskSchedulerTimeInput">Time</label>
+                    <input id="taskSchedulerTimeInput" class="form-control form-control-sm" type="time" value="09:00" />
+                  </div>
+                </div>
+
+                <div class="form-row" id="taskSchedulerWeeklyRow" style="display:none;">
+                  <div class="form-group col-7 mb-2">
+                    <label class="muted-label" for="taskSchedulerWeeklyDaySelect">Day</label>
+                    <select id="taskSchedulerWeeklyDaySelect" class="form-control form-control-sm">
+                      <option value="1">Monday</option>
+                      <option value="2">Tuesday</option>
+                      <option value="3">Wednesday</option>
+                      <option value="4">Thursday</option>
+                      <option value="5">Friday</option>
+                      <option value="6">Saturday</option>
+                      <option value="0">Sunday</option>
+                    </select>
+                  </div>
+                  <div class="form-group col-5 mb-2">
+                    <label class="muted-label">&nbsp;</label>
+                    <div class="task-scheduler-hint">Uses the time above</div>
+                  </div>
+                </div>
+
+                <div class="form-row" id="taskSchedulerEveryNRow" style="display:none;">
+                  <div class="form-group col-7 mb-2">
+                    <label class="muted-label" for="taskSchedulerEveryNInput">Every</label>
+                    <input
+                      id="taskSchedulerEveryNInput"
+                      class="form-control form-control-sm"
+                      type="number"
+                      min="1"
+                      max="720"
+                      value="15"
+                    />
+                  </div>
+                  <div class="form-group col-5 mb-2">
+                    <label class="muted-label">&nbsp;</label>
+                    <div class="task-scheduler-unit" id="taskSchedulerEveryNUnit">minutes</div>
+                  </div>
+                </div>
+
+                <div class="setting-row task-scheduler-enabled-row">
+                  <div class="setting-label">Enabled</div>
+                  <div class="toggle-buttons" data-toggle="scheduler-enabled">
+                    <button class="toggle-button" type="button" data-value="false">Off</button>
+                    <button class="toggle-button" type="button" data-value="true">On</button>
+                    <input type="checkbox" id="taskSchedulerEnabledToggle" checked />
+                  </div>
+                </div>
+
+                <div class="task-scheduler-preview" id="taskSchedulerNextRunPreview">Next run: --</div>
+
+                <div class="task-scheduler-actions">
+                  <button class="btn btn-default btn-brand btn-sm" id="taskSchedulerSaveBtn" type="button">
+                    <i class="fal fa-save"></i> Save
+                  </button>
+                  <button class="btn btn-outline-secondary btn-sm" id="taskSchedulerRunNowBtn" type="button" disabled>
+                    <i class="fal fa-play"></i> Run now
+                  </button>
+                  <button class="btn btn-outline-secondary btn-sm" id="taskSchedulerToggleBtn" type="button" disabled>
+                    Disable
+                  </button>
+                  <button class="btn btn-danger btn-sm" id="taskSchedulerDeleteBtn" type="button" disabled>
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="modal-footer">
+            <button type="button" class="btn btn-sm btn-secondary" data-dismiss="modal">Close</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Custom File Browser Modal -->
     <div class="modal fade" id="fileBrowserModal" tabindex="-1" role="dialog" aria-labelledby="fileBrowserModalLabel" aria-hidden="true">
       <div class="modal-dialog modal-lg file-browser-dialog" role="document">
@@ -2366,6 +2545,7 @@
     <script src="js/command-center.js"></script>
     <script src="js/command-center-config.js"></script>
     <script src="js/application.js"></script>
+    <script src="js/task-scheduler.js"></script>
 
     <script src="js/vendor/jquery.color-2.1.2.min.js"></script>
 
