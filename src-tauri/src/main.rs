@@ -10,6 +10,7 @@ mod local_usage;
 mod logger;
 mod mcp_server;
 mod namegen;
+mod openclaw;
 mod opencode_cli;
 mod summarize;
 mod transcription;
@@ -61,6 +62,61 @@ use libc::{getegid, geteuid};
 
 use debug_http::start_debug_http;
 use mcp_server::{start_mcp_server, McpConfig};
+
+#[tauri::command]
+async fn openclaw_probe() -> Result<openclaw::OpenClawProbe, String> {
+    Ok(openclaw::probe().await)
+}
+
+#[tauri::command]
+async fn openclaw_install_brew() -> Result<openclaw::CommandResult, String> {
+    openclaw::install_brew().await
+}
+
+#[tauri::command]
+async fn openclaw_install_node() -> Result<openclaw::CommandResult, String> {
+    openclaw::install_node().await
+}
+
+#[tauri::command]
+async fn openclaw_install_cli() -> Result<openclaw::CommandResult, String> {
+    openclaw::install_openclaw_cli().await
+}
+
+#[tauri::command]
+async fn openclaw_gateway_install() -> Result<openclaw::CommandResult, String> {
+    openclaw::gateway_install().await
+}
+
+#[tauri::command]
+async fn openclaw_gateway_start() -> Result<openclaw::CommandResult, String> {
+    openclaw::gateway_start().await
+}
+
+#[tauri::command]
+async fn openclaw_gateway_stop() -> Result<openclaw::CommandResult, String> {
+    openclaw::gateway_stop().await
+}
+
+#[tauri::command]
+async fn openclaw_gateway_restart() -> Result<openclaw::CommandResult, String> {
+    openclaw::gateway_restart().await
+}
+
+#[tauri::command]
+async fn openclaw_gateway_uninstall() -> Result<openclaw::CommandResult, String> {
+    openclaw::gateway_uninstall().await
+}
+
+#[tauri::command]
+async fn openclaw_doctor_fix() -> Result<openclaw::CommandResult, String> {
+    openclaw::run_doctor_fix().await
+}
+
+#[tauri::command]
+async fn openclaw_dashboard_url() -> Result<String, String> {
+    openclaw::dashboard_url().await
+}
 
 /// Model pricing (per million tokens): (model_pattern, input_rate, output_rate)
 /// Rates are in USD per 1M tokens
@@ -12891,6 +12947,18 @@ fn main() {
             check_existing_pr,
             get_github_pr_url,
             open_external_url,
+            // OpenClaw / Connections
+            openclaw_probe,
+            openclaw_install_brew,
+            openclaw_install_node,
+            openclaw_install_cli,
+            openclaw_gateway_install,
+            openclaw_gateway_start,
+            openclaw_gateway_stop,
+            openclaw_gateway_restart,
+            openclaw_gateway_uninstall,
+            openclaw_doctor_fix,
+            openclaw_dashboard_url,
             create_agent_session,
             start_task,
             stop_task,

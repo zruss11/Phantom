@@ -79,6 +79,11 @@
                 <i class="fal fa-terminal"></i> Command
               </a>
             </li>
+            <li class="nav-item">
+              <a class="nav-link" data-page="connectionsPage">
+                <i class="fal fa-plug"></i> Connections
+              </a>
+            </li>
           </ul>
           <ul class="navbar-nav ml-auto">
             <li class="nav-item mt-2 mr-0">
@@ -1372,13 +1377,192 @@
             </div>
           </div>
         </div>
+        </section>
+      <!-- Connections (OpenClaw) -->
+      <section
+        id="connectionsPage"
+        class="connections-page page container-fluid"
+        hidden
+      >
+        <div class="row no-gutters">
+          <div class="col-12">
+            <div class="card mt-4 mr-4 ml-4">
+              <div class="card-body pb-3">
+                <div class="d-flex align-items-start justify-content-between">
+                  <div>
+                    <h5 class="mb-1">Connections</h5>
+                    <p class="muted-text mb-0">
+                      Install and manage OpenClaw, toggle the gateway, and open
+                      the Sessions/Chat UI.
+                    </p>
+                  </div>
+                  <div class="d-flex align-items-center">
+                    <button
+                      class="btn btn-outline-secondary btn-sm mr-2"
+                      id="openclawRefreshBtn"
+                      type="button"
+                      title="Refresh status"
+                    >
+                      <i class="fal fa-sync-alt"></i> Refresh
+                    </button>
+                    <button
+                      class="btn btn-danger btn-sm"
+                      id="openclawFullSetupBtn"
+                      type="button"
+                      title="Install prerequisites, OpenClaw, gateway service, then start"
+                    >
+                      <i class="fal fa-bolt"></i> Run Full Setup
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Left: Setup + Management -->
+          <div class="col-6">
+            <div class="card mt-0 mr-2 ml-4">
+              <div class="card-body pb-3">
+                <h5 class="mb-3">OpenClaw Setup</h5>
+
+                <div class="connections-status-list mb-3">
+                  <div class="connections-status-row">
+                    <div class="connections-status-name">Homebrew</div>
+                    <div class="connections-status-meta" id="openclawBrewMeta">
+                      <span class="badge badge-secondary" id="openclawBrewBadge">Unknown</span>
+                      <span class="connections-status-detail" id="openclawBrewDetail"></span>
+                    </div>
+                  </div>
+                  <div class="connections-status-row">
+                    <div class="connections-status-name">Node</div>
+                    <div class="connections-status-meta" id="openclawNodeMeta">
+                      <span class="badge badge-secondary" id="openclawNodeBadge">Unknown</span>
+                      <span class="connections-status-detail" id="openclawNodeDetail"></span>
+                    </div>
+                  </div>
+                  <div class="connections-status-row">
+                    <div class="connections-status-name">npm</div>
+                    <div class="connections-status-meta" id="openclawNpmMeta">
+                      <span class="badge badge-secondary" id="openclawNpmBadge">Unknown</span>
+                      <span class="connections-status-detail" id="openclawNpmDetail"></span>
+                    </div>
+                  </div>
+                  <div class="connections-status-row">
+                    <div class="connections-status-name">OpenClaw CLI</div>
+                    <div class="connections-status-meta" id="openclawCliMeta">
+                      <span class="badge badge-secondary" id="openclawCliBadge">Unknown</span>
+                      <span class="connections-status-detail" id="openclawCliDetail"></span>
+                    </div>
+                  </div>
+                  <div class="connections-status-row">
+                    <div class="connections-status-name">Gateway Service</div>
+                    <div class="connections-status-meta" id="openclawGatewaySvcMeta">
+                      <span class="badge badge-secondary" id="openclawGatewaySvcBadge">Unknown</span>
+                      <span class="connections-status-detail" id="openclawGatewaySvcDetail"></span>
+                    </div>
+                  </div>
+                  <div class="connections-status-row">
+                    <div class="connections-status-name">Gateway</div>
+                    <div class="connections-status-meta" id="openclawGatewayMeta">
+                      <span class="badge badge-secondary" id="openclawGatewayBadge">Unknown</span>
+                      <span class="connections-status-detail" id="openclawGatewayDetail"></span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="connections-actions">
+                  <div class="btn-group mb-2" role="group" aria-label="Install actions">
+                    <button class="btn btn-default btn-brand btn-sm" id="openclawInstallBrewBtn" type="button">
+                      Install Homebrew
+                    </button>
+                    <button class="btn btn-default btn-brand btn-sm" id="openclawInstallNodeBtn" type="button">
+                      Install Node
+                    </button>
+                    <button class="btn btn-default btn-brand btn-sm" id="openclawInstallCliBtn" type="button">
+                      Install OpenClaw
+                    </button>
+                  </div>
+
+                  <div class="btn-group mb-2" role="group" aria-label="Gateway actions">
+                    <button class="btn btn-outline-secondary btn-sm" id="openclawGatewayInstallBtn" type="button">
+                      Install Gateway Service
+                    </button>
+                    <button class="btn btn-success btn-sm" id="openclawGatewayStartBtn" type="button">
+                      Start Gateway
+                    </button>
+                    <button class="btn btn-warning btn-sm" id="openclawGatewayStopBtn" type="button">
+                      Stop Gateway
+                    </button>
+                    <button class="btn btn-info btn-sm" id="openclawGatewayRestartBtn" type="button">
+                      Restart Gateway
+                    </button>
+                  </div>
+
+                  <div class="btn-group" role="group" aria-label="Utilities">
+                    <button class="btn btn-outline-secondary btn-sm" id="openclawDoctorFixBtn" type="button" title="Run openclaw doctor --fix">
+                      Doctor (--fix)
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" id="openclawOpenBrowserBtn" type="button" title="Open the Control UI in your browser">
+                      Open Control UI in Browser
+                    </button>
+                    <button class="btn btn-outline-danger btn-sm" id="openclawGatewayUninstallBtn" type="button" title="Uninstall the gateway service">
+                      Uninstall Gateway
+                    </button>
+                  </div>
+                </div>
+
+                <div class="text-muted mt-3 connections-footnote" id="openclawConnectionsFootnote">
+                  Tip: the embedded Control UI is the easiest way to manage Sessions and chat without re-building OpenClaw’s UI.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right: Control UI (embedded) -->
+          <div class="col-6">
+            <div class="card mt-0 mr-4 ml-2">
+              <div class="card-body pb-3">
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                  <h5 class="mb-0">Control UI (Sessions + Chat)</h5>
+                  <div class="d-flex align-items-center">
+                    <span class="text-muted mr-2" id="openclawControlUiUrlLabel"></span>
+                    <button class="btn btn-outline-secondary btn-sm" id="openclawReloadFrameBtn" type="button" title="Reload embedded UI">
+                      Reload
+                    </button>
+                  </div>
+                </div>
+
+                <div id="openclawControlUiEmpty" class="connections-empty">
+                  <div class="connections-empty-title">
+                    Start the gateway to load Sessions/Chat.
+                  </div>
+                  <div class="connections-empty-actions">
+                    <button class="btn btn-success btn-sm mr-2" id="openclawEmptyStartBtn" type="button">
+                      Start Gateway
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" id="openclawEmptyOpenBrowserBtn" type="button">
+                      Open in Browser
+                    </button>
+                  </div>
+                </div>
+
+                <iframe
+                  id="openclawControlUiFrame"
+                  class="connections-iframe"
+                  title="OpenClaw Control UI"
+                  hidden
+                ></iframe>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- Agent Task Popup (for Command Center) -->
       <div class="command-agent-popup-backdrop" id="commandAgentPopupBackdrop" hidden></div>
       <div class="command-agent-popup" id="commandAgentPopup" hidden>
         <div class="command-agent-popup-header">
-          <span class="command-agent-popup-title">
+<span class="command-agent-popup-title">
             <i class="fal fa-robot"></i>
             Create Fix Task
           </span>
@@ -2545,6 +2729,7 @@
     <script src="js/command-center.js"></script>
     <script src="js/command-center-config.js"></script>
     <script src="js/application.js"></script>
+    <script src="js/openclaw-connections.js"></script>
     <script src="js/task-scheduler.js"></script>
 
     <script src="js/vendor/jquery.color-2.1.2.min.js"></script>
