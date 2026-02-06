@@ -256,7 +256,9 @@
     for (var i = 0; i < units.length; i++) {
       var u = units[i];
       if (abs >= u.s) {
-        var n = diff >= 0 ? Math.ceil(abs / u.s) : Math.floor(abs / u.s);
+        // Avoid overstating near-future times.
+        // Example: 61s should read "in 1m", not "in 2m".
+        var n = Math.floor(abs / u.s);
         if (n < 1) n = 1;
         out = n + u.label;
         break;
