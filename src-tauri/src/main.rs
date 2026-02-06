@@ -17,8 +17,8 @@ mod webhook;
 mod worktree;
 
 use command_center::{
-    CommandCenterData, GhCliAuthStatus, GithubIssue, GithubWorkflow,
-    LinearCycle, LinearIssue, LinearProject, SentryError, SentryOrganization, SentryProject,
+    CommandCenterData, GhCliAuthStatus, GithubIssue, GithubWorkflow, LinearCycle, LinearIssue,
+    LinearProject, SentryError, SentryOrganization, SentryProject,
 };
 use utils::{default_search_paths, resolve_command_path, resolve_gh_binary, truncate_str};
 
@@ -277,11 +277,14 @@ async fn prewarm_opencode_models() {
     }
 }
 
-fn build_agent_availability(config: &AgentsConfig) -> HashMap<String, AgentAvailability> {
+fn build_agent_availability(
+    config: &AgentsConfig,
+    settings: Option<&Settings>,
+) -> HashMap<String, AgentAvailability> {
     let now = chrono::Utc::now().timestamp();
     let mut map = HashMap::new();
     for agent in &config.agents {
-        let command = resolve_agent_command(agent);
+        let command = resolve_agent_command_with_settings(agent, settings);
         let mut available = command_exists(&command);
         let mut error_message = if available {
             None
@@ -454,6 +457,8 @@ pub(crate) struct CreateAgentPayload {
     pub(crate) base_branch: Option<String>,
     #[serde(rename = "planMode")]
     pub(crate) plan_mode: bool,
+    #[allow(dead_code)]
+    #[serde(default)]
     pub(crate) thinking: bool,
     #[serde(rename = "useWorktree")]
     pub(crate) use_worktree: bool,
@@ -504,6 +509,29 @@ struct Settings {
     codex_auth_method: Option<String>,
     #[serde(rename = "activeCodexAccountId")]
     active_codex_account_id: Option<String>,
+    /// Optional override for the Codex CLI path.
+    /// If set, Phantom will use this path instead of trying to auto-detect `codex`.
+    #[serde(rename = "codexPath")]
+    codex_path: Option<String>,
+    /// Default access/permission mode to use for Codex tasks.
+    /// Values align with ACP modes ("default", "bypassPermissions", "dontAsk", "acceptEdits", "plan").
+    #[serde(rename = "codexAccessMode")]
+    codex_access_mode: Option<String>,
+    /// Codex feature flags synced to `CODEX_HOME/config.toml`.
+    #[serde(rename = "codexFeatureCollaborationModes")]
+    codex_feature_collaboration_modes: Option<bool>,
+    #[serde(rename = "codexFeatureSteer")]
+    codex_feature_steer: Option<bool>,
+    #[serde(rename = "codexFeatureUnifiedExec")]
+    codex_feature_unified_exec: Option<bool>,
+    /// Experimental Codex features synced to `CODEX_HOME/config.toml`.
+    #[serde(rename = "codexFeatureCollab")]
+    codex_feature_collab: Option<bool>,
+    #[serde(rename = "codexFeatureApps")]
+    codex_feature_apps: Option<bool>,
+    /// Codex personality synced to `CODEX_HOME/config.toml` (string; empty means unset).
+    #[serde(rename = "codexPersonality")]
+    codex_personality: Option<String>,
     #[serde(rename = "claudeAuthMethod")]
     claude_auth_method: Option<String>,
     #[serde(rename = "claudeDockerImage")]
@@ -839,8 +867,8 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
 }
 
 fn read_attachment_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
-    let metadata = std::fs::metadata(path)
-        .map_err(|e| format!("Failed to stat attachment: {}", e))?;
+    let metadata =
+        std::fs::metadata(path).map_err(|e| format!("Failed to stat attachment: {}", e))?;
     if metadata.len() > max_bytes {
         return Err(format!(
             "Attachment too large ({} bytes). Max allowed is {} bytes.",
@@ -1058,6 +1086,224 @@ fn is_within_app_sandbox(path: &std::path::Path) -> bool {
 
 fn default_codex_home() -> Option<PathBuf> {
     dirs::home_dir().map(|home| home.join(".codex"))
+}
+
+#[derive(Debug, Clone, Default)]
+struct CodexConfigOverlay {
+    feature_collaboration_modes: Option<bool>,
+    feature_steer: Option<bool>,
+    feature_unified_exec: Option<bool>,
+    feature_collab: Option<bool>,
+    feature_apps: Option<bool>,
+    personality: Option<String>,
+}
+
+fn codex_config_path_for_home(codex_home: &Path) -> PathBuf {
+    codex_home.join("config.toml")
+}
+
+fn resolve_active_codex_home_for_settings(
+    state: &AppState,
+    settings: &Settings,
+) -> Option<PathBuf> {
+    let from_db = state.db.lock().ok().and_then(|conn| {
+        resolve_codex_account_home(&conn, settings.active_codex_account_id.as_deref())
+    });
+    from_db.or_else(default_codex_home)
+}
+
+fn read_codex_config_overlay(config_path: &Path) -> Option<CodexConfigOverlay> {
+    let raw = std::fs::read_to_string(config_path).ok()?;
+    let parsed: toml::Value = toml::from_str(&raw).ok()?;
+
+    let mut overlay = CodexConfigOverlay::default();
+
+    if let Some(personality) = parsed.get("personality").and_then(|v| v.as_str()) {
+        let trimmed = personality.trim();
+        if !trimmed.is_empty() {
+            overlay.personality = Some(trimmed.to_string());
+        }
+    }
+
+    let features = parsed.get("features").and_then(|v| v.as_table());
+    if let Some(table) = features {
+        overlay.feature_collaboration_modes =
+            table.get("collaboration_modes").and_then(|v| v.as_bool());
+        overlay.feature_steer = table.get("steer").and_then(|v| v.as_bool());
+        overlay.feature_unified_exec = table.get("unified_exec").and_then(|v| v.as_bool());
+        overlay.feature_collab = table.get("collab").and_then(|v| v.as_bool());
+        overlay.feature_apps = table.get("apps").and_then(|v| v.as_bool());
+    }
+
+    Some(overlay)
+}
+
+#[allow(dead_code)]
+fn write_codex_config_overlay(
+    config_path: &Path,
+    overlay: &CodexConfigOverlay,
+) -> Result<(), String> {
+    // Preserve user formatting/comments by editing the raw file text in-place rather than
+    // re-serializing the entire TOML document.
+    fn escape_toml_basic_string(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        for ch in s.chars() {
+            match ch {
+                '\\' => out.push_str("\\\\"),
+                '"' => out.push_str("\\\""),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
+    fn is_table_header_line(line: &str) -> bool {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            return false;
+        }
+        t.starts_with('[')
+    }
+
+    fn find_key_line(lines: &[String], key: &str, start: usize, end: usize) -> Option<usize> {
+        for i in start..end {
+            let t = lines[i].trim_start();
+            if t.is_empty() || t.starts_with('#') {
+                continue;
+            }
+            if let Some((lhs, _)) = t.split_once('=') {
+                if lhs.trim() == key {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    let raw = std::fs::read_to_string(config_path).unwrap_or_default();
+    let newline = if raw.contains("\r\n") { "\r\n" } else { "\n" };
+    let had_trailing_newline = raw.ends_with('\n');
+    let mut lines: Vec<String> = raw.lines().map(|l| l.to_string()).collect();
+
+    let first_table_idx = lines
+        .iter()
+        .position(|l| is_table_header_line(l))
+        .unwrap_or(lines.len());
+
+    // Update/remove top-level `personality`.
+    let personality = overlay
+        .personality
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("\"{}\"", escape_toml_basic_string(s)));
+    if let Some(idx) = find_key_line(&lines, "personality", 0, first_table_idx) {
+        match personality {
+            Some(value) => {
+                let prefix_len = lines[idx].len() - lines[idx].trim_start().len();
+                let prefix = &lines[idx][..prefix_len];
+                // Best-effort: keep inline comment if present.
+                let comment = lines[idx]
+                    .find('#')
+                    .map(|pos| &lines[idx][pos..])
+                    .unwrap_or("");
+                lines[idx] = format!("{prefix}personality = {value}{comment}");
+            }
+            None => {
+                lines.remove(idx);
+            }
+        }
+    } else if let Some(value) = personality {
+        // Insert near the top, after any leading comment/blank lines, but before the first table.
+        let mut insert_idx = 0usize;
+        while insert_idx < first_table_idx {
+            let t = lines[insert_idx].trim_start();
+            if t.is_empty() || t.starts_with('#') {
+                insert_idx += 1;
+                continue;
+            }
+            break;
+        }
+        lines.insert(insert_idx, format!("personality = {value}"));
+    }
+
+    // Update `[features]` table booleans (only for fields set in overlay).
+    let mut feature_updates: Vec<(&str, bool)> = Vec::new();
+    if let Some(v) = overlay.feature_collaboration_modes {
+        feature_updates.push(("collaboration_modes", v));
+    }
+    if let Some(v) = overlay.feature_steer {
+        feature_updates.push(("steer", v));
+    }
+    if let Some(v) = overlay.feature_unified_exec {
+        feature_updates.push(("unified_exec", v));
+    }
+    if let Some(v) = overlay.feature_collab {
+        feature_updates.push(("collab", v));
+    }
+    if let Some(v) = overlay.feature_apps {
+        feature_updates.push(("apps", v));
+    }
+
+    if !feature_updates.is_empty() {
+        let features_header_idx = lines
+            .iter()
+            .position(|l| l.trim() == "[features]");
+
+        let (body_start, mut body_end) = if let Some(h) = features_header_idx {
+            let start = h + 1;
+            let end = lines
+                .iter()
+                .enumerate()
+                .skip(start)
+                .find(|(_, l)| is_table_header_line(l))
+                .map(|(i, _)| i)
+                .unwrap_or(lines.len());
+            (start, end)
+        } else {
+            // Append a new features table at the end.
+            if !lines.is_empty() {
+                // Ensure a blank line before the new table for readability.
+                if lines.last().map(|l| !l.trim().is_empty()).unwrap_or(false) {
+                    lines.push(String::new());
+                }
+            }
+            lines.push("[features]".to_string());
+            let start = lines.len();
+            (start, start)
+        };
+
+        for (key, val) in feature_updates {
+            let value = if val { "true" } else { "false" };
+            if let Some(idx) = find_key_line(&lines, key, body_start, body_end) {
+                let prefix_len = lines[idx].len() - lines[idx].trim_start().len();
+                let prefix = &lines[idx][..prefix_len];
+                let comment = lines[idx]
+                    .find('#')
+                    .map(|pos| &lines[idx][pos..])
+                    .unwrap_or("");
+                lines[idx] = format!("{prefix}{key} = {value}{comment}");
+            } else {
+                lines.insert(body_end, format!("{key} = {value}"));
+                body_end += 1;
+            }
+        }
+    }
+
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create config dir failed: {e}"))?;
+    }
+
+    let mut payload = lines.join(newline);
+    if had_trailing_newline {
+        payload.push_str(newline);
+    }
+
+    std::fs::write(config_path, payload).map_err(|e| format!("write config.toml failed: {e}"))?;
+    Ok(())
 }
 
 const DEFAULT_MCP_PORT: u16 = 43778;
@@ -2820,14 +3066,28 @@ async fn start_claude_oauth_internal(state: &AppState) -> Result<ClaudeOauthStar
     })
 }
 
-fn resolve_agent_command(agent: &AgentConfig) -> String {
+fn resolve_agent_command_with_settings(agent: &AgentConfig, settings: Option<&Settings>) -> String {
     match agent.command.as_str() {
         "claude" => resolve_claude_command(),
-        "codex" => resolve_codex_command(),
+        "codex" => {
+            if let Some(path) = settings
+                .and_then(|s| s.codex_path.as_ref())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                return path;
+            }
+            resolve_codex_command()
+        }
         other => resolve_command_path(other)
             .map(|path| path.to_string_lossy().to_string())
             .unwrap_or_else(|| other.to_string()),
     }
+}
+
+#[allow(dead_code)]
+fn resolve_agent_command(agent: &AgentConfig) -> String {
+    resolve_agent_command_with_settings(agent, None)
 }
 
 /// Validate OAuth URLs against known OpenAI providers
@@ -2907,7 +3167,7 @@ fn build_agent_spawn_spec(
     }
 
     Ok(AgentSpawnSpec {
-        command: resolve_agent_command(agent),
+        command: resolve_agent_command_with_settings(agent, Some(settings)),
         args: base_args.to_vec(),
         cli_kind: cli_kind_for_agent(&agent.id),
     })
@@ -3246,7 +3506,7 @@ async fn refresh_agent_modes(
         let env = build_env(&agent.required_env, &overrides, allow_missing)
             .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
         let args = substitute_args(&agent.args, &cwd_str);
-        let command = resolve_agent_command(agent);
+        let command = resolve_agent_command_with_settings(agent, Some(&settings));
 
         let config = AgentLaunchConfig {
             command: command.clone(),
@@ -3290,7 +3550,7 @@ async fn refresh_agent_modes(
         .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
 
     let args = substitute_args(&agent.args, &cwd_str);
-    let command = resolve_agent_command(agent);
+    let command = resolve_agent_command_with_settings(agent, Some(&settings));
     let config = AgentLaunchConfig {
         command: command.clone(),
         args: args.clone(),
@@ -3468,7 +3728,7 @@ async fn refresh_agent_models(
         let env = build_env(&agent.required_env, &overrides, allow_missing)
             .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
 
-        let command = resolve_agent_command(agent);
+        let command = resolve_agent_command_with_settings(agent, Some(&settings));
         let config = AgentLaunchConfig {
             command,
             args: vec![], // app-server doesn't need extra args
@@ -3519,7 +3779,7 @@ async fn refresh_agent_models(
         .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
 
     let args = substitute_args(&agent.args, &cwd_str);
-    let command = resolve_agent_command(agent);
+    let command = resolve_agent_command_with_settings(agent, Some(&settings));
     let config = AgentLaunchConfig {
         command: command.clone(),
         args: args.clone(),
@@ -3644,7 +3904,7 @@ async fn get_enriched_models(
     let env = build_env(&agent.required_env, &overrides, allow_missing)
         .map_err(|err| format!("Auth not configured for {}: {}", agent_id, err))?;
 
-    let command = resolve_agent_command(agent);
+    let command = resolve_agent_command_with_settings(agent, Some(&settings));
     let config = AgentLaunchConfig {
         command,
         args: vec![],
@@ -4024,18 +4284,13 @@ pub(crate) async fn create_agent_session_internal(
                 .await
                 .map_err(|err| format!("set model failed: {}", err))?;
         }
-        // Set reasoning effort on client if specified, otherwise fall back to thinking toggle
+        // Set reasoning effort on client if explicitly specified.
+        // If omitted, Codex will use the model/server default.
         if let Some(ref effort) = payload.reasoning_effort {
             if effort != "default" && !effort.trim().is_empty() {
                 client.set_reasoning_effort(Some(effort));
                 println!("[Harness] Set reasoning effort: {}", effort);
             }
-        } else if payload.thinking {
-            client.set_reasoning_effort(Some("high"));
-            println!("[Harness] Set reasoning effort: high (thinking enabled)");
-        } else {
-            client.set_reasoning_effort(Some("low"));
-            println!("[Harness] Set reasoning effort: low (thinking disabled)");
         }
         // Set Codex mode on client if specified
         if let Some(ref mode) = payload.codex_mode {
@@ -4391,15 +4646,13 @@ pub(crate) async fn create_task_from_discord(
     let use_worktree = true;
     let base_branch = settings.task_base_branch.clone();
 
-    let agents_with_own_permissions = [
-        "codex",
-        "claude-code",
-        "droid",
-        "factory-droid",
-        "amp",
-        "opencode",
-    ];
-    let permission_mode = if agents_with_own_permissions.contains(&agent_id.as_str()) {
+    let agents_with_own_permissions = ["claude-code", "droid", "factory-droid", "amp", "opencode"];
+    let permission_mode = if agent_id == "codex" {
+        settings
+            .codex_access_mode
+            .clone()
+            .unwrap_or_else(|| "bypassPermissions".to_string())
+    } else if agents_with_own_permissions.contains(&agent_id.as_str()) {
         "bypassPermissions".to_string()
     } else {
         prefs
@@ -4804,11 +5057,14 @@ pub(crate) async fn start_task_internal(
             .take()
             .ok_or("No prompt pending - task may have already started")?;
         let attachments = std::mem::take(&mut handle.pending_attachments);
-        push_session_message(&mut handle.messages, serde_json::json!({
-            "message_type": "user_message",
-            "content": prompt,
-            "timestamp": user_timestamp
-        }));
+        push_session_message(
+            &mut handle.messages,
+            serde_json::json!({
+                "message_type": "user_message",
+                "content": prompt,
+                "timestamp": user_timestamp
+            }),
+        );
         // Create a fresh cancellation token for this generation
         handle.cancel_token = CancellationToken::new();
         (
@@ -5589,15 +5845,18 @@ pub(crate) async fn start_task_internal(
         // Store message in memory
         {
             let mut handle = handle_ref.lock().await;
-            push_session_message(&mut handle.messages, serde_json::json!({
-                "message_type": msg.message_type,
-                "content": msg.content,
-                "reasoning": msg.reasoning,
-                "name": msg.name,
-                "arguments": msg.arguments,
-                "tool_return": msg.tool_return,
-                "timestamp": msg_timestamp
-            }));
+            push_session_message(
+                &mut handle.messages,
+                serde_json::json!({
+                    "message_type": msg.message_type,
+                    "content": msg.content,
+                    "reasoning": msg.reasoning,
+                    "name": msg.name,
+                    "arguments": msg.arguments,
+                    "tool_return": msg.tool_return,
+                    "timestamp": msg_timestamp
+                }),
+            );
         }
 
         // Persist to DB
@@ -5910,7 +6169,27 @@ async fn start_pending_prompt(
 
 #[tauri::command]
 async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
-    Ok(state.settings.lock().await.clone())
+    let base = state.settings.lock().await.clone();
+    let mut out = base.clone();
+
+    // Best-effort: read Codex feature settings from the active CODEX_HOME/config.toml
+    // so the UI reflects external edits.
+    if let Some(codex_home) = resolve_active_codex_home_for_settings(state.inner(), &base) {
+        let config_path = codex_config_path_for_home(&codex_home);
+        if let Some(overlay) = read_codex_config_overlay(&config_path) {
+            // Only overlay if config.toml was successfully read and parsed.
+            // If it's missing/unparseable, keep the app-managed values so we don't
+            // accidentally clear the UI and persist nulls on the next save.
+            out.codex_feature_collaboration_modes = overlay.feature_collaboration_modes;
+            out.codex_feature_steer = overlay.feature_steer;
+            out.codex_feature_unified_exec = overlay.feature_unified_exec;
+            out.codex_feature_collab = overlay.feature_collab;
+            out.codex_feature_apps = overlay.feature_apps;
+            out.codex_personality = overlay.personality;
+        }
+    }
+
+    Ok(out)
 }
 
 #[tauri::command]
@@ -5960,6 +6239,27 @@ async fn save_settings(
         }
     }
 
+    // Validate/normalize codex_access_mode so invalid persisted values don't break task creation.
+    // NOTE: This is the default permission mode Phantom applies to Codex CLI invocations.
+    const VALID_CODEX_ACCESS_MODES: &[&str] = &[
+        "default",
+        "bypassPermissions",
+        "dontAsk",
+        "acceptEdits",
+        "plan",
+    ];
+    if let Some(ref mode) = next.codex_access_mode {
+        let trimmed = mode.trim();
+        if trimmed.is_empty() {
+            next.codex_access_mode = None;
+        } else if VALID_CODEX_ACCESS_MODES.contains(&trimmed) {
+            next.codex_access_mode = Some(trimmed.to_string());
+        } else {
+            // Prefer a safe non-interactive fallback.
+            next.codex_access_mode = Some("bypassPermissions".to_string());
+        }
+    }
+
     ensure_mcp_settings(&mut next);
 
     persist_settings(&next)?;
@@ -5967,6 +6267,8 @@ async fn save_settings(
         let mut locked = state.settings.lock().await;
         *locked = next.clone();
     }
+
+    // NOTE: We intentionally do not write to CODEX_HOME/config.toml from Phantom.
 
     let discord_config_changed = prev.discord_enabled != next.discord_enabled
         || prev.discord_bot_token != next.discord_bot_token
@@ -6012,10 +6314,11 @@ async fn test_discord(state: State<'_, AppState>, app: tauri::AppHandle) -> Resu
 
 /// Get the availability status of all agents
 #[tauri::command]
-fn get_agent_availability(
+async fn get_agent_availability(
     state: State<'_, AppState>,
 ) -> Result<HashMap<String, AgentAvailability>, String> {
-    let latest = build_agent_availability(&state.config);
+    let settings = state.settings.lock().await.clone();
+    let latest = build_agent_availability(&state.config, Some(&settings));
     let mut avail = state.agent_availability.lock().map_err(|e| e.to_string())?;
     *avail = latest.clone();
     Ok(latest)
@@ -6023,11 +6326,12 @@ fn get_agent_availability(
 
 /// Refresh agent availability and emit UI updates
 #[tauri::command]
-fn refresh_agent_availability(
+async fn refresh_agent_availability(
     state: State<'_, AppState>,
     window: tauri::Window,
 ) -> Result<HashMap<String, AgentAvailability>, String> {
-    let latest = build_agent_availability(&state.config);
+    let settings = state.settings.lock().await.clone();
+    let latest = build_agent_availability(&state.config, Some(&settings));
     {
         let mut avail = state.agent_availability.lock().map_err(|e| e.to_string())?;
         *avail = latest.clone();
@@ -6811,7 +7115,14 @@ async fn run_codex_login_for_home(
     state: &AppState,
     app: tauri::AppHandle,
 ) -> Result<CodexAuthStatus, String> {
-    let codex_cmd = resolve_codex_command();
+    let settings = state.settings.lock().await.clone();
+    let codex_cmd = settings
+        .codex_path
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(resolve_codex_command);
     println!("[Codex Login] Starting login with command: {}", codex_cmd);
     let app_handle = app.clone();
 
@@ -7354,13 +7665,18 @@ async fn codex_rate_limits(
 
 #[tauri::command]
 async fn codex_logout(state: State<'_, AppState>) -> Result<(), String> {
-    let codex_cmd = resolve_codex_command();
+    let settings = state.settings.lock().await.clone();
+    let codex_cmd = settings
+        .codex_path
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(resolve_codex_command);
     let active_home = {
-        let settings = state.settings.lock().await.clone();
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         resolve_codex_account_home(&conn, settings.active_codex_account_id.as_deref())
     };
-
     let mut command = tokio::process::Command::new(&codex_cmd);
     command.arg("logout");
     if let Some(home) = active_home.as_ref() {
@@ -9097,7 +9413,7 @@ pub(crate) async fn get_task_history_internal(
 }
 
 /// Open a directory in an external app (Ghostty, VS Code, etc.)
-/// Accepts path directly from frontend (CodexMonitor pattern) for portability.
+/// Accepts path directly from frontend for portability.
 #[tauri::command]
 async fn open_task_directory(
     path: String,
@@ -10163,11 +10479,14 @@ pub(crate) async fn send_chat_message_internal(
             .pending_prompt
             .take()
             .unwrap_or_else(|| message.clone());
-        push_session_message(&mut handle.messages, serde_json::json!({
-            "message_type": "user_message",
-            "content": message,
-            "timestamp": user_timestamp
-        }));
+        push_session_message(
+            &mut handle.messages,
+            serde_json::json!({
+                "message_type": "user_message",
+                "content": message,
+                "timestamp": user_timestamp
+            }),
+        );
         // Create a fresh cancellation token for this generation
         handle.cancel_token = CancellationToken::new();
         (
@@ -11370,7 +11689,9 @@ async fn check_gh_cli_auth() -> Result<GhCliAuthStatus, String> {
 }
 
 #[tauri::command]
-async fn get_github_repo_from_path(path: String) -> Result<command_center::github::GitRepoInfo, String> {
+async fn get_github_repo_from_path(
+    path: String,
+) -> Result<command_center::github::GitRepoInfo, String> {
     command_center::github::get_github_repo_from_path(&path)
 }
 
@@ -11378,7 +11699,10 @@ async fn get_github_repo_from_path(path: String) -> Result<command_center::githu
 async fn fetch_github_issues(state: State<'_, AppState>) -> Result<Vec<GithubIssue>, String> {
     let settings = state.settings.lock().await;
     let repos = settings.github_watched_repos.clone().unwrap_or_default();
-    let auth_method = settings.github_auth_method.clone().unwrap_or_else(|| "gh-cli".to_string());
+    let auth_method = settings
+        .github_auth_method
+        .clone()
+        .unwrap_or_else(|| "gh-cli".to_string());
     let token = settings.github_token.clone();
     drop(settings);
 
@@ -11418,7 +11742,10 @@ async fn fetch_github_issues(state: State<'_, AppState>) -> Result<Vec<GithubIss
 async fn fetch_github_workflows(state: State<'_, AppState>) -> Result<Vec<GithubWorkflow>, String> {
     let settings = state.settings.lock().await;
     let repos = settings.github_watched_repos.clone().unwrap_or_default();
-    let auth_method = settings.github_auth_method.clone().unwrap_or_else(|| "gh-cli".to_string());
+    let auth_method = settings
+        .github_auth_method
+        .clone()
+        .unwrap_or_else(|| "gh-cli".to_string());
     let token = settings.github_token.clone();
     drop(settings);
 
@@ -11494,7 +11821,9 @@ async fn fetch_linear_issues(state: State<'_, AppState>) -> Result<Vec<LinearIss
 }
 
 #[tauri::command]
-async fn fetch_sentry_organizations(state: State<'_, AppState>) -> Result<Vec<SentryOrganization>, String> {
+async fn fetch_sentry_organizations(
+    state: State<'_, AppState>,
+) -> Result<Vec<SentryOrganization>, String> {
     let settings = state.settings.lock().await;
     let token = settings.sentry_token.clone();
     drop(settings);
@@ -11525,8 +11854,12 @@ async fn fetch_sentry_errors(state: State<'_, AppState>) -> Result<Vec<SentryErr
     let project_slugs = settings.sentry_watched_projects.clone().unwrap_or_default();
     drop(settings);
 
-    eprintln!("[Sentry] fetch_sentry_errors - token_set: {}, org: {:?}, projects: {:?}",
-        token.is_some(), org, project_slugs);
+    eprintln!(
+        "[Sentry] fetch_sentry_errors - token_set: {}, org: {:?}, projects: {:?}",
+        token.is_some(),
+        org,
+        project_slugs
+    );
 
     let token = token.ok_or("Sentry token not configured")?;
     let org = org.ok_or("Sentry organization not configured")?;
@@ -11536,7 +11869,10 @@ async fn fetch_sentry_errors(state: State<'_, AppState>) -> Result<Vec<SentryErr
         return Ok(vec![]);
     }
 
-    eprintln!("[Sentry] Fetching errors for org: {}, projects: {:?}", org, project_slugs);
+    eprintln!(
+        "[Sentry] Fetching errors for org: {}, projects: {:?}",
+        org, project_slugs
+    );
     let client = reqwest::Client::new();
     let result = command_center::sentry::fetch_errors(&client, &token, &org, &project_slugs).await;
 
@@ -11579,7 +11915,10 @@ async fn cc_fetch_sentry_organizations(token: String) -> Result<Vec<SentryOrgani
 }
 
 #[tauri::command]
-async fn cc_fetch_sentry_projects(token: String, org: String) -> Result<Vec<SentryProject>, String> {
+async fn cc_fetch_sentry_projects(
+    token: String,
+    org: String,
+) -> Result<Vec<SentryProject>, String> {
     if token.is_empty() {
         return Err("Sentry token is required".to_string());
     }
@@ -11591,7 +11930,9 @@ async fn cc_fetch_sentry_projects(token: String, org: String) -> Result<Vec<Sent
 }
 
 #[tauri::command]
-async fn fetch_command_center_data(state: State<'_, AppState>) -> Result<CommandCenterData, String> {
+async fn fetch_command_center_data(
+    state: State<'_, AppState>,
+) -> Result<CommandCenterData, String> {
     let settings = state.settings.lock().await;
     let enabled = settings.command_center_enabled.unwrap_or(false);
     let sentry_token_set = settings.sentry_token.is_some();
@@ -11634,7 +11975,7 @@ async fn fetch_command_center_data(state: State<'_, AppState>) -> Result<Command
         Ok(errs) => {
             eprintln!("[CommandCenter] Sentry returned {} errors", errs.len());
             data.sentry_errors = errs;
-        },
+        }
         Err(e) => {
             eprintln!("[CommandCenter] Sentry fetch error: {}", e);
             if !e.contains("not configured") {
@@ -11646,8 +11987,11 @@ async fn fetch_command_center_data(state: State<'_, AppState>) -> Result<Command
     data.last_updated = chrono::Utc::now().to_rfc3339();
     data.errors = errors;
 
-    eprintln!("[CommandCenter] Data fetch complete - sentry_errors: {}, data_errors: {:?}",
-        data.sentry_errors.len(), data.errors);
+    eprintln!(
+        "[CommandCenter] Data fetch complete - sentry_errors: {}, data_errors: {:?}",
+        data.sentry_errors.len(),
+        data.errors
+    );
 
     Ok(data)
 }

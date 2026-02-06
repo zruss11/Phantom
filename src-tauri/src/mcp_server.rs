@@ -60,11 +60,25 @@ pub(crate) async fn start_mcp_server(
         }
     });
 
+    // `Server::bind` panics on bind errors. Use `try_bind` so Phantom doesn't crash
+    // when the MCP port is already in use (e.g., a prod build is running).
+    let server = match Server::try_bind(&addr) {
+        Ok(builder) => builder,
+        Err(err) => {
+            eprintln!(
+                "[Harness] MCP server could not bind to http://127.0.0.1:{}/mcp: {}",
+                addr.port(),
+                err
+            );
+            return Ok(());
+        }
+    };
+
     println!(
         "[Harness] MCP server listening on http://127.0.0.1:{}/mcp",
         addr.port()
     );
-    Server::bind(&addr).serve(make_svc).await?;
+    server.serve(make_svc).await?;
     Ok(())
 }
 

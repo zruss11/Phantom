@@ -13,6 +13,21 @@ const PERMISSION_MODE_OPTIONS = [
   { value: 'bypassPermissions', name: 'Bypass Permissions', description: 'Bypass all permission checks (dangerous)' }
 ];
 
+// Default access/permission mode specifically for Codex tasks.
+// Defaults to bypass to preserve existing Phantom behavior.
+const CODEX_ACCESS_MODE_OPTIONS = [
+  { value: 'bypassPermissions', name: 'Bypass Permissions', description: 'No prompts (dangerous)' },
+  { value: 'default', name: 'Default', description: 'Prompt for risky operations' },
+  { value: 'acceptEdits', name: 'Accept Edits', description: 'Auto-accept file edit operations' },
+  { value: 'dontAsk', name: "Don't Ask", description: "No prompts, deny if not pre-approved" },
+  { value: 'plan', name: 'Plan Mode', description: 'Planning mode, no actual tool execution' }
+];
+
+function sanitizeCodexAccessMode(value) {
+  const allowed = CODEX_ACCESS_MODE_OPTIONS.map((o) => o.value);
+  return allowed.includes(value) ? value : "bypassPermissions";
+}
+
 const AGENT_NOTIFICATION_TIMEOUT_OPTIONS = [
   { value: '0', name: 'Never' },
   { value: '5', name: '5 seconds' },
@@ -36,6 +51,7 @@ let agentModeDropdown = null;
 let baseBranchDropdown = null;
 let agentNotificationTimeoutDropdown = null;
 let summariesAgentDropdown = null;
+let codexAccessModeDropdown = null;
 
 // Flag to prevent saving during restoration (avoids overwriting saved preferences)
 let isRestoringSettings = false;
@@ -190,6 +206,24 @@ function initCustomDropdowns() {
       }
     });
     window.summariesAgentDropdown = summariesAgentDropdown;
+  }
+
+  // Codex access mode dropdown (in Settings page)
+  const codexAccessModeContainer = document.getElementById('codexAccessModeDropdown');
+  if (codexAccessModeContainer && window.CustomDropdown) {
+    codexAccessModeDropdown = new window.CustomDropdown({
+      container: codexAccessModeContainer,
+      items: CODEX_ACCESS_MODE_OPTIONS,
+      placeholder: 'Default Access Mode',
+      defaultValue: 'bypassPermissions',
+      onChange: function(value) {
+        console.log('[Harness] Codex access mode changed:', value);
+        if (!isRestoringSettings) {
+          saveSettingsFromUi();
+        }
+      }
+    });
+    window.codexAccessModeDropdown = codexAccessModeDropdown;
   }
 
   console.log('[Harness] Custom dropdowns initialized');
@@ -367,6 +401,8 @@ async function saveSettingsFromUi() {
   let errorDelay = $("#errorDelay").val();
   let mcpPortRaw = $("#mcpPort").val();
   let mcpTokenRaw = $("#mcpToken").val();
+  let codexPathRaw = $("#codexPath").val();
+  let codexPersonalityRaw = $("#codexPersonality").val();
   let taskProjectAllowlist = getProjectAllowlist();
   let agentNotificationTimeoutValue = 0;
   let parsedMcpPort = parseInt(mcpPortRaw, 10);
@@ -403,6 +439,14 @@ async function saveSettingsFromUi() {
       mcpEnabled: $("#mcpEnabled").is(":checked"),
       mcpPort: parsedMcpPort,
       mcpToken: nextMcpToken,
+      codexPath: (codexPathRaw || "").toString().trim(),
+      codexAccessMode: codexAccessModeDropdown ? codexAccessModeDropdown.getValue() : (currentSettings.codexAccessMode || "bypassPermissions"),
+      codexPersonality: (codexPersonalityRaw || "").toString().trim(),
+      codexFeatureCollaborationModes: $("#codexFeatureCollaborationModes").is(":checked"),
+      codexFeatureSteer: $("#codexFeatureSteer").is(":checked"),
+      codexFeatureUnifiedExec: $("#codexFeatureUnifiedExec").is(":checked"),
+      codexFeatureCollab: $("#codexFeatureCollab").is(":checked"),
+      codexFeatureApps: $("#codexFeatureApps").is(":checked"),
     },
     collectAuthInputs(),
   );
@@ -417,8 +461,8 @@ async function saveSettingsFromUi() {
 }
 
 // Auto-save settings on any change (inputs and toggles)
-$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken").on("change", saveSettingsFromUi);
-$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #agentNotificationTimeout, #aiSummariesEnabled, #mcpEnabled").on("change", saveSettingsFromUi);
+$("#discordBotToken, #discordChannelId, #retryDelay, #errorDelay, #mcpPort, #mcpToken, #codexPath, #codexPersonality").on("change", saveSettingsFromUi);
+$("#discordEnabled, #agentNotificationsEnabled, #agentNotificationStack, #agentNotificationTimeout, #aiSummariesEnabled, #mcpEnabled, #codexFeatureCollaborationModes, #codexFeatureSteer, #codexFeatureUnifiedExec, #codexFeatureCollab, #codexFeatureApps").on("change", saveSettingsFromUi);
 
 // Show/hide summaries agent dropdown based on AI summaries toggle
 function updateSummariesAgentVisibility() {
@@ -2244,6 +2288,39 @@ async function getSettings() {
     return;
   }
   currentSettings = settingsPayload;
+  // Codex settings
+  if (settingsPayload.codexPath !== undefined) {
+    $("#codexPath").val(settingsPayload.codexPath || "");
+  }
+  if (settingsPayload.codexPersonality !== undefined) {
+    $("#codexPersonality").val(settingsPayload.codexPersonality || "");
+  }
+  // Codex access mode dropdown
+  if (codexAccessModeDropdown) {
+    codexAccessModeDropdown.setValue(
+      sanitizeCodexAccessMode(settingsPayload.codexAccessMode),
+    );
+  }
+  // Codex feature toggles (default off)
+  $("#codexFeatureCollaborationModes").prop(
+    "checked",
+    !!settingsPayload.codexFeatureCollaborationModes,
+  );
+  $("#codexFeatureSteer").prop("checked", !!settingsPayload.codexFeatureSteer);
+  $("#codexFeatureUnifiedExec").prop(
+    "checked",
+    !!settingsPayload.codexFeatureUnifiedExec,
+  );
+  $("#codexFeatureCollab").prop("checked", !!settingsPayload.codexFeatureCollab);
+  $("#codexFeatureApps").prop("checked", !!settingsPayload.codexFeatureApps);
+
+  // Read-only: Phantom does not write to CODEX_HOME/config.toml.
+  $("#codexPersonality").prop("disabled", true);
+  $("#codexFeatureCollaborationModes").prop("disabled", true);
+  $("#codexFeatureSteer").prop("disabled", true);
+  $("#codexFeatureUnifiedExec").prop("disabled", true);
+  $("#codexFeatureCollab").prop("disabled", true);
+  $("#codexFeatureApps").prop("disabled", true);
   if (settingsPayload.discordBotToken !== undefined) {
     $("#discordBotToken").val(settingsPayload.discordBotToken || "");
   }
@@ -3178,10 +3255,38 @@ init();
       return;
     }
 
-    // Get enriched model data from cache
+    const currentValue = reasoningEffortDropdown ? reasoningEffortDropdown.getValue() : 'default';
+
+    function setReasoningOptions(items) {
+      if (!reasoningEffortDropdown) return;
+      // Prevent onChange from persisting transient values while we reconfigure.
+      const prevRestoring = isRestoringSettings;
+      isRestoringSettings = true;
+      try {
+        reasoningEffortDropdown.setOptions(items);
+        const hasCurrent = items.some(item => item.value === currentValue);
+        reasoningEffortDropdown.setValue(hasCurrent ? currentValue : 'default');
+      } finally {
+        isRestoringSettings = prevRestoring;
+      }
+    }
+
+    function setGenericOptions(modelDefaultLabel) {
+      const label = modelDefaultLabel || 'model default';
+      if (reasoningGroup) reasoningGroup.style.display = '';
+      setReasoningOptions([
+        { value: 'default', name: 'Default', description: `Uses ${label}` },
+        { value: 'low', name: 'Low', description: 'Faster, less thorough reasoning' },
+        { value: 'medium', name: 'Medium', description: 'Balanced reasoning' },
+        { value: 'high', name: 'High', description: 'Thorough reasoning' },
+        { value: 'extra_high', name: 'Extra High', description: 'Maximum reasoning (if supported)' }
+      ]);
+    }
+
+    // Get enriched model data from cache (best-effort). If unavailable, fall back to generic options.
     const enrichedModels = enrichedModelCache['codex'];
     if (!enrichedModels) {
-      if (reasoningGroup) reasoningGroup.style.display = 'none';
+      setGenericOptions('the model default');
       return;
     }
 
@@ -3194,30 +3299,35 @@ init();
       modelData = enrichedModels.find(m => m.value === selectedModelValue);
     }
 
-    if (!modelData || !modelData.supportedReasoningEfforts || modelData.supportedReasoningEfforts.length === 0) {
-      // No reasoning efforts for this model, hide dropdown
-      if (reasoningGroup) reasoningGroup.style.display = 'none';
+    if (!modelData) {
+      setGenericOptions('the model default');
       return;
     }
 
-    // Show dropdown and populate options
-    if (reasoningGroup) reasoningGroup.style.display = '';
-
-    if (reasoningEffortDropdown) {
-      const items = [{ value: 'default', name: 'Default', description: `Uses model default: ${modelData.defaultReasoningEffort || 'medium'}` }];
-
-      modelData.supportedReasoningEfforts.forEach(effort => {
-        items.push({
-          value: effort.value,
-          name: capitalizeFirst(effort.value),
-          description: effort.description || ''
-        });
-      });
-
-      console.log('[Harness] Setting reasoning effort options:', items.length - 1, 'options');
-      reasoningEffortDropdown.setOptions(items);
-      reasoningEffortDropdown.setValue('default');
+    if (!modelData.supportedReasoningEfforts || modelData.supportedReasoningEfforts.length === 0) {
+      setGenericOptions(modelData.defaultReasoningEffort || 'the model default');
+      return;
     }
+
+    // Show dropdown and populate options from model support list
+    if (reasoningGroup) reasoningGroup.style.display = '';
+    const items = [
+      {
+        value: 'default',
+        name: 'Default',
+        description: `Uses model default: ${modelData.defaultReasoningEffort || 'medium'}`
+      }
+    ];
+    modelData.supportedReasoningEfforts.forEach(effort => {
+      items.push({
+        value: effort.value,
+        name: capitalizeFirst(effort.value),
+        description: effort.description || ''
+      });
+    });
+
+    console.log('[Harness] Setting reasoning effort options:', items.length - 1, 'options');
+    setReasoningOptions(items);
   }
 
   // Capitalize first letter helper
@@ -3453,7 +3563,9 @@ init();
     if (agentId === "codex") {
       // Fetch enriched models (with reasoning effort data) for Codex
       await loadEnrichedModels(agentId);
-      // Will update visibility once model is selected
+      // Update immediately (falls back to generic options if enriched models are unavailable).
+      const modelVal = execModelDropdown ? execModelDropdown.getValue() : "default";
+      updateReasoningEffortDropdown(modelVal);
     } else {
       // Hide reasoning effort dropdown for non-Codex agents
       if (reasoningEffortGroup) {
@@ -3842,7 +3954,10 @@ init();
     // - Droid: CLI uses --auto high or --skip-permissions-unsafe
     // - Amp: CLI uses --dangerously-allow-all
     // - OpenCode: CLI handles permissions internally
-    const agentsWithOwnPermissions = ["codex", "claude-code", "droid", "factory-droid", "amp", "opencode"];
+    const agentsWithOwnPermissions = ["claude-code", "droid", "factory-droid", "amp", "opencode"];
+    const codexAccessMode = sanitizeCodexAccessMode(
+      (currentSettings && currentSettings.codexAccessMode) || "bypassPermissions",
+    );
 
     const agentModels = (currentSettings && currentSettings.taskAgentModels) || {};
 
@@ -3854,9 +3969,11 @@ init();
       const codexMode = agentId === "codex"
         ? (planMode ? "plan" : (prefs.agentMode || "default"))
         : null;
-      const permissionMode = agentsWithOwnPermissions.includes(agentId)
-        ? "bypassPermissions"
-        : (prefs.permissionMode || "default");
+      const permissionMode = agentId === "codex"
+        ? codexAccessMode
+        : (agentsWithOwnPermissions.includes(agentId)
+          ? "bypassPermissions"
+          : (prefs.permissionMode || "default"));
       const claudeRuntime = agentId === "claude-code"
         ? (document.getElementById("claudeDockerToggle")?.checked ? "docker" : "native")
         : null;
