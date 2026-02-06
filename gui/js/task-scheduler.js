@@ -16,6 +16,9 @@
     automations: [],
     selectedId: null,
     refreshing: false,
+    refreshPromise: null,
+    cronWarning: null,
+    lastCronWarningNotified: null,
   };
 
   function byId(id) {
@@ -212,6 +215,7 @@
   }
 
   function cronFromForm() {
+    state.cronWarning = null;
     var mode = (byId('taskSchedulerModeSelect') && byId('taskSchedulerModeSelect').value) || 'daily';
     var timeInput = byId('taskSchedulerTimeInput');
     var time = parseTime(timeInput ? timeInput.value : '09:00');
@@ -230,11 +234,18 @@
     }
     if (mode === 'every_minutes') {
       var nMin = clampInt(everyN ? everyN.value : '15', 5, 720, 15);
-      // Cron minute step values > 59 are invalid. For >= 60 minutes, translate to an hourly cadence.
+      // Cron minute step values > 59 are invalid.
+      // If the input is an exact multiple of 60, translate to an hourly cadence.
+      // Otherwise, clamp to a valid minutes-based cron and surface a warning in the preview UI.
       if (nMin >= 60) {
-        var hours = Math.floor(nMin / 60);
-        hours = clampInt(hours, 1, 24, 1);
-        return '0 */' + hours + ' * * *';
+        if (nMin % 60 === 0) {
+          var hours = nMin / 60;
+          hours = clampInt(hours, 1, 24, 1);
+          state.cronWarning = 'Converted to every ' + hours + 'h (from ' + nMin + 'm)';
+          return '0 */' + hours + ' * * *';
+        }
+        state.cronWarning = 'Every ' + nMin + 'm is not supported; clamped to 59m (try hours)';
+        nMin = 59;
       }
       return '*/' + nMin + ' * * * *';
     }
@@ -322,7 +333,8 @@
       else if (/^\d+$/.test(minute) && /^\*\/\d+$/.test(hour) && dom === '*' && mon === '*' && dow === '*') {
         modeEl.value = 'every_hours';
         if (nEl) nEl.value = hour.replace('*/', '');
-        if (timeEl) timeEl.value = '09:' + String(parseInt(minute, 10)).padStart(2, '0');
+        // Preserve the minute while keeping the hour neutral to avoid implying a specific firing hour.
+        if (timeEl) timeEl.value = '00:' + String(parseInt(minute, 10)).padStart(2, '0');
       }
       // M H * * 1-5
       else if (/^\d+$/.test(minute) && /^\d+$/.test(hour) && dom === '*' && mon === '*' && dow === '1-5') {
@@ -492,18 +504,25 @@
   }
 
   async function refreshAutomations() {
-    if (state.refreshing) return;
+    if (state.refreshPromise) return state.refreshPromise;
     state.refreshing = true;
+    state.refreshPromise = (async function () {
+      try {
+        var list = await ipcRenderer.invoke('loadAutomations');
+        state.automations = Array.isArray(list) ? list : [];
+      } catch (e) {
+        state.automations = [];
+      }
+      state.refreshing = false;
+      renderList();
+      syncActionButtons();
+      updateInlineMeta();
+    })();
     try {
-      var list = await ipcRenderer.invoke('loadAutomations');
-      state.automations = Array.isArray(list) ? list : [];
-    } catch (e) {
-      state.automations = [];
+      await state.refreshPromise;
+    } finally {
+      state.refreshPromise = null;
     }
-    state.refreshing = false;
-    renderList();
-    syncActionButtons();
-    updateInlineMeta();
   }
 
   var previewTimer = null;
@@ -525,8 +544,10 @@
     }
 
     var cron = '';
+    var warning = null;
     try {
       cron = cronFromForm();
+      warning = state.cronWarning;
     } catch (e) {
       el.textContent = 'Next run: --';
       return;
@@ -535,7 +556,13 @@
     try {
       var next = await ipcRenderer.invoke('previewAutomationNextRun', cron);
       if (next) {
-        el.textContent = 'Next run: ' + formatRelative(next);
+        el.textContent = 'Next run: ' + formatRelative(next) + (warning ? (' (' + warning + ')') : '');
+        if (warning && warning !== state.lastCronWarningNotified) {
+          state.lastCronWarningNotified = warning;
+          notify(warning, 'orange');
+        } else if (!warning) {
+          state.lastCronWarningNotified = null;
+        }
         return;
       }
     } catch (e) {
@@ -761,8 +788,8 @@
 
     // Keep modal content fresh when opened.
     if (window.$ && typeof window.$ === 'function') {
-      window.$('#taskSchedulerModal').on('shown.bs.modal', function () {
-        refreshAutomations();
+      window.$('#taskSchedulerModal').on('shown.bs.modal', async function () {
+        await refreshAutomations();
         schedulePreviewRefresh();
 
         // If nothing is selected, select the first schedule for easier scanning.
