@@ -1,3 +1,4 @@
+use crate::automations;
 use crate::utils::safe_prefix;
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
@@ -473,7 +474,49 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     conn.execute("ALTER TABLE tasks ADD COLUMN claude_runtime TEXT", [])
         .ok();
 
+    // Backfill next_run_at for enabled automations that predate the column (migration).
+    // Older schemas added next_run_at without populating it, which would cause enabled
+    // schedules to never run unless a user edits/toggles them.
+    if let Ok(rows) = list_enabled_automations_missing_next_run_at(&conn) {
+        let now = chrono::Utc::now().timestamp();
+        for (automation_id, cron) in rows {
+            if let Ok(next_run_at) = automations::compute_next_run_at(&cron, chrono::Local::now()) {
+                let _ = backfill_automation_next_run_at(&conn, &automation_id, next_run_at, now);
+            }
+        }
+    }
+
     Ok(conn)
+}
+
+pub fn list_enabled_automations_missing_next_run_at(
+    conn: &Connection,
+) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, cron
+         FROM automations
+         WHERE enabled = 1
+           AND (next_run_at IS NULL OR next_run_at = 0)
+           AND TRIM(cron) <> ''",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+pub fn backfill_automation_next_run_at(
+    conn: &Connection,
+    automation_id: &str,
+    next_run_at: i64,
+    updated_at: i64,
+) -> Result<usize> {
+    conn.execute(
+        "UPDATE automations
+         SET next_run_at = ?1, updated_at = ?2
+         WHERE id = ?3
+           AND enabled = 1
+           AND (next_run_at IS NULL OR next_run_at = 0)",
+        params![next_run_at, updated_at, automation_id],
+    )
 }
 
 pub fn list_automations(conn: &Connection) -> Result<Vec<AutomationRecord>> {
@@ -1625,6 +1668,10 @@ mod tests {
         assert_eq!(automations[0].id, "auto-1");
         assert_eq!(automations[0].cron, "0 9 * * *");
         assert_eq!(automations[0].permission_mode, "default");
+        assert!(
+            automations[0].next_run_at.is_some(),
+            "init_db should backfill next_run_at for enabled automations"
+        );
 
         // Best-effort cleanup.
         let _ = std::fs::remove_file(&path);

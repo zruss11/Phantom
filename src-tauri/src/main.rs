@@ -1,4 +1,5 @@
 mod amp_cli;
+mod automations;
 mod claude_local_usage;
 mod claude_usage_watcher;
 mod command_center;
@@ -23,7 +24,6 @@ use command_center::{
 use utils::{default_search_paths, resolve_command_path, resolve_gh_binary, truncate_str};
 
 use chrono::{Local, TimeZone};
-use croner::Cron;
 use phantom_harness_backend::cli::{
     AgentCliKind, AgentProcessClient, AvailableCommand, ImageContent, StreamingUpdate,
     TokenUsageInfo, UserInputQuestion,
@@ -44,7 +44,6 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::Command;
 use std::process::Stdio;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Instant;
 use tauri::{
@@ -8433,21 +8432,9 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-fn compute_next_run_at(cron_expr: &str, from: chrono::DateTime<Local>) -> Result<i64, String> {
-    let expr = cron_expr.trim();
-    if expr.is_empty() {
-        return Err("Cron expression is required.".to_string());
-    }
-    let cron = Cron::from_str(expr).map_err(|e| format!("Invalid cron expression: {}", e))?;
-    let next = cron
-        .find_next_occurrence(&from, false)
-        .map_err(|e| format!("Unable to compute next run time: {}", e))?;
-    Ok(next.timestamp())
-}
-
 #[tauri::command]
 fn preview_automation_next_run(cron: String) -> Result<i64, String> {
-    compute_next_run_at(&cron, Local::now())
+    automations::compute_next_run_at(&cron, Local::now())
 }
 
 fn normalize_permission_mode(agent_id: &str, permission_mode: Option<String>) -> String {
@@ -8479,7 +8466,7 @@ async fn run_automation_and_start_task(
     let now = chrono::Utc::now().timestamp();
 
     // Always advance the schedule so we don't rerun the same tick if something fails.
-    let next_run_at = compute_next_run_at(&automation.cron, Local::now())?;
+    let next_run_at = automations::compute_next_run_at(&automation.cron, Local::now())?;
 
     // Update automation bookkeeping.
     {
@@ -8586,6 +8573,21 @@ async fn run_automation_and_start_task(
 
 async fn run_due_automations(app: AppHandle, state: &AppState) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp();
+
+    // Migrate enabled automations from older schemas/state where next_run_at was never populated.
+    // Without this, they would be permanently skipped by the due-automation query.
+    {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let missing =
+            db::list_enabled_automations_missing_next_run_at(&conn).unwrap_or_else(|_| Vec::new());
+        for (automation_id, cron) in missing {
+            if let Ok(next_run_at) = automations::compute_next_run_at(&cron, Local::now()) {
+                let _ =
+                    db::backfill_automation_next_run_at(&conn, &automation_id, next_run_at, now);
+            }
+        }
+    }
+
     let due = {
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         db::list_due_automations(&conn, now).map_err(|e| e.to_string())?
@@ -8667,7 +8669,7 @@ fn create_automation(
     let cron = payload.cron.trim().to_string();
     let enabled = payload.enabled;
     let next_run_at = if enabled {
-        Some(compute_next_run_at(&cron, Local::now())?)
+        Some(automations::compute_next_run_at(&cron, Local::now())?)
     } else {
         None
     };
@@ -8798,7 +8800,10 @@ fn update_automation(
     if !updated.enabled {
         updated.next_run_at = None;
     } else if cron_changed || updated.next_run_at.is_none() {
-        updated.next_run_at = Some(compute_next_run_at(&updated.cron, Local::now())?);
+        updated.next_run_at = Some(automations::compute_next_run_at(
+            &updated.cron,
+            Local::now(),
+        )?);
     }
 
     updated.updated_at = now;
