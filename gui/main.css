@@ -7621,6 +7621,12 @@ input:checked + .slider:before {
   padding: 10px;
 }
 
+.task-scheduler-prompt-textarea:focus {
+  outline: none;
+  border-color: rgba(247, 138, 151, 0.45);
+  box-shadow: 0 0 0 3px rgba(247, 138, 151, 0.14);
+}
+
 .task-scheduler-prompt-note {
   margin-top: 8px;
   font-size: 11px;

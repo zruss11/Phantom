@@ -16,8 +16,6 @@
     automations: [],
     selectedId: null,
     refreshing: false,
-    // When editing an existing schedule, we keep its saved prompt unless the user opts into using the draft.
-    editPromptOverride: null,
   };
 
   function byId(id) {
@@ -269,7 +267,6 @@
 
   function setSelected(id) {
     state.selectedId = id || null;
-    state.editPromptOverride = null;
     renderList();
     syncActionButtons();
   }
@@ -552,16 +549,8 @@
   }
 
   async function saveSchedule() {
-    var promptText = null;
-    if (state.selectedId) {
-      // When editing, prefer the saved prompt unless the user explicitly opts into using the draft.
-      var aSel = getSelectedAutomation();
-      promptText = (state.editPromptOverride !== null)
-        ? state.editPromptOverride
-        : (aSel ? (aSel.prompt || '') : '');
-    } else {
-      promptText = getPromptText();
-    }
+    var promptEl = byId('taskSchedulerPromptPreview');
+    var promptText = (promptEl ? promptEl.value : '') || '';
     if (!promptText || !promptText.trim()) {
       notify('Prompt is empty. Add a draft prompt first.', 'red');
       return;
@@ -723,9 +712,8 @@
 
     if (useDraftBtn) useDraftBtn.addEventListener('click', function () {
       var draft = getPromptText();
-      state.editPromptOverride = draft;
       setPromptPreview(draft);
-      notify('Using draft prompt for this schedule update', 'green');
+      notify('Draft prompt loaded', 'green');
     });
     if (copyPromptBtn) copyPromptBtn.addEventListener('click', function () {
       var ta = byId('taskSchedulerPromptPreview');
