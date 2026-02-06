@@ -682,6 +682,21 @@ pub fn delete_automation(conn: &Connection, automation_id: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn set_automation_last_error(
+    conn: &Connection,
+    automation_id: &str,
+    last_error: Option<String>,
+    updated_at: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE automations
+         SET last_error = ?1, updated_at = ?2
+         WHERE id = ?3",
+        params![last_error, updated_at, automation_id],
+    )?;
+    Ok(())
+}
+
 pub fn list_due_automations(conn: &Connection, now: i64) -> Result<Vec<AutomationRecord>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, name, enabled, agent_id, exec_model, prompt, project_path, base_branch, plan_mode, thinking, use_worktree, permission_mode, reasoning_effort, agent_mode, codex_mode, claude_runtime, cron, next_run_at, last_run_at, last_error, created_at, updated_at
@@ -1727,6 +1742,61 @@ mod tests {
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, "run-1");
         assert_eq!(runs[0].automation_id, "auto-1");
+
+        // Best-effort cleanup.
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn test_set_automation_last_error_does_not_clobber_next_run_at() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "phantom-harness-automation-last-error-{suffix}.sqlite"
+        ));
+
+        let conn = init_db(&path).expect("init_db should create schema");
+
+        let now = chrono::Utc::now().timestamp();
+        let automation = AutomationRecord {
+            id: "auto-err-1".to_string(),
+            name: "Test".to_string(),
+            enabled: true,
+            agent_id: "codex".to_string(),
+            exec_model: "default".to_string(),
+            prompt: "hello".to_string(),
+            project_path: None,
+            base_branch: None,
+            plan_mode: false,
+            thinking: true,
+            use_worktree: true,
+            permission_mode: "default".to_string(),
+            reasoning_effort: None,
+            agent_mode: None,
+            codex_mode: None,
+            claude_runtime: None,
+            cron: "0 9 * * *".to_string(),
+            next_run_at: Some(now + 3600),
+            last_run_at: Some(now),
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        insert_automation(&conn, &automation).expect("insert automation");
+
+        set_automation_last_error(&conn, "auto-err-1", Some("boom".to_string()), now + 1)
+            .expect("set_automation_last_error should work");
+
+        let updated = get_automation(&conn, "auto-err-1")
+            .expect("get automation")
+            .expect("automation exists");
+        assert_eq!(updated.last_error.as_deref(), Some("boom"));
+        assert_eq!(updated.next_run_at, automation.next_run_at);
 
         // Best-effort cleanup.
         let _ = std::fs::remove_file(&path);

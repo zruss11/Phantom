@@ -8509,10 +8509,8 @@ async fn run_automation_and_start_task(
         Ok(result) => result,
         Err(err) => {
             let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let mut updated = automation.clone();
-            updated.last_error = Some(err.clone());
-            updated.updated_at = now;
-            let _ = db::update_automation(&conn, &updated);
+            // Only update last_error; schedule/next_run_at was already advanced.
+            let _ = db::set_automation_last_error(&conn, &automation.id, Some(err.clone()), now);
 
             let run = db::AutomationRunRecord {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -8536,10 +8534,8 @@ async fn run_automation_and_start_task(
         // Persist the error so it shows up in the Automations UI.
         let conn = state.db.lock().map_err(|e| e.to_string())?;
 
-        let mut updated = automation.clone();
-        updated.last_error = Some(err.clone());
-        updated.updated_at = now;
-        let _ = db::update_automation(&conn, &updated);
+        // Only update last_error; schedule/next_run_at was already advanced.
+        let _ = db::set_automation_last_error(&conn, &automation.id, Some(err.clone()), now);
 
         let run = db::AutomationRunRecord {
             id: uuid::Uuid::new_v4().to_string(),
