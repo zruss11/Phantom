@@ -7573,6 +7573,50 @@ input:checked + .slider:before {
   line-height: 1.5;
 }
 
+.task-scheduler-modal .toggle-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: 152px;
+  height: 30px;
+  padding: 2px;
+  border-radius: 999px;
+  background: rgba(15, 14, 16, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04),
+    0 10px 18px rgba(0, 0, 0, 0.28);
+}
+
+.task-scheduler-modal .toggle-buttons input {
+  display: none;
+}
+
+.task-scheduler-modal .toggle-button {
+  flex: 1;
+  height: 100%;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.7);
+  font-family: "proxima_nova_ltsemibold", sans-serif;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease;
+}
+
+.task-scheduler-modal .toggle-button.is-active {
+  background: linear-gradient(135deg, #2c2a31, #1d1b21);
+  color: rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 6px 14px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
 .task-scheduler-hint {
   font-size: 12px;
   color: rgba(255, 255, 255, 0.55);
