@@ -509,22 +509,31 @@
     var modes = getModeValues(agentId);
     var claudeRuntime = getClaudeRuntime(agentId);
 
+    // For Option<String> fields on the Rust side, send empty strings instead of null so
+    // updates can intentionally clear previously-set values (normalize_optional_text("")).
+    var projectPathWire = projectPath || '';
+    var baseBranchWire = baseBranch || '';
+    var reasoningEffortWire = reasoningEffort || '';
+    var agentModeWire = modes.agentMode || '';
+    var codexModeWire = modes.codexMode || '';
+    var claudeRuntimeWire = claudeRuntime || '';
+
     var payload = {
       name: name,
       enabled: enabled,
       agentId: agentId,
       execModel: execModel,
       prompt: promptText,
-      projectPath: projectPath,
-      baseBranch: baseBranch,
+      projectPath: projectPathWire,
+      baseBranch: baseBranchWire,
       planMode: planMode,
       thinking: true,
       useWorktree: useWorktree,
       permissionMode: permissionMode,
-      reasoningEffort: reasoningEffort,
-      agentMode: modes.agentMode,
-      codexMode: modes.codexMode,
-      claudeRuntime: claudeRuntime,
+      reasoningEffort: reasoningEffortWire,
+      agentMode: agentModeWire,
+      codexMode: codexModeWire,
+      claudeRuntime: claudeRuntimeWire,
       cron: cron,
     };
 
@@ -647,4 +656,3 @@
     bind();
   }
 })();
-
