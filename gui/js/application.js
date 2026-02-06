@@ -23,6 +23,11 @@ const CODEX_ACCESS_MODE_OPTIONS = [
   { value: 'plan', name: 'Plan Mode', description: 'Planning mode, no actual tool execution' }
 ];
 
+function sanitizeCodexAccessMode(value) {
+  const allowed = CODEX_ACCESS_MODE_OPTIONS.map((o) => o.value);
+  return allowed.includes(value) ? value : "bypassPermissions";
+}
+
 const AGENT_NOTIFICATION_TIMEOUT_OPTIONS = [
   { value: '0', name: 'Never' },
   { value: '5', name: '5 seconds' },
@@ -2293,7 +2298,7 @@ async function getSettings() {
   // Codex access mode dropdown
   if (codexAccessModeDropdown) {
     codexAccessModeDropdown.setValue(
-      settingsPayload.codexAccessMode || "bypassPermissions",
+      sanitizeCodexAccessMode(settingsPayload.codexAccessMode),
     );
   }
   // Codex feature toggles (default off)
@@ -2308,6 +2313,14 @@ async function getSettings() {
   );
   $("#codexFeatureCollab").prop("checked", !!settingsPayload.codexFeatureCollab);
   $("#codexFeatureApps").prop("checked", !!settingsPayload.codexFeatureApps);
+
+  // Read-only: Phantom does not write to CODEX_HOME/config.toml.
+  $("#codexPersonality").prop("disabled", true);
+  $("#codexFeatureCollaborationModes").prop("disabled", true);
+  $("#codexFeatureSteer").prop("disabled", true);
+  $("#codexFeatureUnifiedExec").prop("disabled", true);
+  $("#codexFeatureCollab").prop("disabled", true);
+  $("#codexFeatureApps").prop("disabled", true);
   if (settingsPayload.discordBotToken !== undefined) {
     $("#discordBotToken").val(settingsPayload.discordBotToken || "");
   }
@@ -3942,8 +3955,9 @@ init();
     // - Amp: CLI uses --dangerously-allow-all
     // - OpenCode: CLI handles permissions internally
     const agentsWithOwnPermissions = ["claude-code", "droid", "factory-droid", "amp", "opencode"];
-    const codexAccessMode =
-      (currentSettings && currentSettings.codexAccessMode) || "bypassPermissions";
+    const codexAccessMode = sanitizeCodexAccessMode(
+      (currentSettings && currentSettings.codexAccessMode) || "bypassPermissions",
+    );
 
     const agentModels = (currentSettings && currentSettings.taskAgentModels) || {};
 

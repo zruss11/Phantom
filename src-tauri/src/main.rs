@@ -458,6 +458,7 @@ pub(crate) struct CreateAgentPayload {
     #[serde(rename = "planMode")]
     pub(crate) plan_mode: bool,
     #[allow(dead_code)]
+    #[serde(default)]
     pub(crate) thinking: bool,
     #[serde(rename = "useWorktree")]
     pub(crate) use_worktree: bool,
@@ -1111,15 +1112,9 @@ fn resolve_active_codex_home_for_settings(
     from_db.or_else(default_codex_home)
 }
 
-fn read_codex_config_overlay(config_path: &Path) -> CodexConfigOverlay {
-    let raw = match std::fs::read_to_string(config_path) {
-        Ok(raw) => raw,
-        Err(_) => return CodexConfigOverlay::default(),
-    };
-    let parsed: toml::Value = match toml::from_str(&raw) {
-        Ok(v) => v,
-        Err(_) => return CodexConfigOverlay::default(),
-    };
+fn read_codex_config_overlay(config_path: &Path) -> Option<CodexConfigOverlay> {
+    let raw = std::fs::read_to_string(config_path).ok()?;
+    let parsed: toml::Value = toml::from_str(&raw).ok()?;
 
     let mut overlay = CodexConfigOverlay::default();
 
@@ -1140,9 +1135,10 @@ fn read_codex_config_overlay(config_path: &Path) -> CodexConfigOverlay {
         overlay.feature_apps = table.get("apps").and_then(|v| v.as_bool());
     }
 
-    overlay
+    Some(overlay)
 }
 
+#[allow(dead_code)]
 fn write_codex_config_overlay(
     config_path: &Path,
     overlay: &CodexConfigOverlay,
@@ -6180,14 +6176,17 @@ async fn get_settings(state: State<'_, AppState>) -> Result<Settings, String> {
     // so the UI reflects external edits.
     if let Some(codex_home) = resolve_active_codex_home_for_settings(state.inner(), &base) {
         let config_path = codex_config_path_for_home(&codex_home);
-        let overlay = read_codex_config_overlay(&config_path);
-        // Always overlay on read so external edits are reflected in the UI.
-        out.codex_feature_collaboration_modes = overlay.feature_collaboration_modes;
-        out.codex_feature_steer = overlay.feature_steer;
-        out.codex_feature_unified_exec = overlay.feature_unified_exec;
-        out.codex_feature_collab = overlay.feature_collab;
-        out.codex_feature_apps = overlay.feature_apps;
-        out.codex_personality = overlay.personality;
+        if let Some(overlay) = read_codex_config_overlay(&config_path) {
+            // Only overlay if config.toml was successfully read and parsed.
+            // If it's missing/unparseable, keep the app-managed values so we don't
+            // accidentally clear the UI and persist nulls on the next save.
+            out.codex_feature_collaboration_modes = overlay.feature_collaboration_modes;
+            out.codex_feature_steer = overlay.feature_steer;
+            out.codex_feature_unified_exec = overlay.feature_unified_exec;
+            out.codex_feature_collab = overlay.feature_collab;
+            out.codex_feature_apps = overlay.feature_apps;
+            out.codex_personality = overlay.personality;
+        }
     }
 
     Ok(out)
@@ -6240,6 +6239,27 @@ async fn save_settings(
         }
     }
 
+    // Validate/normalize codex_access_mode so invalid persisted values don't break task creation.
+    // NOTE: This is the default permission mode Phantom applies to Codex CLI invocations.
+    const VALID_CODEX_ACCESS_MODES: &[&str] = &[
+        "default",
+        "bypassPermissions",
+        "dontAsk",
+        "acceptEdits",
+        "plan",
+    ];
+    if let Some(ref mode) = next.codex_access_mode {
+        let trimmed = mode.trim();
+        if trimmed.is_empty() {
+            next.codex_access_mode = None;
+        } else if VALID_CODEX_ACCESS_MODES.contains(&trimmed) {
+            next.codex_access_mode = Some(trimmed.to_string());
+        } else {
+            // Prefer a safe non-interactive fallback.
+            next.codex_access_mode = Some("bypassPermissions".to_string());
+        }
+    }
+
     ensure_mcp_settings(&mut next);
 
     persist_settings(&next)?;
@@ -6248,34 +6268,7 @@ async fn save_settings(
         *locked = next.clone();
     }
 
-    // Best-effort: sync Codex feature settings into the active CODEX_HOME/config.toml.
-    let codex_config_changed = prev.codex_feature_collaboration_modes
-        != next.codex_feature_collaboration_modes
-        || prev.codex_feature_steer != next.codex_feature_steer
-        || prev.codex_feature_unified_exec != next.codex_feature_unified_exec
-        || prev.codex_feature_collab != next.codex_feature_collab
-        || prev.codex_feature_apps != next.codex_feature_apps
-        || prev.codex_personality != next.codex_personality;
-    if codex_config_changed {
-        if let Some(codex_home) = resolve_active_codex_home_for_settings(state.inner(), &next) {
-            let config_path = codex_config_path_for_home(&codex_home);
-            let overlay = CodexConfigOverlay {
-                feature_collaboration_modes: next.codex_feature_collaboration_modes,
-                feature_steer: next.codex_feature_steer,
-                feature_unified_exec: next.codex_feature_unified_exec,
-                feature_collab: next.codex_feature_collab,
-                feature_apps: next.codex_feature_apps,
-                personality: next.codex_personality.clone(),
-            };
-            if let Err(err) = write_codex_config_overlay(&config_path, &overlay) {
-                eprintln!(
-                    "[Harness] Failed to sync Codex config to {}: {}",
-                    config_path.display(),
-                    err
-                );
-            }
-        }
-    }
+    // NOTE: We intentionally do not write to CODEX_HOME/config.toml from Phantom.
 
     let discord_config_changed = prev.discord_enabled != next.discord_enabled
         || prev.discord_bot_token != next.discord_bot_token
