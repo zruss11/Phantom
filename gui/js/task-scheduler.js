@@ -230,6 +230,12 @@
     }
     if (mode === 'every_minutes') {
       var nMin = clampInt(everyN ? everyN.value : '15', 5, 720, 15);
+      // Cron minute step values > 59 are invalid. For >= 60 minutes, translate to an hourly cadence.
+      if (nMin >= 60) {
+        var hours = Math.floor(nMin / 60);
+        hours = clampInt(hours, 1, 24, 1);
+        return '0 */' + hours + ' * * *';
+      }
       return '*/' + nMin + ' * * * *';
     }
     if (mode === 'every_hours') {
