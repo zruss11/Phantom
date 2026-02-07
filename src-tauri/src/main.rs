@@ -13380,6 +13380,7 @@ fn main() {
             meeting_notes::meeting_export_transcript,
             // Semantic search commands
             semantic_search::semantic_index_status,
+            semantic_search::semantic_search,
             calendar::calendar_get_upcoming_events,
             calendar::calendar_list_calendars,
         ])

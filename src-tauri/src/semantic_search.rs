@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tauri::State;
 
+use crate::utils::truncate_str;
+
 pub const ENTITY_TYPE_TASK: &str = "task";
 pub const ENTITY_TYPE_NOTE: &str = "note";
 
@@ -53,6 +55,129 @@ pub fn semantic_index_status(
     })
 }
 
+#[tauri::command]
+pub fn semantic_search(
+    state: State<'_, crate::AppState>,
+    req: SemanticSearchRequest,
+) -> Result<Vec<SemanticSearchResult>, String> {
+    let query = req.query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let limit = req.limit.unwrap_or(20).clamp(1, 50) as i64;
+    let types = req.types.unwrap_or_default();
+    let include_tasks = types.is_empty() || types.iter().any(|t| t == ENTITY_TYPE_TASK);
+    let include_notes = types.is_empty() || types.iter().any(|t| t == ENTITY_TYPE_NOTE);
+
+    let like = like_pattern(query);
+
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+
+    if include_tasks {
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT
+                    t.id,
+                    t.title_summary,
+                    t.prompt,
+                    (
+                        SELECT m.content
+                        FROM messages m
+                        WHERE m.task_id = t.id
+                          AND m.content IS NOT NULL
+                          AND m.content LIKE ?1 ESCAPE '\\\\'
+                        ORDER BY m.id DESC
+                        LIMIT 1
+                    ) AS msg_snippet,
+                    t.updated_at
+                 FROM tasks t
+                 WHERE (
+                    t.title_summary LIKE ?1 ESCAPE '\\\\'
+                    OR t.prompt LIKE ?1 ESCAPE '\\\\'
+                    OR EXISTS(
+                        SELECT 1
+                        FROM messages m2
+                        WHERE m2.task_id = t.id
+                          AND m2.content IS NOT NULL
+                          AND m2.content LIKE ?1 ESCAPE '\\\\'
+                    )
+                 )
+                 ORDER BY t.updated_at DESC
+                 LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query((&like, limit)).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let id: String = row.get(0).map_err(|e| e.to_string())?;
+            let title_summary: Option<String> = row.get(1).map_err(|e| e.to_string())?;
+            let prompt: Option<String> = row.get(2).map_err(|e| e.to_string())?;
+            let msg_snippet: Option<String> = row.get(3).map_err(|e| e.to_string())?;
+
+            let title = title_summary.or_else(|| prompt.as_ref().map(|p| truncate_str(p, 80)));
+            let snippet = msg_snippet.map(|s| truncate_str(&s, 200));
+
+            out.push(SemanticSearchResult {
+                entity_type: ENTITY_TYPE_TASK.to_string(),
+                entity_id: id,
+                title,
+                snippet,
+                score: 0.0,
+            });
+        }
+    }
+
+    if include_notes {
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT
+                    s.id,
+                    s.title,
+                    (
+                        SELECT seg.text
+                        FROM meeting_segments seg
+                        WHERE seg.session_id = s.id
+                          AND seg.text LIKE ?1 ESCAPE '\\\\'
+                        ORDER BY seg.start_ms DESC
+                        LIMIT 1
+                    ) AS seg_snippet,
+                    s.updated_at
+                 FROM meeting_sessions s
+                 WHERE (
+                    s.title LIKE ?1 ESCAPE '\\\\'
+                    OR EXISTS(
+                        SELECT 1
+                        FROM meeting_segments seg2
+                        WHERE seg2.session_id = s.id
+                          AND seg2.text LIKE ?1 ESCAPE '\\\\'
+                    )
+                 )
+                 ORDER BY s.updated_at DESC
+                 LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let mut rows = stmt.query((&like, limit)).map_err(|e| e.to_string())?;
+        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+            let id: String = row.get(0).map_err(|e| e.to_string())?;
+            let title: Option<String> = row.get(1).map_err(|e| e.to_string())?;
+            let seg_snippet: Option<String> = row.get(2).map_err(|e| e.to_string())?;
+
+            let snippet = seg_snippet.map(|s| truncate_str(&s, 200));
+
+            out.push(SemanticSearchResult {
+                entity_type: ENTITY_TYPE_NOTE.to_string(),
+                entity_id: id,
+                title: title.or_else(|| Some("Untitled note".to_string())),
+                snippet,
+                score: 0.0,
+            });
+        }
+    }
+
+    Ok(out)
+}
+
 pub fn sqlite_table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
     let mut stmt = conn.prepare_cached(
         "SELECT 1
@@ -92,4 +217,17 @@ pub fn semantic_chunks_last_updated_at(conn: &Connection) -> Result<Option<i64>>
     conn.query_row("SELECT MAX(updated_at) FROM semantic_chunks", [], |row| {
         row.get(0)
     })
+}
+
+fn like_pattern(query: &str) -> String {
+    let mut out = String::with_capacity(query.len() + 2);
+    out.push('%');
+    for ch in query.chars() {
+        if ch == '%' || ch == '_' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('%');
+    out
 }

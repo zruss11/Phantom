@@ -16,7 +16,7 @@
 - [x] Add Rust module for semantic search (types + helpers) (new `src-tauri/src/semantic_search.rs`)
 - [ ] Add Tauri commands:
   - [x] `semantic_index_status` (added `semantic_search::semantic_index_status`)
-  - [ ] `semantic_search({ query, types, limit, exact })`
+  - [x] `semantic_search({ query, types, limit, exact })` (keyword-only across tasks/messages + meetings/segments for now)
   - [ ] `semantic_reindex_all`
   - [ ] `semantic_delete_for_entity`
 
