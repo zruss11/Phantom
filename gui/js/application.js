@@ -5970,6 +5970,8 @@ init();
     lastFocus: null,
     debounceTimer: null,
     requestId: 0,
+    exact: false,
+    indexPollTimer: null,
   };
 
   function $(id) {
@@ -5988,6 +5990,11 @@ init();
     var input = $('notesPaletteInput');
     if (!overlay || !input) return;
 
+    // Load last-used mode.
+    try {
+      state.exact = localStorage.getItem('phantom-cmdk-exact') === '1';
+    } catch (e) {}
+
     state.lastFocus = document.activeElement;
     state.open = true;
     overlay.hidden = false;
@@ -5997,8 +6004,12 @@ init();
     input.value = q;
     state.activeIndex = 0;
 
+    var exactToggle = $('notesPaletteExactToggle');
+    if (exactToggle) exactToggle.checked = !!state.exact;
+
     renderResults([]);
     scheduleSearch();
+    startIndexPolling();
 
     setTimeout(function () {
       try { input.focus(); } catch (e) {}
@@ -6013,6 +6024,7 @@ init();
     state.open = false;
     state.itemsFlat = [];
     state.activeIndex = 0;
+    stopIndexPolling();
 
     var last = state.lastFocus;
     state.lastFocus = null;
@@ -6195,7 +6207,7 @@ init();
     var reqId = ++state.requestId;
     try {
       var items = await tauriInvoke('semantic_search', {
-        req: { query: q, limit: 20, exact: false }
+        req: { query: q, limit: 20, exact: !!state.exact }
       });
       if (reqId !== state.requestId) return;
       renderResults(Array.isArray(items) ? items : []);
@@ -6204,6 +6216,42 @@ init();
       renderEmpty('Search failed');
       console.error('[CmdK] semantic_search failed:', err);
     }
+  }
+
+  function setIndexStatusText(text) {
+    var el = $('notesPaletteIndexStatus');
+    if (!el) return;
+    el.textContent = text || '';
+  }
+
+  async function pollIndexStatusOnce() {
+    if (!state.open) return;
+    if (!tauriInvoke) return;
+
+    try {
+      var s = await tauriInvoke('semantic_index_status', {});
+      var pending = (s && typeof s.pendingJobs === 'number') ? s.pendingJobs : null;
+      if (pending && pending > 0) {
+        setIndexStatusText('Indexing...');
+      } else {
+        setIndexStatusText('');
+      }
+    } catch (e) {
+      // Ignore; best-effort only.
+    }
+  }
+
+  function startIndexPolling() {
+    stopIndexPolling();
+    setIndexStatusText('');
+    pollIndexStatusOnce();
+    state.indexPollTimer = setInterval(pollIndexStatusOnce, 1200);
+  }
+
+  function stopIndexPolling() {
+    if (state.indexPollTimer) clearInterval(state.indexPollTimer);
+    state.indexPollTimer = null;
+    setIndexStatusText('');
   }
 
   function bindOnce() {
@@ -6216,6 +6264,16 @@ init();
       state.activeIndex = 0;
       scheduleSearch();
     });
+
+    var exactToggle = $('notesPaletteExactToggle');
+    if (exactToggle) {
+      exactToggle.addEventListener('change', function () {
+        state.exact = !!exactToggle.checked;
+        try { localStorage.setItem('phantom-cmdk-exact', state.exact ? '1' : '0'); } catch (e) {}
+        state.activeIndex = 0;
+        scheduleSearch();
+      });
+    }
 
     overlay.addEventListener('mousedown', function (e) {
       // Click the dimmed overlay area to close.

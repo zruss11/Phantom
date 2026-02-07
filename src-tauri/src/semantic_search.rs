@@ -35,6 +35,9 @@ pub struct SemanticIndexStatus {
     pub chunks_total: i64,
     pub chunks_by_type: HashMap<String, i64>,
     pub last_updated_at: Option<i64>,
+    /// Best-effort: number of debounced indexing jobs currently queued/running.
+    /// `None` means "couldn't sample" (mutex contended).
+    pub pending_jobs: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,12 +76,17 @@ pub fn semantic_index_status(
     let chunks_total = semantic_chunks_count(&conn).map_err(|e| e.to_string())?;
     let chunks_by_type = semantic_chunks_count_by_type(&conn).map_err(|e| e.to_string())?;
     let last_updated_at = semantic_chunks_last_updated_at(&conn).map_err(|e| e.to_string())?;
+    let pending_jobs = match state.semantic_index_jobs.try_lock() {
+        Ok(jobs) => Some(jobs.len() as u32),
+        Err(_) => None,
+    };
 
     Ok(SemanticIndexStatus {
         fts_available,
         chunks_total,
         chunks_by_type,
         last_updated_at,
+        pending_jobs,
     })
 }
 

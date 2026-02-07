@@ -49,7 +49,7 @@
 
 ### M6 — Hybrid rerank + UX polish
 - [x] Implement hybrid search: candidates from keyword → rerank with vectors (implemented vector rerank in `src-tauri/src/semantic_search.rs` when local model is available)
-- [ ] Add “Indexing…” indicator and “Exact” toggle
+- [x] Add “Indexing…” indicator and “Exact” toggle (Cmd+K footer shows Exact + best-effort indexing status via `semantic_index_status.pendingJobs`)
 - [ ] Update Notes search bar to semantic-first (calls `semantic_search`)
 
 ## Completion
