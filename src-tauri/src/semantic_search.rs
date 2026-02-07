@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::State;
 
+use crate::{embedding_inference, embedding_model};
 use crate::utils::truncate_str;
 
 pub const ENTITY_TYPE_TASK: &str = "task";
@@ -82,11 +83,21 @@ pub fn semantic_index_status(
 }
 
 #[tauri::command]
-pub fn semantic_search(
+pub async fn semantic_search(
     state: State<'_, crate::AppState>,
     req: SemanticSearchRequest,
 ) -> Result<Vec<SemanticSearchResult>, String> {
-    let query = req.query.trim();
+    let db = state.db.clone();
+    tokio::task::spawn_blocking(move || semantic_search_sync(&db, req))
+        .await
+        .map_err(|e| format!("Search worker failed: {e}"))?
+}
+
+fn semantic_search_sync(
+    db: &std::sync::Arc<std::sync::Mutex<Connection>>,
+    req: SemanticSearchRequest,
+) -> Result<Vec<SemanticSearchResult>, String> {
+    let query = req.query.trim().to_string();
     if query.is_empty() {
         return Ok(Vec::new());
     }
@@ -95,127 +106,197 @@ pub fn semantic_search(
     let types = req.types.unwrap_or_default();
     let include_tasks = types.is_empty() || types.iter().any(|t| t == ENTITY_TYPE_TASK);
     let include_notes = types.is_empty() || types.iter().any(|t| t == ENTITY_TYPE_NOTE);
+    let exact = req.exact.unwrap_or(false);
 
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    if semantic_fts_available(&conn) {
-        if semantic_fts_count(&conn).unwrap_or(0) == 0 {
-            // Best-effort: populate the FTS table from existing content the first time it's used.
-            let _ = rebuild_semantic_fts(&conn);
+    let mut candidates: Vec<SemanticSearchResult> = {
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        if semantic_fts_available(&conn) {
+            if semantic_fts_count(&conn).unwrap_or(0) == 0 {
+                let _ = rebuild_semantic_fts(&conn);
+            }
+            semantic_search_via_fts(&conn, &query, include_tasks, include_notes, limit)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         }
-        if let Ok(results) =
-            semantic_search_via_fts(&conn, query, include_tasks, include_notes, limit)
-        {
-            if !results.is_empty() {
-                return Ok(results);
+    };
+
+    if candidates.is_empty() {
+        let like = like_pattern(&query);
+        let conn = db.lock().map_err(|e| e.to_string())?;
+        if include_tasks {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT
+                        t.id,
+                        t.title_summary,
+                        t.prompt,
+                        (
+                            SELECT m.content
+                            FROM messages m
+                            WHERE m.task_id = t.id
+                              AND m.content IS NOT NULL
+                              AND m.content LIKE ?1 ESCAPE '\\\\'
+                            ORDER BY m.id DESC
+                            LIMIT 1
+                        ) AS msg_snippet,
+                        t.updated_at
+                     FROM tasks t
+                     WHERE (
+                        t.title_summary LIKE ?1 ESCAPE '\\\\'
+                        OR t.prompt LIKE ?1 ESCAPE '\\\\'
+                        OR EXISTS(
+                            SELECT 1
+                            FROM messages m2
+                            WHERE m2.task_id = t.id
+                              AND m2.content IS NOT NULL
+                              AND m2.content LIKE ?1 ESCAPE '\\\\'
+                        )
+                     )
+                     ORDER BY t.updated_at DESC
+                     LIMIT ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt.query((&like, limit)).map_err(|e| e.to_string())?;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let id: String = row.get(0).map_err(|e| e.to_string())?;
+                let title_summary: Option<String> = row.get(1).map_err(|e| e.to_string())?;
+                let prompt: Option<String> = row.get(2).map_err(|e| e.to_string())?;
+                let msg_snippet: Option<String> = row.get(3).map_err(|e| e.to_string())?;
+
+                let title =
+                    title_summary.or_else(|| prompt.as_ref().map(|p| truncate_str(p, 80)));
+                let snippet = msg_snippet.map(|s| truncate_str(&s, 200));
+
+                candidates.push(SemanticSearchResult {
+                    entity_type: ENTITY_TYPE_TASK.to_string(),
+                    entity_id: id,
+                    title,
+                    snippet,
+                    score: 0.0,
+                });
+            }
+        }
+
+        if include_notes {
+            let mut stmt = conn
+                .prepare_cached(
+                    "SELECT
+                        s.id,
+                        s.title,
+                        (
+                            SELECT seg.text
+                            FROM meeting_segments seg
+                            WHERE seg.session_id = s.id
+                              AND seg.text LIKE ?1 ESCAPE '\\\\'
+                            ORDER BY seg.start_ms DESC
+                            LIMIT 1
+                        ) AS seg_snippet,
+                        s.updated_at
+                     FROM meeting_sessions s
+                     WHERE (
+                        s.title LIKE ?1 ESCAPE '\\\\'
+                        OR EXISTS(
+                            SELECT 1
+                            FROM meeting_segments seg2
+                            WHERE seg2.session_id = s.id
+                              AND seg2.text LIKE ?1 ESCAPE '\\\\'
+                        )
+                     )
+                     ORDER BY s.updated_at DESC
+                     LIMIT ?2",
+                )
+                .map_err(|e| e.to_string())?;
+            let mut rows = stmt.query((&like, limit)).map_err(|e| e.to_string())?;
+            while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+                let id: String = row.get(0).map_err(|e| e.to_string())?;
+                let title: Option<String> = row.get(1).map_err(|e| e.to_string())?;
+                let seg_snippet: Option<String> = row.get(2).map_err(|e| e.to_string())?;
+
+                let snippet = seg_snippet.map(|s| truncate_str(&s, 200));
+
+                candidates.push(SemanticSearchResult {
+                    entity_type: ENTITY_TYPE_NOTE.to_string(),
+                    entity_id: id,
+                    title: title.or_else(|| Some("Untitled note".to_string())),
+                    snippet,
+                    score: 0.0,
+                });
             }
         }
     }
 
-    // Fallback when FTS5 isn't available (or MATCH failed): substring matching over titles + bodies.
-    let like = like_pattern(query);
-    let mut out = Vec::new();
+    if candidates.is_empty() || exact {
+        candidates.truncate(limit as usize);
+        return Ok(candidates);
+    }
 
-    if include_tasks {
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT
-                    t.id,
-                    t.title_summary,
-                    t.prompt,
-                    (
-                        SELECT m.content
-                        FROM messages m
-                        WHERE m.task_id = t.id
-                          AND m.content IS NOT NULL
-                          AND m.content LIKE ?1 ESCAPE '\\\\'
-                        ORDER BY m.id DESC
-                        LIMIT 1
-                    ) AS msg_snippet,
-                    t.updated_at
-                 FROM tasks t
-                 WHERE (
-                    t.title_summary LIKE ?1 ESCAPE '\\\\'
-                    OR t.prompt LIKE ?1 ESCAPE '\\\\'
-                    OR EXISTS(
-                        SELECT 1
-                        FROM messages m2
-                        WHERE m2.task_id = t.id
-                          AND m2.content IS NOT NULL
-                          AND m2.content LIKE ?1 ESCAPE '\\\\'
-                    )
-                 )
-                 ORDER BY t.updated_at DESC
-                 LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
-        let mut rows = stmt.query((&like, limit)).map_err(|e| e.to_string())?;
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let id: String = row.get(0).map_err(|e| e.to_string())?;
-            let title_summary: Option<String> = row.get(1).map_err(|e| e.to_string())?;
-            let prompt: Option<String> = row.get(2).map_err(|e| e.to_string())?;
-            let msg_snippet: Option<String> = row.get(3).map_err(|e| e.to_string())?;
+    let model_id = embedding_model::DEFAULT_EMBEDDING_MODEL_ID;
+    let onnx_path = embedding_model::model_dir(model_id)
+        .join("onnx")
+        .join("model.onnx");
+    if !onnx_path.exists() {
+        candidates.truncate(limit as usize);
+        return Ok(candidates);
+    }
 
-            let title = title_summary.or_else(|| prompt.as_ref().map(|p| truncate_str(p, 80)));
-            let snippet = msg_snippet.map(|s| truncate_str(&s, 200));
+    let query_emb = match embedding_inference::embed_text_sync(model_id, 128, &query) {
+        Ok(v) => v,
+        Err(_) => {
+            candidates.truncate(limit as usize);
+            return Ok(candidates);
+        }
+    };
 
-            out.push(SemanticSearchResult {
-                entity_type: ENTITY_TYPE_TASK.to_string(),
-                entity_id: id,
-                title,
-                snippet,
-                score: 0.0,
-            });
+    let conn = db.lock().map_err(|e| e.to_string())?;
+    for r in &mut candidates {
+        if let Ok(Some(best)) = best_similarity_for_entity(&conn, model_id, r, &query_emb) {
+            r.score = best as f64;
         }
     }
 
-    if include_notes {
-        let mut stmt = conn
-            .prepare_cached(
-                "SELECT
-                    s.id,
-                    s.title,
-                    (
-                        SELECT seg.text
-                        FROM meeting_segments seg
-                        WHERE seg.session_id = s.id
-                          AND seg.text LIKE ?1 ESCAPE '\\\\'
-                        ORDER BY seg.start_ms DESC
-                        LIMIT 1
-                    ) AS seg_snippet,
-                    s.updated_at
-                 FROM meeting_sessions s
-                 WHERE (
-                    s.title LIKE ?1 ESCAPE '\\\\'
-                    OR EXISTS(
-                        SELECT 1
-                        FROM meeting_segments seg2
-                        WHERE seg2.session_id = s.id
-                          AND seg2.text LIKE ?1 ESCAPE '\\\\'
-                    )
-                 )
-                 ORDER BY s.updated_at DESC
-                 LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
-        let mut rows = stmt.query((&like, limit)).map_err(|e| e.to_string())?;
-        while let Some(row) = rows.next().map_err(|e| e.to_string())? {
-            let id: String = row.get(0).map_err(|e| e.to_string())?;
-            let title: Option<String> = row.get(1).map_err(|e| e.to_string())?;
-            let seg_snippet: Option<String> = row.get(2).map_err(|e| e.to_string())?;
+    candidates.sort_by(|a, b| b.score.total_cmp(&a.score));
+    candidates.truncate(limit as usize);
+    Ok(candidates)
+}
 
-            let snippet = seg_snippet.map(|s| truncate_str(&s, 200));
+fn best_similarity_for_entity(
+    conn: &Connection,
+    model_id: &str,
+    r: &SemanticSearchResult,
+    query_emb: &[f32],
+) -> Result<Option<f32>, String> {
+    let mut stmt = conn
+        .prepare_cached(
+            "SELECT embedding
+             FROM semantic_chunks
+             WHERE entity_type = ?1 AND entity_id = ?2 AND model_name = ?3",
+        )
+        .map_err(|e| e.to_string())?;
 
-            out.push(SemanticSearchResult {
-                entity_type: ENTITY_TYPE_NOTE.to_string(),
-                entity_id: id,
-                title: title.or_else(|| Some("Untitled note".to_string())),
-                snippet,
-                score: 0.0,
-            });
-        }
+    let mut rows = stmt
+        .query((&r.entity_type, &r.entity_id, model_id))
+        .map_err(|e| e.to_string())?;
+
+    let mut best: Option<f32> = None;
+    while let Some(row) = rows.next().map_err(|e| e.to_string())? {
+        let blob: Vec<u8> = row.get(0).map_err(|e| e.to_string())?;
+        let sim = dot_product_f32_le(&blob, query_emb)?;
+        best = Some(best.map(|b| b.max(sim)).unwrap_or(sim));
     }
+    Ok(best)
+}
 
-    Ok(out)
+fn dot_product_f32_le(blob: &[u8], v: &[f32]) -> Result<f32, String> {
+    if blob.len() != v.len() * 4 {
+        return Err("Embedding dims mismatch".to_string());
+    }
+    let mut sum = 0f32;
+    for (i, chunk) in blob.chunks_exact(4).enumerate() {
+        let a = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        sum += a * v[i];
+    }
+    Ok(sum)
 }
 
 #[tauri::command]
