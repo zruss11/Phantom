@@ -4928,12 +4928,17 @@
           // So we create a dedicated host element with an attached shadow root.
           const diffsHost = document.createElement("diffs-container");
           diffsHost.className = "diffs-host";
+          let renderHost = diffsHost;
           try {
             if (!diffsHost.shadowRoot) {
               diffsHost.attachShadow({ mode: "open" });
             }
+            if (!diffsHost.shadowRoot) {
+              renderHost = fileContainer;
+            }
           } catch (err) {
-            // If shadow DOM is unavailable for any reason, we can still fall back below.
+            // If shadow DOM is unavailable for any reason, render into the container directly.
+            renderHost = fileContainer;
           }
           fileContainer.appendChild(diffsHost);
 
@@ -4948,7 +4953,7 @@
             unsafeCSS: PHANTOM_DIFFS_CSS,
           });
 
-          instance.render({ fileDiff, fileContainer: diffsHost });
+          instance.render({ fileDiff, fileContainer: renderHost });
           card._diffInstances.push(instance);
         });
       })

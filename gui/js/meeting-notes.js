@@ -1001,7 +1001,6 @@
 
   async function stopDictationNow() {
     if (!ipcRenderer) return;
-    state.dictationLiveTranscript = '';
     try {
       await ipcRenderer.invoke('dictation_stop');
     } catch (e) {
