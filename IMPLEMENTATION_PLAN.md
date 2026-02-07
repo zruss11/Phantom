@@ -44,7 +44,7 @@
 - [ ] Index triggers (debounced):
   - [x] task title change (schedules `semantic_indexer::schedule_index_entity` after title summary write)
   - [x] message append (schedules `semantic_indexer::schedule_index_entity` after user + assistant message persistence)
-  - [ ] meeting segment append / meeting stop
+  - [x] meeting segment append / meeting stop (segment writes schedule 5s debounce; stop schedules immediate)
 - [x] content_hash checks to avoid re-embedding unchanged text (per-chunk FNV1a hash in `src-tauri/src/semantic_indexer.rs`)
 
 ### M6 — Hybrid rerank + UX polish

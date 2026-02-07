@@ -369,6 +369,15 @@ pub struct SemanticIndexJob {
 }
 
 pub async fn schedule_index_entity(app: &AppHandle, entity_type: &str, entity_id: &str) {
+    schedule_index_entity_with_delay(app, entity_type, entity_id, Duration::from_millis(800)).await;
+}
+
+pub async fn schedule_index_entity_with_delay(
+    app: &AppHandle,
+    entity_type: &str,
+    entity_id: &str,
+    delay: Duration,
+) {
     let key = format!("{}:{}", entity_type, entity_id);
     let state = app.state::<AppState>();
 
@@ -389,7 +398,7 @@ pub async fn schedule_index_entity(app: &AppHandle, entity_type: &str, entity_id
         let entity_type = entity_type.to_string();
         let entity_id = entity_id.to_string();
         let task = tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(800)).await;
+            tokio::time::sleep(delay).await;
             index_entity(&app_handle, entity_type, entity_id).await;
 
             let state = app_for_cleanup.state::<AppState>();
