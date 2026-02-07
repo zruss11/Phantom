@@ -13,6 +13,9 @@
     timerInterval: null,
     timerSeconds: 0,
     segments: [],
+    textNoteSuppressSave: false,
+    textNoteSaveTimer: null,
+    textNoteLastSavedText: '',
     sessions: [],
     selectedSessionId: null,
     visibilityObserver: null,
@@ -50,6 +53,8 @@
     dictationClipboardFallback: true,
     dictationRestoreClipboard: true,
     dictationFlattenNewlinesInSingleLine: true,
+    dictationCleanupEnabled: false,
+    dictationCleanupRemoveLike: false,
     transcriptionAvailable: null,
     dictationStatus: null,
 
@@ -130,6 +135,10 @@
       }
     } catch (e) {}
     return 'id_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 10);
+  }
+
+  function isTextNoteSession(session) {
+    return !!(session && session.status === 'text');
   }
 
   function isNotesVisible() {
@@ -909,6 +918,15 @@
     var flattenToggle = $('notesDictationFlattenToggle');
     if (flattenToggle) flattenToggle.checked = !!state.dictationFlattenNewlinesInSingleLine;
 
+    var cleanupToggle = $('notesDictationCleanupToggle');
+    if (cleanupToggle) cleanupToggle.checked = !!state.dictationCleanupEnabled;
+
+    var likeToggle = $('notesDictationCleanupLikeToggle');
+    if (likeToggle) {
+      likeToggle.checked = !!state.dictationCleanupRemoveLike;
+      likeToggle.disabled = !state.dictationCleanupEnabled;
+    }
+
     renderDictationStatus();
   }
 
@@ -1592,6 +1610,9 @@
 
   // ─── View Switching ───
   function switchView(view, sessionId) {
+    // Avoid losing edits when switching away from a text note.
+    flushTextNoteSaveNow();
+
     state.currentView = view;
     var defaultView = $('notesCenterDefault');
     var transcriptView = $('notesCenterTranscript');
@@ -1710,7 +1731,7 @@
     if (!filtered.length) {
       var empty = document.createElement('div');
       empty.className = 'notes-empty-sessions';
-      empty.innerHTML = '<i class="fal fa-microphone-alt"></i><p>No recorded sessions yet</p>';
+      empty.innerHTML = '<i class="fal fa-sticky-note"></i><p>No notes yet</p><div class="notes-empty-sub">Click + to create a text note, or start recording.</div>';
       container.appendChild(empty);
       return;
     }
@@ -1751,7 +1772,9 @@
 
     var icon = document.createElement('div');
     icon.className = 'notes-meeting-icon';
-    icon.innerHTML = '<i class="fal fa-microphone-alt"></i>';
+    icon.innerHTML = isTextNoteSession(session)
+      ? '<i class="fal fa-sticky-note"></i>'
+      : '<i class="fal fa-microphone-alt"></i>';
 
     var info = document.createElement('div');
     info.className = 'notes-meeting-info';
@@ -1767,6 +1790,11 @@
       var durationSpan = document.createElement('span');
       durationSpan.textContent = duration;
       meta.appendChild(durationSpan);
+    }
+    if (isTextNoteSession(session)) {
+      var kindSpan = document.createElement('span');
+      kindSpan.textContent = 'Text note';
+      meta.appendChild(kindSpan);
     }
     var folderName = getFolderForSession(session.id);
     if (folderName) {
@@ -1784,7 +1812,7 @@
 
     var deleteBtn = document.createElement('button');
     deleteBtn.className = 'notes-meeting-delete';
-    deleteBtn.title = 'Delete session';
+    deleteBtn.title = isTextNoteSession(session) ? 'Delete note' : 'Delete session';
     deleteBtn.innerHTML = '<i class="fal fa-trash-alt"></i>';
     deleteBtn.addEventListener('click', function (e) {
       e.stopPropagation();
@@ -1833,11 +1861,11 @@
     updateControlsUI();
     loadChatThreadsForSession(sessionId);
     refreshTranscriptFolderDropdown();
+    var session = (state.sessions || []).find(function (s) { return s.id === sessionId; }) || null;
 
     // Update transcript meta
     var metaEl = $('notesTranscriptMeta');
     if (metaEl) {
-      var session = state.sessions.find(function (s) { return s.id === sessionId; });
       if (session) {
         metaEl.innerHTML = '';
 
@@ -1848,6 +1876,12 @@
           dateTag.className = 'notes-meta-tag';
           dateTag.innerHTML = '<i class="fal fa-calendar"></i> ' + escapeHtml(formatDateGroup(session.created_at) + ' ' + formatTimeOfDay(session.created_at));
           metaEl.appendChild(dateTag);
+        }
+        if (isTextNoteSession(session)) {
+          var kindTag = document.createElement('span');
+          kindTag.className = 'notes-meta-tag';
+          kindTag.innerHTML = '<i class="fal fa-sticky-note"></i> Text note';
+          metaEl.appendChild(kindTag);
         }
         if (session.duration) {
           var durTag = document.createElement('span');
@@ -1899,14 +1933,32 @@
       } else if (result && Array.isArray(result.segments)) {
         segments = result.segments;
       }
-      renderSavedTranscript(segments);
+      renderSavedTranscript(segments, session);
     } catch (err) {
       console.error('[MeetingNotes] meeting_get_transcript failed:', err);
     }
   }
 
-  function renderSavedTranscript(segments) {
+  function renderSavedTranscript(segments, session) {
     var area = $('notesTranscript');
+    var editor = $('notesTextNoteEditor');
+    var isText = isTextNoteSession(session || getSelectedSession());
+
+    if (editor) editor.style.display = isText ? 'block' : 'none';
+    if (area) area.style.display = isText ? 'none' : '';
+
+    if (isText) {
+      var list = Array.isArray(segments) ? segments : [];
+      state.segments = list;
+      if (editor) {
+        state.textNoteSuppressSave = true;
+        editor.value = list.map(function (s) { return (s && s.text) ? s.text : ''; }).join('\n');
+        state.textNoteLastSavedText = editor.value;
+        setTimeout(function () { state.textNoteSuppressSave = false; }, 0);
+      }
+      return;
+    }
+
     if (!area) return;
     area.innerHTML = '';
 
@@ -2045,7 +2097,7 @@
 
     var groups = [];
     if (folders.length) groups.push({ title: 'Folders', kind: 'folder', items: folders });
-    if (sessions.length) groups.push({ title: 'Meetings', kind: 'session', items: sessions });
+    if (sessions.length) groups.push({ title: 'Notes', kind: 'session', items: sessions });
     return groups;
   }
 
@@ -2432,6 +2484,7 @@
     try {
       // Backend expects one of: txt, md, json. "Copy" is a UI action.
       var backendFormat = (format === 'copy') ? 'txt' : format;
+      var alwaysCopy = isTextNoteSession(getSelectedSession()) && format !== 'copy';
       var result = await ipcRenderer.invoke('meeting_export_transcript', {
         sessionId: state.selectedSessionId,
         format: backendFormat,
@@ -2439,7 +2492,7 @@
 
       var text = typeof result === 'string' ? result : (result && result.text) || '';
 
-      if (format === 'copy' || !text) {
+      if (format === 'copy' || alwaysCopy || !text) {
         await copyToClipboard(text);
       } else {
         var area = $('notesTranscript');
@@ -2467,6 +2520,11 @@
 
   // ─── Chat Sidebar ───
   function getTranscriptText() {
+    var session = getSelectedSession();
+    if (isTextNoteSession(session)) {
+      var ta = $('notesTextNoteEditor');
+      return (ta && typeof ta.value === 'string') ? ta.value : '';
+    }
     return state.segments.map(function (s) {
       return '[' + Math.floor((s.timestamp || 0) / 60) + ':' + String(Math.floor((s.timestamp || 0) % 60)).padStart(2, '0') + '] ' + (s.text || '');
     }).join('\n');
@@ -2561,7 +2619,7 @@
     var container = $('notesChatMessages');
     if (container) {
       container.innerHTML = '<div class="notes-chat-empty"><i class="fal fa-comment-alt-dots"></i><p>' +
-        escapeHtml(emptyText || 'Ask anything about your meeting...') + '</p></div>';
+        escapeHtml(emptyText || 'Ask anything about this note...') + '</p></div>';
     }
   }
 
@@ -2725,7 +2783,7 @@
       clearChatMessagesUI('Loading chat…');
       ipcRenderer.send('GetTaskInfo', state.chatTaskId);
     } else {
-      clearChatMessagesUI('Ask anything about your meeting…');
+      clearChatMessagesUI('Ask anything about this note…');
     }
   }
 
@@ -2828,6 +2886,12 @@
       state.dictationFlattenNewlinesInSingleLine = (settings && settings.notesDictationFlattenNewlinesInSingleLine !== undefined && settings.notesDictationFlattenNewlinesInSingleLine !== null)
         ? !!settings.notesDictationFlattenNewlinesInSingleLine
         : true;
+      state.dictationCleanupEnabled = (settings && settings.notesDictationCleanupEnabled !== undefined && settings.notesDictationCleanupEnabled !== null)
+        ? !!settings.notesDictationCleanupEnabled
+        : false;
+      state.dictationCleanupRemoveLike = (settings && settings.notesDictationCleanupRemoveLike !== undefined && settings.notesDictationCleanupRemoveLike !== null)
+        ? !!settings.notesDictationCleanupRemoveLike
+        : false;
 
       ensureTemplatesLoaded();
     } catch (err) {
@@ -2846,6 +2910,8 @@
       state.dictationClipboardFallback = true;
       state.dictationRestoreClipboard = true;
       state.dictationFlattenNewlinesInSingleLine = true;
+      state.dictationCleanupEnabled = false;
+      state.dictationCleanupRemoveLike = false;
       ensureTemplatesLoaded();
     }
   }
@@ -2988,7 +3054,7 @@
 
     var sessionId = state.chatThreadsSessionId;
     if (!sessionId) {
-      appendChatMessage('assistant', 'Select a meeting first, then run a template.');
+      appendChatMessage('assistant', 'Select a note first, then run a template.');
       return;
     }
 
@@ -3045,7 +3111,7 @@
 
     var sessionId = state.chatThreadsSessionId;
     if (!sessionId) {
-      appendChatMessage('assistant', 'Select a meeting first, then start a chat.');
+      appendChatMessage('assistant', 'Select a note first, then start a chat.');
       return;
     }
 
@@ -3071,9 +3137,10 @@
 
     // If we have transcript context and haven't sent it yet, prepend it
     var message = text;
-    if (!state.chatContextSent && state.segments.length > 0) {
-      var transcript = getTranscriptText();
-      message = 'Here is the meeting transcript for context:\n\n' + transcript + '\n\nUser question: ' + text;
+    var transcript = getTranscriptText();
+    if (!state.chatContextSent && transcript && transcript.trim()) {
+      var label = isTextNoteSession(getSelectedSession()) ? 'note' : 'meeting transcript';
+      message = 'Here is the ' + label + ' for context:\n\n' + transcript + '\n\nUser question: ' + text;
       state.chatContextSent = true;
     }
 
@@ -3131,6 +3198,70 @@
     } catch (err) {
       console.error('[MeetingNotes] meeting_update_title failed:', err);
     }
+  }
+
+  async function createTextNote() {
+    if (!ipcRenderer) return;
+    try {
+      var result = await ipcRenderer.invoke('meeting_create_text_note', {
+        title: null,
+        content: null,
+      });
+
+      // Ensure the newly created note is in our local list before selecting it.
+      await loadSessions();
+
+      var id = result && result.id ? result.id : null;
+      if (!id && state.sessions && state.sessions.length) id = state.sessions[0].id;
+      if (!id) return;
+
+      // If the user is currently filtering by a folder, create into that folder.
+      if (state.selectedFolderId) {
+        moveSessionToFolder(id, state.selectedFolderId);
+      }
+
+      switchView('transcript', id);
+      setTimeout(function () {
+        var editor = $('notesTextNoteEditor');
+        if (editor) {
+          try { editor.focus(); } catch (e) {}
+        }
+      }, 0);
+    } catch (err) {
+      console.error('[MeetingNotes] meeting_create_text_note failed:', err);
+    }
+  }
+
+  function scheduleTextNoteSave() {
+    if (!ipcRenderer) return;
+    clearTimeout(state.textNoteSaveTimer);
+    state.textNoteSaveTimer = setTimeout(flushTextNoteSaveNow, 600);
+  }
+
+  function flushTextNoteSaveNow() {
+    clearTimeout(state.textNoteSaveTimer);
+    state.textNoteSaveTimer = null;
+
+    if (!ipcRenderer) return;
+    if (!state.selectedSessionId) return;
+
+    var session = getSelectedSession();
+    if (!isTextNoteSession(session)) return;
+
+    var editor = $('notesTextNoteEditor');
+    if (!editor) return;
+    if (state.textNoteSuppressSave) return;
+
+    var text = (editor.value || '');
+    if (text === state.textNoteLastSavedText) return;
+
+    // Fire-and-forget; keep typing latency low.
+    ipcRenderer
+      .invoke('meeting_update_text_note', { sessionId: state.selectedSessionId, content: text })
+      .then(function () { state.textNoteLastSavedText = text; })
+      .catch(function (err) {
+        console.error('[MeetingNotes] meeting_update_text_note failed:', err);
+      });
   }
 
   async function generateSummaryForSelectedSession() {
@@ -3811,6 +3942,32 @@
       dictFlatten.addEventListener('input', onDictFlattenChanged);
     }
 
+    var dictCleanup = $('notesDictationCleanupToggle');
+    if (dictCleanup) {
+      var onDictCleanupChanged = function () {
+        state.dictationCleanupEnabled = !!dictCleanup.checked;
+        saveSettingsPatch({ notesDictationCleanupEnabled: state.dictationCleanupEnabled }).then(function (next) {
+          syncDictationSettingsUI();
+          if (!next) refreshDictationStatus();
+        });
+      };
+      dictCleanup.addEventListener('change', onDictCleanupChanged);
+      dictCleanup.addEventListener('input', onDictCleanupChanged);
+    }
+
+    var dictCleanupLike = $('notesDictationCleanupLikeToggle');
+    if (dictCleanupLike) {
+      var onDictCleanupLikeChanged = function () {
+        state.dictationCleanupRemoveLike = !!dictCleanupLike.checked;
+        saveSettingsPatch({ notesDictationCleanupRemoveLike: state.dictationCleanupRemoveLike }).then(function (next) {
+          syncDictationSettingsUI();
+          if (!next) refreshDictationStatus();
+        });
+      };
+      dictCleanupLike.addEventListener('change', onDictCleanupLikeChanged);
+      dictCleanupLike.addEventListener('input', onDictCleanupLikeChanged);
+    }
+
     var dictRefresh = $('notesDictationRefreshBtn');
     if (dictRefresh) dictRefresh.addEventListener('click', refreshDictationStatus);
 
@@ -3911,6 +4068,21 @@
       });
     });
 
+    // New text note (scratch pad)
+    var newNoteBtn = $('notesNewTextNoteBtn');
+    if (newNoteBtn) newNoteBtn.addEventListener('click', createTextNote);
+
+    var textEditor = $('notesTextNoteEditor');
+    if (textEditor) {
+      textEditor.addEventListener('input', function () {
+        if (state.textNoteSuppressSave) return;
+        var session = getSelectedSession();
+        if (!isTextNoteSession(session)) return;
+        scheduleTextNoteSave();
+      });
+      textEditor.addEventListener('blur', flushTextNoteSaveNow);
+    }
+
     // Search
     var searchInput = $('notesSearchInput');
     var searchTimeout = null;
@@ -3963,7 +4135,7 @@
       newChatBtn.addEventListener('click', function () {
         var sessionId = getCurrentChatThreadsSessionId();
         if (!sessionId) {
-          appendChatMessage('assistant', 'Select a meeting first, then start a chat.');
+          appendChatMessage('assistant', 'Select a note first, then start a chat.');
           return;
         }
         createNewChatThread(sessionId, { title: 'New chat', agentId: state.chatAgentId });

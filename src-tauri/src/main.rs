@@ -652,6 +652,14 @@ struct Settings {
     notes_dictation_restore_clipboard: Option<bool>,
     #[serde(rename = "notesDictationFlattenNewlinesInSingleLine")]
     notes_dictation_flatten_newlines_in_single_line: Option<bool>,
+    /// Optional text cleanup on the final dictation transcript.
+    /// This is intentionally separate from transcription engine choice so users can keep it fast/local.
+    #[serde(rename = "notesDictationCleanupEnabled")]
+    notes_dictation_cleanup_enabled: Option<bool>,
+    /// Aggressive cleanup: removes standalone "like" as a filler word.
+    /// This can change meaning, so keep it opt-in.
+    #[serde(rename = "notesDictationCleanupRemoveLike")]
+    notes_dictation_cleanup_remove_like: Option<bool>,
     // Task creation settings (sticky between restarts)
     #[serde(rename = "taskProjectPath")]
     pub(crate) task_project_path: Option<String>,
@@ -13362,6 +13370,8 @@ fn main() {
             meeting_notes::meeting_resume,
             meeting_notes::meeting_stop,
             meeting_notes::meeting_update_title,
+            meeting_notes::meeting_create_text_note,
+            meeting_notes::meeting_update_text_note,
             meeting_notes::meeting_state,
             meeting_notes::meeting_list_sessions,
             meeting_notes::meeting_get_transcript,

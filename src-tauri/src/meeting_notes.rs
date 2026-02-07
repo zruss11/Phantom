@@ -726,6 +726,95 @@ pub async fn meeting_list_sessions(
         .collect())
 }
 
+#[tauri::command]
+pub async fn meeting_create_text_note(
+    state: State<'_, AppState>,
+    title: Option<String>,
+    content: Option<String>,
+) -> Result<MeetingSessionDto, String> {
+    let normalized_title = title
+        .as_deref()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_string());
+
+    let session_id = format!(
+        "note-{}-{}",
+        chrono::Utc::now().timestamp_millis(),
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
+
+    let now = chrono::Utc::now().timestamp();
+    let record = db::MeetingSessionRecord {
+        id: session_id.clone(),
+        title: normalized_title.clone(),
+        status: "text".to_string(),
+        capture_mic: false,
+        capture_system: false,
+        started_at: None,
+        stopped_at: None,
+        duration_ms: 0,
+        created_at: now,
+        updated_at: now,
+    };
+
+    let normalized_content = content
+        .as_deref()
+        .map(|t| t.to_string())
+        .unwrap_or_default();
+
+    let db_guard = state.db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    db::insert_meeting_session(&db_guard, &record).map_err(|e| format!("DB error: {}", e))?;
+
+    if !normalized_content.trim().is_empty() {
+        db::save_meeting_segment(&db_guard, &session_id, &normalized_content, 0, 0, None)
+            .map_err(|e| format!("DB error: {}", e))?;
+        db::touch_meeting_session_updated_at(&db_guard, &session_id)
+            .map_err(|e| format!("DB error: {}", e))?;
+    }
+
+    Ok(MeetingSessionDto {
+        id: record.id,
+        title: record.title,
+        status: record.status,
+        capture_mic: record.capture_mic,
+        capture_system: record.capture_system,
+        started_at: record.started_at,
+        stopped_at: record.stopped_at,
+        duration: 0,
+        created_at: record.created_at * 1000,
+        updated_at: record.updated_at * 1000,
+    })
+}
+
+#[tauri::command]
+pub async fn meeting_update_text_note(
+    state: State<'_, AppState>,
+    session_id: String,
+    content: Option<String>,
+) -> Result<(), String> {
+    let normalized_content = content.unwrap_or_default();
+
+    let db_guard = state.db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let sess = db::get_meeting_session(&db_guard, &session_id)
+        .map_err(|e| format!("DB error: {}", e))?
+        .ok_or_else(|| "Session not found".to_string())?;
+    if sess.status != "text" {
+        return Err("Not a text note session".to_string());
+    }
+
+    db::delete_meeting_segments_for_session(&db_guard, &session_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+    if !normalized_content.trim().is_empty() {
+        db::save_meeting_segment(&db_guard, &session_id, &normalized_content, 0, 0, None)
+            .map_err(|e| format!("DB error: {}", e))?;
+    }
+    db::touch_meeting_session_updated_at(&db_guard, &session_id)
+        .map_err(|e| format!("DB error: {}", e))?;
+
+    Ok(())
+}
+
 #[derive(Serialize)]
 pub(crate) struct MeetingSegmentDto {
     id: i64,
@@ -775,10 +864,49 @@ pub async fn meeting_export_transcript(
     session_id: String,
     format: String,
 ) -> Result<String, String> {
-    let segments = {
+    let (session, segments) = {
         let db_guard = state.db.lock().map_err(|e| format!("Lock error: {}", e))?;
-        db::get_meeting_segments(&db_guard, &session_id).map_err(|e| format!("DB error: {}", e))?
+        let sess = db::get_meeting_session(&db_guard, &session_id)
+            .map_err(|e| format!("DB error: {}", e))?
+            .ok_or_else(|| "Session not found".to_string())?;
+        let segs = db::get_meeting_segments(&db_guard, &session_id)
+            .map_err(|e| format!("DB error: {}", e))?;
+        (sess, segs)
     };
+
+    if session.status == "text" {
+        let content = segments
+            .iter()
+            .map(|s| s.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return match format.as_str() {
+            "txt" => Ok(content),
+            "md" => {
+                let heading = session
+                    .title
+                    .clone()
+                    .filter(|t| !t.trim().is_empty())
+                    .unwrap_or_else(|| "Note".to_string());
+                let mut out = format!("# {}\n\n", heading);
+                if !content.trim().is_empty() {
+                    out.push_str(&content);
+                    out.push('\n');
+                }
+                Ok(out)
+            }
+            "json" => serde_json::to_string_pretty(&serde_json::json!({
+                "id": session.id,
+                "title": session.title,
+                "status": session.status,
+                "content": content,
+                "created_at": session.created_at,
+                "updated_at": session.updated_at,
+            }))
+            .map_err(|e| format!("JSON error: {}", e)),
+            _ => Err(format!("Unsupported format: {}", format)),
+        };
+    }
 
     match format.as_str() {
         "txt" => Ok(segments

@@ -1747,6 +1747,31 @@ pub fn list_meeting_sessions(conn: &Connection) -> Result<Vec<MeetingSessionReco
     rows.collect()
 }
 
+/// Fetch a single meeting session record by id.
+pub fn get_meeting_session(conn: &Connection, id: &str) -> Result<Option<MeetingSessionRecord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, title, status, capture_mic, capture_system, started_at, stopped_at, duration_ms, created_at, updated_at
+         FROM meeting_sessions WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query(params![id])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(MeetingSessionRecord {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            status: row.get(2)?,
+            capture_mic: row.get::<_, i64>(3)? != 0,
+            capture_system: row.get::<_, i64>(4)? != 0,
+            started_at: row.get(5)?,
+            stopped_at: row.get(6)?,
+            duration_ms: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Get all segments for a meeting session ordered by start_ms ASC
 pub fn get_meeting_segments(
     conn: &Connection,
@@ -1770,6 +1795,15 @@ pub fn get_meeting_segments(
     rows.collect()
 }
 
+/// Delete all segments for a meeting session.
+pub fn delete_meeting_segments_for_session(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM meeting_segments WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
 /// Save a transcription segment and return the inserted row ID
 pub fn save_meeting_segment(
     conn: &Connection,
@@ -1791,6 +1825,16 @@ pub fn save_meeting_segment(
 /// Delete a meeting session (segments auto-deleted via CASCADE)
 pub fn delete_meeting_session(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM meeting_sessions WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// Update a session's updated_at field to "now".
+pub fn touch_meeting_session_updated_at(conn: &Connection, id: &str) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE meeting_sessions SET updated_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )?;
     Ok(())
 }
 
@@ -1981,6 +2025,52 @@ mod tests {
             .expect("automation exists");
         assert_eq!(updated.last_error.as_deref(), Some("boom"));
         assert_eq!(updated.next_run_at, automation.next_run_at);
+
+        // Best-effort cleanup.
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite-shm"));
+    }
+
+    #[test]
+    fn test_text_note_segments_roundtrip() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let mut path = std::env::temp_dir();
+        path.push(format!("phantom-harness-text-note-{suffix}.sqlite"));
+
+        let conn = init_db(&path).expect("init db");
+        let now = chrono::Utc::now().timestamp();
+
+        let session = MeetingSessionRecord {
+            id: "note-test-1".to_string(),
+            title: Some("Scratch".to_string()),
+            status: "text".to_string(),
+            capture_mic: false,
+            capture_system: false,
+            started_at: None,
+            stopped_at: None,
+            duration_ms: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        insert_meeting_session(&conn, &session).expect("insert meeting session");
+
+        // Write text note content as a single segment.
+        delete_meeting_segments_for_session(&conn, &session.id).expect("clear segments");
+        save_meeting_segment(&conn, &session.id, "hello\nworld", 0, 0, None).expect("save segment");
+        touch_meeting_session_updated_at(&conn, &session.id).expect("touch updated_at");
+
+        let fetched = get_meeting_session(&conn, &session.id)
+            .expect("get session")
+            .expect("session exists");
+        assert_eq!(fetched.status, "text");
+
+        let segs = get_meeting_segments(&conn, &session.id).expect("get segments");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].text, "hello\nworld");
 
         // Best-effort cleanup.
         let _ = std::fs::remove_file(&path);

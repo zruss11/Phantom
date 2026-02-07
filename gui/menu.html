@@ -1426,9 +1426,14 @@
             </div>
 
             <nav class="notes-left-nav">
-              <a class="notes-nav-item active" data-filter="mine">
-                <i class="fal fa-sticky-note"></i> My notes
-              </a>
+              <div class="notes-nav-row">
+                <a class="notes-nav-item active" data-filter="mine">
+                  <i class="fal fa-sticky-note"></i> My notes
+                </a>
+                <button class="notes-nav-action" id="notesNewTextNoteBtn" title="New text note" type="button">
+                  <i class="fal fa-plus" aria-hidden="true"></i>
+                </button>
+              </div>
             </nav>
 
             <div class="notes-left-divider"></div>
@@ -1565,6 +1570,13 @@
                   </div>
                   <div class="notes-summary-body" id="notesSummaryContent"></div>
                 </div>
+                <textarea
+                  id="notesTextNoteEditor"
+                  class="notes-textnote-editor"
+                  placeholder="Write notes here..."
+                  style="display:none;"
+                  spellcheck="true"
+                ></textarea>
                 <div id="notesTranscript" class="notes-transcript-body">
                   <div class="notes-transcript-empty">
                     <i class="fal fa-microphone-alt"></i>
@@ -1824,6 +1836,18 @@
                     <label class="notes-dictation-check">
                       <input type="checkbox" id="notesDictationFlattenToggle">
                       <span>Flatten newlines when pasting into single-line fields</span>
+                    </label>
+                  </div>
+
+                  <div class="notes-dictation-card notes-dictation-card-cleanup">
+                    <div class="notes-dictation-card-title">Cleanup</div>
+                    <label class="notes-dictation-check">
+                      <input type="checkbox" id="notesDictationCleanupToggle">
+                      <span>Remove filler words (um, uh, erm, etc.)</span>
+                    </label>
+                    <label class="notes-dictation-check">
+                      <input type="checkbox" id="notesDictationCleanupLikeToggle">
+                      <span>Also remove filler "like" (may remove legitimate uses)</span>
                     </label>
                   </div>
 

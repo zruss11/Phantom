@@ -390,6 +390,71 @@ fn transcribe_parakeet(
     Ok(result.text.trim().to_string())
 }
 
+fn cleanup_dictation_transcript(settings: &Settings, transcript: String) -> String {
+    if !settings.notes_dictation_cleanup_enabled.unwrap_or(false) {
+        return transcript;
+    }
+    let remove_like = settings.notes_dictation_cleanup_remove_like.unwrap_or(false);
+    cleanup_fillers(&transcript, remove_like)
+}
+
+fn cleanup_fillers(input: &str, remove_like: bool) -> String {
+    fn core_word_lower(token: &str) -> String {
+        token
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_ascii_lowercase()
+    }
+
+    fn is_repeated_run(s: &str, prefix: &str, repeat: char) -> bool {
+        if !s.starts_with(prefix) {
+            return false;
+        }
+        s[prefix.len()..].chars().all(|c| c == repeat)
+    }
+
+    fn is_basic_filler(core: &str) -> bool {
+        matches!(core, "um" | "uh" | "erm" | "er" | "ah" | "hmm" | "mm")
+            || is_repeated_run(core, "um", 'm')
+            || is_repeated_run(core, "uh", 'h')
+            || is_repeated_run(core, "er", 'r')
+            || is_repeated_run(core, "ah", 'h')
+            || is_repeated_run(core, "hm", 'm')
+    }
+
+    let mut out_tokens: Vec<&str> = Vec::new();
+    for tok in input.split_whitespace() {
+        let core = core_word_lower(tok);
+        if core.is_empty() {
+            continue;
+        }
+        if is_basic_filler(&core) {
+            continue;
+        }
+        if remove_like && core == "like" {
+            continue;
+        }
+        out_tokens.push(tok);
+    }
+
+    let mut out = out_tokens.join(" ");
+
+    // Small punctuation/paren spacing fixes after token-join.
+    for (from, to) in [
+        (" ,", ","),
+        (" .", "."),
+        (" !", "!"),
+        (" ?", "?"),
+        (" ;", ";"),
+        (" :", ":"),
+        (" )", ")"),
+        ("( ", "("),
+    ] {
+        out = out.replace(from, to);
+    }
+
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DictationEngine {
     Local,
@@ -798,6 +863,8 @@ impl DictationService {
                     }
                 };
 
+                let transcript = cleanup_dictation_transcript(&settings, transcript);
+
                 let enabled = settings.notes_dictation_enabled.unwrap_or(false);
                 let outcome = if !enabled {
                     #[cfg(target_os = "macos")]
@@ -918,6 +985,29 @@ pub fn dictation_request_accessibility() -> Result<bool, String> {
 
 // =============================================================================
 // App-level helpers
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_fillers;
+
+    #[test]
+    fn cleanup_removes_basic_fillers() {
+        assert_eq!(
+            cleanup_fillers("um I think uh this is fine", false),
+            "I think this is fine"
+        );
+        assert_eq!(cleanup_fillers("Well, um, yeah.", false), "Well, yeah.");
+        assert_eq!(cleanup_fillers("(uh) okay", false), "okay");
+        assert_eq!(cleanup_fillers("ummm okay", false), "okay");
+        assert_eq!(cleanup_fillers("uhhh okay", false), "okay");
+    }
+
+    #[test]
+    fn cleanup_like_is_opt_in() {
+        assert_eq!(cleanup_fillers("It was like really good", false), "It was like really good");
+        assert_eq!(cleanup_fillers("It was like really good", true), "It was really good");
+    }
+}
 // =============================================================================
 
 /// Global shortcut hook from the plugin handler.
