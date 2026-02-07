@@ -24,6 +24,11 @@
     // New for 3-panel layout
     currentView: 'default',
     searchQuery: '',
+    // Notes sidebar semantic search (best-effort; falls back to title substring match).
+    semanticSearchQuery: '',
+    semanticSearchOrder: null, // Array of session IDs in rank order
+    semanticSearchReqId: 0,
+    semanticSearchTimer: null,
     activeFilter: 'mine',
     folders: [],
     selectedFolderId: null,
@@ -1746,11 +1751,16 @@
     container.innerHTML = '';
 
     var filtered = filterSessionsList(sessions);
+    var hasQuery = !!((state.searchQuery || '').toString().trim());
 
     if (!filtered.length) {
       var empty = document.createElement('div');
       empty.className = 'notes-empty-sessions';
-      empty.innerHTML = '<i class="fal fa-sticky-note"></i><p>No notes yet</p><div class="notes-empty-sub">Click + to create a text note, or start recording.</div>';
+      if (hasQuery) {
+        empty.innerHTML = '<i class="fal fa-search"></i><p>No results</p><div class="notes-empty-sub">Try a different search.</div>';
+      } else {
+        empty.innerHTML = '<i class="fal fa-sticky-note"></i><p>No notes yet</p><div class="notes-empty-sub">Click + to create a text note, or start recording.</div>';
+      }
       container.appendChild(empty);
       return;
     }
@@ -2020,28 +2030,102 @@
 
   // ─── Search & Folder Filtering ───
   function filterSessionsList(sessions) {
-    var query = state.searchQuery.toLowerCase();
+    var qRaw = (state.searchQuery || '').toString();
+    var qTrim = qRaw.trim();
+    var query = qTrim.toLowerCase();
     var folderId = state.selectedFolderId;
 
-    return sessions.filter(function (s) {
-      // Search filter
-      if (query) {
+    var list = sessions;
+
+    // Search filter (semantic-first when available)
+    if (query && state.semanticSearchOrder && state.semanticSearchQuery === qTrim) {
+      var byId = {};
+      list.forEach(function (s) { byId[s.id] = s; });
+      var ordered = [];
+      state.semanticSearchOrder.forEach(function (id) {
+        var s = byId[id];
+        if (s) ordered.push(s);
+      });
+      list = ordered;
+    } else if (query) {
+      list = list.filter(function (s) {
         var title = (s.title || '').toLowerCase();
         if (title.indexOf(query) === -1) return false;
-      }
-      // Folder filter
-      if (folderId) {
+        return true;
+      });
+    }
+
+    // Folder filter
+    if (folderId) {
+      list = list.filter(function (s) {
         var mapped = state.sessionFolderMap[s.id];
         if (mapped !== folderId) return false;
+        return true;
+      });
+    }
+
+    return list;
+  }
+
+  function clearSemanticSearch() {
+    state.semanticSearchQuery = '';
+    state.semanticSearchOrder = null;
+  }
+
+  function scheduleSemanticNotesSearch() {
+    if (state.semanticSearchTimer) {
+      clearTimeout(state.semanticSearchTimer);
+      state.semanticSearchTimer = null;
+    }
+
+    var q = (state.searchQuery || '').toString().trim();
+    if (!q) {
+      clearSemanticSearch();
+      return;
+    }
+
+    // Debounce to avoid hammering the backend while the user types.
+    state.semanticSearchTimer = setTimeout(function () {
+      runSemanticNotesSearch(q);
+    }, 180);
+  }
+
+  async function runSemanticNotesSearch(query) {
+    if (!ipcRenderer) return;
+
+    var reqId = ++state.semanticSearchReqId;
+    try {
+      var results = await ipcRenderer.invoke('semantic_search', {
+        req: { query: query, types: ['note'], limit: 80, exact: false }
+      });
+      if (reqId !== state.semanticSearchReqId) return;
+
+      var order = [];
+      if (Array.isArray(results)) {
+        results.forEach(function (r) {
+          if (!r) return;
+          if (r.entityType !== 'note') return;
+          if (!r.entityId) return;
+          order.push(r.entityId);
+        });
       }
-      return true;
-    });
+
+      state.semanticSearchQuery = query;
+      state.semanticSearchOrder = order;
+      renderDateGroupedSessions(state.sessions);
+    } catch (err) {
+      if (reqId !== state.semanticSearchReqId) return;
+      // Fall back to local title filtering when semantic search isn't available.
+      clearSemanticSearch();
+      renderDateGroupedSessions(state.sessions);
+    }
   }
 
   function onSearchInput() {
     var input = $('notesSearchInput');
     state.searchQuery = input ? input.value : '';
     renderDateGroupedSessions(state.sessions);
+    scheduleSemanticNotesSearch();
   }
 
   // ─── Cmd+K Search Palette ───
@@ -4116,6 +4200,8 @@
     var paletteOverlay = $('notesSearchPalette');
     if (paletteOverlay) {
       paletteOverlay.addEventListener('click', function (e) {
+        // Global Cmd+K palette uses the same DOM ids; only act when the notes-local palette is open.
+        if (!state.paletteOpen) return;
         if (e.target === paletteOverlay) closeSearchPalette();
       });
     }
@@ -4124,6 +4210,8 @@
     var paletteTimeout = null;
     if (paletteInput) {
       paletteInput.addEventListener('input', function () {
+        // Global Cmd+K palette owns this input; ignore unless the notes-local palette is open.
+        if (!state.paletteOpen) return;
         clearTimeout(paletteTimeout);
         paletteTimeout = setTimeout(function () {
           state.paletteQuery = paletteInput.value || '';

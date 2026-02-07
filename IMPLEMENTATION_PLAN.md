@@ -14,7 +14,7 @@
 - [x] Add SQLite schema for `semantic_chunks` (vector storage) (added table + indexes in `src-tauri/src/db.rs`)
 - [x] Add FTS virtual table `semantic_fts` (best-effort; do not fail app startup if FTS5 unavailable) (best-effort create in `src-tauri/src/db.rs`)
 - [x] Add Rust module for semantic search (types + helpers) (new `src-tauri/src/semantic_search.rs`)
-- [ ] Add Tauri commands:
+- [x] Add Tauri commands:
   - [x] `semantic_index_status` (added `semantic_search::semantic_index_status`)
   - [x] `semantic_search({ query, types, limit, exact })` (keyword-only across tasks/messages + meetings/segments for now)
   - [x] `semantic_reindex_all` (rebuilds `semantic_fts` from `semantic_chunks` if available)
@@ -38,10 +38,10 @@
 - [x] Store embeddings as packed f32 BLOBs (added `pack_f32_embedding`/`unpack_f32_embedding` + tests in `src-tauri/src/semantic_search.rs`)
 
 ### M5 — Incremental indexing
-- [ ] Define chunking for:
+- [x] Define chunking for:
   - [x] tasks: title + `messages` transcript chunks (implemented in `src-tauri/src/semantic_indexer.rs`)
   - [x] notes/meetings: title + transcript/text chunks (implemented in `src-tauri/src/semantic_indexer.rs`)
-- [ ] Index triggers (debounced):
+- [x] Index triggers (debounced):
   - [x] task title change (schedules `semantic_indexer::schedule_index_entity` after title summary write)
   - [x] message append (schedules `semantic_indexer::schedule_index_entity` after user + assistant message persistence)
   - [x] meeting segment append / meeting stop (segment writes schedule 5s debounce; stop schedules immediate)
@@ -50,7 +50,7 @@
 ### M6 — Hybrid rerank + UX polish
 - [x] Implement hybrid search: candidates from keyword → rerank with vectors (implemented vector rerank in `src-tauri/src/semantic_search.rs` when local model is available)
 - [x] Add “Indexing…” indicator and “Exact” toggle (Cmd+K footer shows Exact + best-effort indexing status via `semantic_index_status.pendingJobs`)
-- [ ] Update Notes search bar to semantic-first (calls `semantic_search`)
+- [x] Update Notes search bar to semantic-first (calls `semantic_search`) (notes sidebar search uses semantic-first with title-substring fallback)
 
 ## Completion
 When everything above is done and working end-to-end, add a line:
@@ -58,3 +58,5 @@ When everything above is done and working end-to-end, add a line:
 STATUS: <COMPLETE>
 
 (Replace `<COMPLETE>` with `COMPLETE`.)
+
+STATUS: COMPLETE
