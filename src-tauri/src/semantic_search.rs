@@ -8,6 +8,25 @@ use crate::utils::truncate_str;
 pub const ENTITY_TYPE_TASK: &str = "task";
 pub const ENTITY_TYPE_NOTE: &str = "note";
 
+pub fn pack_f32_embedding(embedding: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(embedding.len().saturating_mul(4));
+    for &v in embedding {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out
+}
+
+pub fn unpack_f32_embedding(blob: &[u8]) -> Result<Vec<f32>, String> {
+    if blob.len() % 4 != 0 {
+        return Err("Invalid embedding blob length (must be multiple of 4)".to_string());
+    }
+    let mut out = Vec::with_capacity(blob.len() / 4);
+    for chunk in blob.chunks_exact(4) {
+        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(out)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SemanticIndexStatus {
@@ -269,6 +288,54 @@ pub fn semantic_chunks_count_by_type(conn: &Connection) -> Result<HashMap<String
         out.insert(entity_type, count);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pack_unpack_f32_embedding_roundtrip() {
+        let v = vec![0.0_f32, 1.25, -2.5, 12345.0];
+        let blob = pack_f32_embedding(&v);
+        let back = unpack_f32_embedding(&blob).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn test_unpack_f32_embedding_rejects_bad_length() {
+        let err = unpack_f32_embedding(&[1, 2, 3]).unwrap_err();
+        assert!(err.contains("multiple of 4"));
+    }
+
+    #[test]
+    fn test_embedding_blob_in_sqlite_roundtrip() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE semantic_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                embedding BLOB NOT NULL
+             )",
+            [],
+        )
+        .unwrap();
+
+        let embedding = vec![0.1_f32, 0.2, 0.3, 0.4];
+        let blob = pack_f32_embedding(&embedding);
+        conn.execute(
+            "INSERT INTO semantic_chunks (embedding) VALUES (?1)",
+            [&blob],
+        )
+        .unwrap();
+
+        let read: Vec<u8> = conn
+            .query_row("SELECT embedding FROM semantic_chunks LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let back = unpack_f32_embedding(&read).unwrap();
+        assert_eq!(back, embedding);
+    }
 }
 
 pub fn semantic_chunks_last_updated_at(conn: &Connection) -> Result<Option<i64>> {

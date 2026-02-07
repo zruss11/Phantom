@@ -35,7 +35,7 @@
 - [x] Pick an embedding model (small MiniLM/BGE) and define model assets layout (scaffolded in `src-tauri/src/embedding_model.rs`)
 - [x] Implement download-on-first-use with progress + cancel (Tauri commands + `EmbeddingModelStatus`/`EmbeddingModelProgress` events in `src-tauri/src/embedding_model.rs`)
 - [x] Implement embedding generation (tokenizer + ORT session) (added `src-tauri/src/embedding_inference.rs` with WordPiece tokenizer + ORT mean-pooling; exposed via `embedding_generate`)
-- [ ] Store embeddings as packed f32 BLOBs
+- [x] Store embeddings as packed f32 BLOBs (added `pack_f32_embedding`/`unpack_f32_embedding` + tests in `src-tauri/src/semantic_search.rs`)
 
 ### M5 — Incremental indexing
 - [ ] Define chunking for:
