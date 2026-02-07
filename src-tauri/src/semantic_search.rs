@@ -1,6 +1,6 @@
-use rusqlite::{Connection, Result};
+use rusqlite::{Connection, OptionalExtension, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 use crate::utils::truncate_str;
@@ -77,9 +77,23 @@ pub fn semantic_search(
     let include_tasks = types.is_empty() || types.iter().any(|t| t == ENTITY_TYPE_TASK);
     let include_notes = types.is_empty() || types.iter().any(|t| t == ENTITY_TYPE_NOTE);
 
-    let like = like_pattern(query);
-
     let conn = state.db.lock().map_err(|e| e.to_string())?;
+    if semantic_fts_available(&conn) {
+        if semantic_fts_count(&conn).unwrap_or(0) == 0 {
+            // Best-effort: populate the FTS table from existing content the first time it's used.
+            let _ = rebuild_semantic_fts(&conn);
+        }
+        if let Ok(results) =
+            semantic_search_via_fts(&conn, query, include_tasks, include_notes, limit)
+        {
+            if !results.is_empty() {
+                return Ok(results);
+            }
+        }
+    }
+
+    // Fallback when FTS5 isn't available (or MATCH failed): substring matching over titles + bodies.
+    let like = like_pattern(query);
     let mut out = Vec::new();
 
     if include_tasks {
@@ -191,17 +205,7 @@ pub fn semantic_reindex_all(state: State<'_, crate::AppState>) -> Result<(), Str
     if !semantic_fts_available(&conn) {
         return Ok(());
     }
-
-    conn.execute("DELETE FROM semantic_fts", [])
-        .map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO semantic_fts(rowid, text, entity_type, entity_id, field, chunk_index)
-         SELECT id, text, entity_type, entity_id, field, chunk_index
-         FROM semantic_chunks",
-        [],
-    )
-    .map_err(|e| e.to_string())?;
-
+    rebuild_semantic_fts(&conn).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -243,6 +247,10 @@ pub fn semantic_fts_available(conn: &Connection) -> bool {
     sqlite_table_exists(conn, "semantic_fts").unwrap_or(false)
 }
 
+fn semantic_fts_count(conn: &Connection) -> Result<i64> {
+    conn.query_row("SELECT COUNT(1) FROM semantic_fts", [], |row| row.get(0))
+}
+
 pub fn semantic_chunks_count(conn: &Connection) -> Result<i64> {
     conn.query_row("SELECT COUNT(1) FROM semantic_chunks", [], |row| row.get(0))
 }
@@ -267,6 +275,154 @@ pub fn semantic_chunks_last_updated_at(conn: &Connection) -> Result<Option<i64>>
     conn.query_row("SELECT MAX(updated_at) FROM semantic_chunks", [], |row| {
         row.get(0)
     })
+}
+
+fn rebuild_semantic_fts(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "DELETE FROM semantic_fts;
+
+         INSERT INTO semantic_fts(text, entity_type, entity_id, field, chunk_index)
+         SELECT
+            COALESCE(NULLIF(title_summary, ''), NULLIF(prompt, '')),
+            'task',
+            id,
+            'title',
+            0
+         FROM tasks
+         WHERE COALESCE(NULLIF(title_summary, ''), NULLIF(prompt, '')) IS NOT NULL;
+
+         INSERT INTO semantic_fts(text, entity_type, entity_id, field, chunk_index)
+         SELECT
+            content,
+            'task',
+            task_id,
+            'body',
+            id
+         FROM messages
+         WHERE content IS NOT NULL AND content <> '';
+
+         INSERT INTO semantic_fts(text, entity_type, entity_id, field, chunk_index)
+         SELECT
+            title,
+            'note',
+            id,
+            'title',
+            0
+         FROM meeting_sessions
+         WHERE title IS NOT NULL AND title <> '';
+
+         INSERT INTO semantic_fts(text, entity_type, entity_id, field, chunk_index)
+         SELECT
+            text,
+            'note',
+            session_id,
+            'body',
+            id
+         FROM meeting_segments
+         WHERE text <> '';
+
+         INSERT INTO semantic_fts(semantic_fts) VALUES('optimize');",
+    )?;
+
+    Ok(())
+}
+
+fn semantic_search_via_fts(
+    conn: &Connection,
+    query: &str,
+    include_tasks: bool,
+    include_notes: bool,
+    limit: i64,
+) -> Result<Vec<SemanticSearchResult>> {
+    let mut out = Vec::new();
+
+    if include_tasks {
+        let mut stmt = conn.prepare_cached(
+            "SELECT entity_id, text, bm25(semantic_fts)
+             FROM semantic_fts
+             WHERE semantic_fts MATCH ?1 AND entity_type = 'task'
+             ORDER BY bm25(semantic_fts)
+             LIMIT ?2",
+        )?;
+        let mut rows = stmt.query((query, limit * 5))?;
+        let mut seen = HashSet::new();
+        while let Some(row) = rows.next()? {
+            let entity_id: String = row.get(0)?;
+            if !seen.insert(entity_id.clone()) {
+                continue;
+            }
+            let text: String = row.get(1)?;
+            let bm25: f64 = row.get(2)?;
+
+            let (title_summary, prompt): (Option<String>, Option<String>) = conn
+                .query_row(
+                    "SELECT title_summary, prompt FROM tasks WHERE id = ?1",
+                    [&entity_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?
+                .unwrap_or((None, None));
+            let title = title_summary.or_else(|| prompt.as_ref().map(|p| truncate_str(p, 80)));
+
+            out.push(SemanticSearchResult {
+                entity_type: ENTITY_TYPE_TASK.to_string(),
+                entity_id,
+                title,
+                snippet: Some(truncate_str(&text, 200)),
+                score: -bm25,
+            });
+
+            if out.len() as i64 >= limit {
+                break;
+            }
+        }
+    }
+
+    if out.len() as i64 >= limit {
+        return Ok(out);
+    }
+
+    if include_notes {
+        let mut stmt = conn.prepare_cached(
+            "SELECT entity_id, text, bm25(semantic_fts)
+             FROM semantic_fts
+             WHERE semantic_fts MATCH ?1 AND entity_type = 'note'
+             ORDER BY bm25(semantic_fts)
+             LIMIT ?2",
+        )?;
+        let mut rows = stmt.query((query, limit * 5))?;
+        let mut seen = HashSet::new();
+        while let Some(row) = rows.next()? {
+            let entity_id: String = row.get(0)?;
+            if !seen.insert(entity_id.clone()) {
+                continue;
+            }
+            let text: String = row.get(1)?;
+            let bm25: f64 = row.get(2)?;
+
+            let title: Option<String> = conn
+                .query_row(
+                    "SELECT title FROM meeting_sessions WHERE id = ?1",
+                    [&entity_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+
+            out.push(SemanticSearchResult {
+                entity_type: ENTITY_TYPE_NOTE.to_string(),
+                entity_id,
+                title: title.or_else(|| Some("Untitled note".to_string())),
+                snippet: Some(truncate_str(&text, 200)),
+                score: -bm25,
+            });
+
+            if out.len() as i64 >= limit {
+                break;
+            }
+        }
+    }
+
+    Ok(out)
 }
 
 fn like_pattern(query: &str) -> String {

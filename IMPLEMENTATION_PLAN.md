@@ -27,9 +27,9 @@
 - [x] Selecting result navigates + opens the item (tasks open chat, notes open transcript)
 
 ### M3 — Keyword search (MVP fallback)
-- [ ] Implement keyword-only search via FTS if available
-- [ ] If FTS unavailable, fallback to substring match on titles
-- [ ] Ensure global palette works even before embeddings are downloaded
+- [x] Implement keyword-only search via FTS if available (populate `semantic_fts` from tasks/messages + notes/segments on demand)
+- [x] If FTS unavailable, fallback to substring match on titles (and body substring fallback)
+- [x] Ensure global palette works even before embeddings are downloaded (palette uses keyword `semantic_search`)
 
 ### M4 — Local embeddings (ONNX + tokenizer)
 - [ ] Pick an embedding model (small MiniLM/BGE) and define model assets layout
