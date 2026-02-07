@@ -36,6 +36,13 @@ pub struct SemanticSearchResult {
     pub score: f64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SemanticDeleteForEntityRequest {
+    pub entity_type: String,
+    pub entity_id: String,
+}
+
 #[tauri::command]
 pub fn semantic_index_status(
     state: State<'_, crate::AppState>,
@@ -176,6 +183,49 @@ pub fn semantic_search(
     }
 
     Ok(out)
+}
+
+#[tauri::command]
+pub fn semantic_reindex_all(state: State<'_, crate::AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    if !semantic_fts_available(&conn) {
+        return Ok(());
+    }
+
+    conn.execute("DELETE FROM semantic_fts", [])
+        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO semantic_fts(rowid, text, entity_type, entity_id, field, chunk_index)
+         SELECT id, text, entity_type, entity_id, field, chunk_index
+         FROM semantic_chunks",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub fn semantic_delete_for_entity(
+    state: State<'_, crate::AppState>,
+    req: SemanticDeleteForEntityRequest,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    conn.execute(
+        "DELETE FROM semantic_chunks WHERE entity_type = ?1 AND entity_id = ?2",
+        (&req.entity_type, &req.entity_id),
+    )
+    .map_err(|e| e.to_string())?;
+
+    if semantic_fts_available(&conn) {
+        let _ = conn.execute(
+            "DELETE FROM semantic_fts WHERE entity_type = ?1 AND entity_id = ?2",
+            (&req.entity_type, &req.entity_id),
+        );
+    }
+
+    Ok(())
 }
 
 pub fn sqlite_table_exists(conn: &Connection, table_name: &str) -> Result<bool> {

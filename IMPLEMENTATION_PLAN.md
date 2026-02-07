@@ -17,8 +17,8 @@
 - [ ] Add Tauri commands:
   - [x] `semantic_index_status` (added `semantic_search::semantic_index_status`)
   - [x] `semantic_search({ query, types, limit, exact })` (keyword-only across tasks/messages + meetings/segments for now)
-  - [ ] `semantic_reindex_all`
-  - [ ] `semantic_delete_for_entity`
+  - [x] `semantic_reindex_all` (rebuilds `semantic_fts` from `semantic_chunks` if available)
+  - [x] `semantic_delete_for_entity` (deletes from `semantic_chunks` + `semantic_fts`)
 
 ### M2 — Global Cmd+K palette (app-wide)
 - [ ] Move command palette overlay out of `notesPage` so it exists globally

@@ -13381,6 +13381,8 @@ fn main() {
             // Semantic search commands
             semantic_search::semantic_index_status,
             semantic_search::semantic_search,
+            semantic_search::semantic_reindex_all,
+            semantic_search::semantic_delete_for_entity,
             calendar::calendar_get_upcoming_events,
             calendar::calendar_list_calendars,
         ])
