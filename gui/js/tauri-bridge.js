@@ -698,6 +698,14 @@
         if (channel === 'getAttachmentBase64') {
           return tauriInvoke('get_attachment_base64', { relativePath: args[0] });
         }
+
+        // Generic passthrough for snake_case Tauri commands.
+        // Notes/meeting transcription uses direct command names like
+        // `check_whisper_model`, `download_whisper_model`, `meeting_start`, etc.
+        // Without this, the bridge logs "Unhandled invoke" and returns null.
+        if (typeof channel === 'string' && channel.indexOf('_') !== -1) {
+          return tauriInvoke(channel, args[0] || {});
+        }
       }
 
       return new Promise(function(resolve) {

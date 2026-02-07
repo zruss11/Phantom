@@ -637,6 +637,7 @@ async fn tool_create_task(arguments: Value, server_state: McpServerState) -> Res
         codex_mode: args.codex_mode.clone(),
         claude_runtime: None,
         multi_create: false,
+        suppress_notifications: false,
         attachments: Vec::new(),
     };
 

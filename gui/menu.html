@@ -18,7 +18,7 @@
     <script src="js/vendor/jquery_ui.js"></script>
     <link rel="stylesheet" href="fonts/fonts.css" />
 
-    <link rel="stylesheet" type="text/css" href="main.css" />
+    <link rel="stylesheet" type="text/css" href="main.css?v=1.0.3.5" />
     <link rel="stylesheet" href="vendor/bootstrap.min.css" />
     <link rel="stylesheet" href="fontawesome/fontawesome-all.css" />
     <script>
@@ -77,6 +77,11 @@
             <li class="nav-item">
               <a class="nav-link" data-page="commandPage">
                 <i class="fal fa-terminal"></i> Command
+              </a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" data-page="notesPage">
+                <i class="fal fa-microphone-alt"></i> Notes
               </a>
             </li>
           </ul>
@@ -1414,6 +1419,471 @@
         </div>
       </div>
 
+      <!-- Notes Page -->
+      <section id="notesPage" class="notes-page page container-fluid" hidden>
+        <div class="notes-layout">
+          <!-- ─── LEFT SIDEBAR ─── -->
+          <aside class="notes-left-sidebar">
+            <div class="notes-left-search">
+              <div class="notes-search-wrap">
+                <i class="fal fa-search notes-search-icon"></i>
+                <input type="text" id="notesSearchInput" class="notes-search-input" placeholder="Search notes...">
+                <kbd class="notes-search-kbd">⌘K</kbd>
+              </div>
+            </div>
+
+            <nav class="notes-left-nav">
+              <a class="notes-nav-item active" data-filter="mine">
+                <i class="fal fa-sticky-note"></i> My notes
+              </a>
+            </nav>
+
+            <div class="notes-left-divider"></div>
+
+            <div class="notes-left-section">
+              <div class="notes-section-header">
+                <span class="notes-section-label">Folders</span>
+                <button class="notes-add-folder-btn" id="notesAddFolderBtn" title="New folder">
+                  <i class="fal fa-plus"></i>
+                </button>
+              </div>
+              <div id="notesFolderList" class="notes-folder-list"></div>
+            </div>
+
+            <div class="notes-left-divider"></div>
+
+            <div class="notes-left-section">
+              <div class="notes-section-header">
+                <span class="notes-section-label">Teammates</span>
+              </div>
+              <div class="notes-teammates-placeholder">
+                <span class="notes-placeholder-text">Coming soon</span>
+              </div>
+            </div>
+
+            <div class="notes-left-footer">
+              <div class="notes-left-footer-actions">
+                <button class="notes-settings-btn notes-templates-btn" id="notesTemplatesBtn" title="Templates">
+                  <i class="fal fa-layer-group"></i>
+                </button>
+                <button class="notes-settings-btn" id="notesSettingsBtn" title="Settings">
+                  <i class="fal fa-cog"></i>
+                </button>
+              </div>
+            </div>
+          </aside>
+
+          <!-- ─── CENTER PANEL ─── -->
+          <main class="notes-center-panel">
+            <!-- Recording Toolbar (always visible) -->
+            <div class="notes-recording-toolbar">
+              <div class="notes-toolbar-left">
+                <input type="text" class="notes-toolbar-title" id="notesTitleInput" placeholder="Meeting title...">
+                <div class="notes-toolbar-capture">
+                  <label class="notes-toolbar-checkbox">
+                    <input type="checkbox" id="notesCaptureMic" checked aria-label="Capture microphone"> <i class="fal fa-microphone"></i>
+                  </label>
+                  <label class="notes-toolbar-checkbox">
+                    <input type="checkbox" id="notesCaptureSystem" aria-label="Capture system audio"> <i class="fal fa-desktop"></i>
+                  </label>
+                </div>
+              </div>
+              <div class="notes-toolbar-center">
+                <button class="notes-record-btn" id="notesStartBtn" title="Start Recording">
+                  <span class="notes-record-icon" aria-hidden="true"></span>
+                </button>
+                <button class="notes-control-btn hidden" id="notesPauseBtn" title="Pause">
+                  <i class="fal fa-pause"></i>
+                </button>
+                <button class="notes-control-btn hidden" id="notesResumeBtn" title="Resume">
+                  <i class="fal fa-play"></i>
+                </button>
+                <button class="notes-control-btn notes-stop-btn hidden" id="notesStopBtn" title="Stop">
+                  <i class="fal fa-stop"></i>
+                </button>
+              </div>
+              <div class="notes-toolbar-right">
+                <div id="notesRecordingIndicator" class="notes-recording-indicator hidden">
+                  <span class="notes-recording-dot"></span>
+                  <span>REC</span>
+                </div>
+                <span id="notesTimer" class="notes-timer">00:00:00</span>
+                <button class="notes-model-badge" id="notesModelStatus" title="Click for model settings">
+                  Checking...
+                </button>
+              </div>
+            </div>
+
+            <!-- Default View: session list -->
+            <div id="notesCenterDefault" class="notes-center-default">
+              <div class="notes-coming-up" id="notesComingUp">
+                <h6 class="notes-date-heading">Coming up</h6>
+                <div id="notesUpcomingEvents" class="notes-upcoming-list">
+                  <div class="notes-empty-upcoming">No upcoming meetings</div>
+                </div>
+              </div>
+              <div id="notesPastMeetings" class="notes-past-meetings"></div>
+            </div>
+
+            <!-- Transcript View (hidden by default) -->
+            <div id="notesCenterTranscript" class="notes-center-transcript" style="display:none;">
+              <div class="notes-transcript-toolbar">
+                <button class="notes-back-btn" id="notesBackBtn">
+                  <i class="fal fa-arrow-left"></i> Back
+                </button>
+                <div class="notes-transcript-actions">
+                  <button class="notes-btn notes-btn-sm" id="notesCopyBtn" title="Copy to clipboard">
+                    <i class="fal fa-copy"></i> Copy
+                  </button>
+                  <button class="notes-btn notes-btn-sm" id="notesExportTxt" title="Export as text">TXT</button>
+                  <button class="notes-btn notes-btn-sm" id="notesExportMd" title="Export as markdown">MD</button>
+                  <button class="notes-btn notes-btn-sm" id="notesExportJson" title="Export as JSON">JSON</button>
+                  <div id="notesTranscriptFolderDropdown" class="custom-dropdown-wrapper notes-transcript-folder-dropdown"></div>
+                  <button class="notes-btn notes-btn-sm notes-btn-danger" id="notesDeleteBtn" title="Delete this note">
+                    <i class="fal fa-trash-alt"></i> Delete
+                  </button>
+                </div>
+              </div>
+              <div class="notes-transcript-header">
+                <input
+                  id="notesTranscriptTitleInput"
+                  class="notes-transcript-title-input"
+                  type="text"
+                  placeholder="Untitled"
+                  autocomplete="off"
+                >
+                <button class="notes-btn notes-btn-sm notes-sparkle-btn" id="notesTranscriptSummarizeBtn" title="Summarize with AI">
+                  <svg class="notes-sparkle-svg" viewBox="0 0 24 24" aria-hidden="true">
+                    <path fill="currentColor" d="M12 2l1.15 4.3L17.5 7.5l-4.35 1.2L12 13l-1.15-4.3L6.5 7.5l4.35-1.2L12 2zm7.1 6.9l.7 2.6L22 12l-2.2.5-.7 2.6-.7-2.6L16 12l2.2-.5.7-2.6zM4.9 13.9l.9 3.4L9 18l-3.2.7-.9 3.4-.9-3.4L1 18l3-.7.9-3.4z"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="notes-transcript-meta" id="notesTranscriptMeta"></div>
+              <div class="notes-transcript-summary" id="notesTranscriptSummary" style="display:none;">
+                <div class="notes-summary-top">
+                  <div class="notes-summary-title">
+                    <svg class="notes-sparkle-svg" viewBox="0 0 24 24" aria-hidden="true">
+                      <path fill="currentColor" d="M12 2l1.15 4.3L17.5 7.5l-4.35 1.2L12 13l-1.15-4.3L6.5 7.5l4.35-1.2L12 2zm7.1 6.9l.7 2.6L22 12l-2.2.5-.7 2.6-.7-2.6L16 12l2.2-.5.7-2.6zM4.9 13.9l.9 3.4L9 18l-3.2.7-.9 3.4-.9-3.4L1 18l3-.7.9-3.4z"/>
+                    </svg>
+                    Summary
+                  </div>
+                  <div class="notes-summary-status" id="notesSummaryStatus">Ready</div>
+                </div>
+                <div class="notes-summary-body" id="notesSummaryContent"></div>
+              </div>
+              <div id="notesTranscript" class="notes-transcript-body">
+                <div class="notes-transcript-empty">
+                  <i class="fal fa-microphone-alt"></i>
+                  <p>Start recording to see the live transcript</p>
+                </div>
+              </div>
+            </div>
+          </main>
+
+          <!-- ─── RIGHT CHAT SIDEBAR ─── -->
+          <aside class="notes-right-sidebar">
+            <div class="notes-chat-header">
+              <div class="notes-chat-header-row">
+                <div id="notesChatThreadDropdown" class="custom-dropdown-wrapper notes-chat-thread-dropdown"></div>
+                <button class="notes-new-chat-btn" id="notesNewChatBtn" title="New chat">
+                  <i class="fal fa-plus"></i>
+                </button>
+              </div>
+              <div class="notes-chat-header-row secondary">
+                <div id="notesChatAgentDropdown" class="custom-dropdown-wrapper notes-chat-agent-dropdown"></div>
+              </div>
+            </div>
+
+            <div id="notesSkillSuggestions" class="notes-skill-suggestions">
+              <div class="notes-templates-header">
+                <div class="notes-templates-title">Templates</div>
+                <div class="notes-templates-hint">Click to run</div>
+              </div>
+              <div id="notesTemplateChips" class="notes-template-chips"></div>
+            </div>
+
+            <div id="notesChatMessages" class="notes-chat-messages">
+              <div class="notes-chat-empty">
+                <i class="fal fa-comment-alt-dots"></i>
+                <p>Ask anything about your meeting...</p>
+              </div>
+            </div>
+
+            <div class="notes-chat-input-wrap">
+              <textarea id="notesChatInput" class="notes-chat-input" placeholder="Ask anything..." rows="1"></textarea>
+              <button class="notes-chat-send" id="notesChatSendBtn">
+                <i class="fal fa-paper-plane"></i>
+              </button>
+            </div>
+          </aside>
+        </div>
+
+        <!-- Notes Templates Modal -->
+        <div class="notes-model-modal-overlay" id="notesTemplatesModal" style="display:none;" role="dialog" aria-modal="true" aria-label="Templates">
+          <div class="notes-model-modal notes-templates-modal">
+            <div class="notes-modal-header">
+              <div class="notes-modal-header-left">
+                <h6 class="notes-modal-title">Templates</h6>
+                <div class="notes-templates-subtitle">Prompts used to guide the Notes agent</div>
+              </div>
+              <button class="notes-modal-close" id="notesTemplatesCloseBtn">
+                <i class="fal fa-times"></i>
+              </button>
+            </div>
+            <div class="notes-modal-body notes-templates-body">
+              <div class="notes-templates-left">
+                <div class="notes-templates-left-top">
+                  <div class="notes-templates-left-title">Your templates</div>
+                  <button class="notes-btn notes-btn-sm" id="notesTemplatesNewBtn" type="button">
+                    <i class="fal fa-plus"></i> New
+                  </button>
+                </div>
+                <div id="notesTemplatesList" class="notes-templates-list"></div>
+              </div>
+              <div class="notes-templates-editor">
+                <div class="notes-templates-field">
+                  <label class="notes-templates-label" for="notesTemplateName">Name</label>
+                  <input id="notesTemplateName" class="notes-templates-input" type="text" placeholder="e.g. Create Linear Ticket">
+                </div>
+                <div class="notes-templates-field notes-templates-field-row">
+                  <div class="notes-templates-field">
+                    <label class="notes-templates-label" for="notesTemplateCommand">Slash command (optional)</label>
+                    <input id="notesTemplateCommand" class="notes-templates-input" type="text" placeholder="/create-linear-ticket">
+                  </div>
+                  <label class="notes-templates-pin">
+                    <input id="notesTemplatePinned" type="checkbox">
+                    <span>Pin in sidebar</span>
+                  </label>
+                </div>
+                <div class="notes-templates-field notes-templates-field-grow">
+                  <label class="notes-templates-label" for="notesTemplatePrompt">Prompt</label>
+                  <textarea id="notesTemplatePrompt" class="notes-templates-textarea" placeholder="Write the instructions given to the agent..."></textarea>
+                  <div class="notes-templates-help">
+                    Tip: include <code>{{transcript}}</code> to control where the transcript is inserted. If omitted, the transcript is appended automatically.
+                  </div>
+                </div>
+                <div class="notes-templates-actions">
+                  <button class="notes-btn notes-btn-danger" id="notesTemplatesDeleteBtn" type="button" title="Delete this template">
+                    <i class="fal fa-trash"></i> Delete
+                  </button>
+                  <div class="notes-templates-actions-right">
+                    <button class="notes-btn" id="notesTemplatesResetBtn" type="button" title="Reset templates back to defaults">
+                      <i class="fal fa-undo"></i> Reset
+                    </button>
+                    <button class="notes-btn" id="notesTemplatesSaveBtn" type="button">
+                      <i class="fal fa-save"></i> Save
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Notes Settings Modal -->
+        <div class="notes-model-modal-overlay" id="notesModelModal" style="display:none;" role="dialog" aria-modal="true" aria-label="Notes Settings">
+          <div class="notes-model-modal notes-settings-modal">
+            <div class="notes-modal-header">
+              <div class="notes-modal-header-left">
+                <h6 class="notes-modal-title">Notes Settings</h6>
+                <div class="notes-modal-tabs" role="tablist" aria-label="Notes settings tabs">
+                  <button class="notes-modal-tab active" id="notesModalTabModels" type="button" data-tab="models" role="tab" aria-selected="true">Models</button>
+                  <button class="notes-modal-tab" id="notesModalTabCalendar" type="button" data-tab="calendar" role="tab" aria-selected="false">Calendar</button>
+                  <button class="notes-modal-tab" id="notesModalTabDictation" type="button" data-tab="dictation" role="tab" aria-selected="false">Dictation</button>
+                </div>
+              </div>
+              <button class="notes-modal-close" id="notesModalCloseBtn">
+                <i class="fal fa-times"></i>
+              </button>
+            </div>
+            <div class="notes-modal-body">
+              <div class="notes-modal-panel" id="notesSettingsPanelModels" role="tabpanel" aria-labelledby="notesModalTabModels">
+                <p class="notes-modal-status" id="notesModalModelStatus">Checking models...</p>
+
+                <div class="notes-model-picker">
+                  <div class="notes-model-picker-row">
+                    <div class="notes-model-picker-label">Model</div>
+                    <div id="notesModelDropdown" class="custom-dropdown-wrapper notes-model-dropdown"></div>
+                  </div>
+                  <div id="notesModelDetails" class="notes-model-details"></div>
+                </div>
+
+                <div id="notesModelProgress" class="notes-modal-progress" style="display:none;">
+                  <div class="notes-modal-progress-bar">
+                    <div id="notesModelProgressBar" class="notes-modal-progress-fill" style="width:0%"></div>
+                  </div>
+                  <span class="notes-modal-progress-text" id="notesModelProgressText">0%</span>
+                </div>
+
+                <div class="notes-modal-actions">
+                  <button class="notes-btn" id="notesModelDownloadBtn">
+                    <i class="fal fa-download"></i> Download Model
+                  </button>
+                  <button class="notes-btn" id="notesModelCancelBtn" style="display:none;" title="Cancel the current download">
+                    <i class="fal fa-ban"></i> Cancel
+                  </button>
+                  <button class="notes-btn" id="notesModelSetActiveBtn" title="Use this model for transcription">
+                    <i class="fal fa-check"></i> Set Active
+                  </button>
+                  <button class="notes-btn notes-btn-danger" id="notesModelDeleteBtn" title="Delete the selected model from disk">
+                    <i class="fal fa-trash"></i> Delete
+                  </button>
+                </div>
+              </div>
+
+              <div class="notes-modal-panel" id="notesSettingsPanelCalendar" role="tabpanel" aria-labelledby="notesModalTabCalendar" hidden>
+                <p class="notes-modal-status" id="notesCalendarStatus">Calendar is disabled.</p>
+
+                <div class="notes-calendar-settings">
+                  <div class="notes-calendar-toggle-row">
+                    <div class="notes-calendar-toggle-text">
+                      <div class="notes-calendar-toggle-title">Show upcoming meetings</div>
+                      <div class="notes-calendar-toggle-sub">Pulls events from Apple Calendar on this Mac.</div>
+                    </div>
+                    <label class="notes-switch">
+                      <input type="checkbox" id="notesCalendarEnabledToggle">
+                      <span class="notes-switch-slider"></span>
+                    </label>
+                  </div>
+
+                  <div class="notes-calendar-picker" id="notesCalendarPicker" style="display:none;">
+                    <div class="notes-calendar-picker-header">
+                      <div class="notes-calendar-picker-title">Calendars</div>
+                      <div class="notes-calendar-picker-actions">
+                        <button class="notes-btn notes-btn-sm" id="notesCalendarSelectAllBtn" type="button">All</button>
+                        <button class="notes-btn notes-btn-sm" id="notesCalendarClearBtn" type="button">None</button>
+                        <button class="notes-btn notes-btn-sm" id="notesCalendarRefreshBtn" type="button">
+                          <i class="fal fa-sync"></i>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="notes-calendar-list" id="notesCalendarList"></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="notes-modal-panel" id="notesSettingsPanelDictation" role="tabpanel" aria-labelledby="notesModalTabDictation" hidden>
+                <p class="notes-modal-status" id="notesDictationStatus">Dictation status: checking...</p>
+
+                <div class="notes-dictation-settings">
+                  <div class="notes-dictation-toggle-row">
+                    <div class="notes-dictation-toggle-text">
+                      <div class="notes-dictation-toggle-title">Enable global dictation</div>
+                      <div class="notes-dictation-toggle-sub">Use a keybind from any app to transcribe into the focused text box.</div>
+                    </div>
+                    <label class="notes-switch">
+                      <input type="checkbox" id="notesDictationEnabledToggle">
+                      <span class="notes-switch-slider"></span>
+                    </label>
+                  </div>
+
+	                  <div class="notes-dictation-card notes-dictation-card-activation">
+	                    <div class="notes-dictation-card-title">Activation</div>
+	                    <div class="notes-dictation-row">
+	                      <div class="notes-dictation-label">Mode</div>
+	                      <select id="notesDictationActivationSelect" class="notes-model-select" aria-label="Dictation activation mode">
+	                        <option value="fn_hold">Hold Fn (macOS)</option>
+	                        <option value="fn_double_press">Fn double-press (macOS)</option>
+	                        <option value="global_shortcut">Custom shortcut</option>
+	                      </select>
+	                    </div>
+
+	                    <div class="notes-dictation-row" id="notesDictationShortcutRow" style="display:none;">
+	                      <div class="notes-dictation-label">Shortcut</div>
+	                      <input id="notesDictationShortcutInput" class="notes-dictation-input" type="text" placeholder="Alt+Space">
+	                    </div>
+
+                    <div class="notes-dictation-help">
+                      Tip: Fn detection requires Input Monitoring permission. Custom shortcuts use Phantom's global shortcut plugin.
+                    </div>
+                  </div>
+
+                  <div class="notes-dictation-card notes-dictation-card-transcription">
+                    <div class="notes-dictation-card-title">Transcription</div>
+                    <div class="notes-dictation-row">
+                      <div class="notes-dictation-label">Engine</div>
+                      <select id="notesDictationEngineSelect" class="notes-model-select">
+                        <option value="local">Local (On-device)</option>
+                        <option value="chatgpt">Cloud (ChatGPT)</option>
+                      </select>
+                    </div>
+                    <div class="notes-dictation-help" id="notesDictationEngineHelp">
+                      Local runs fully on-device using the selected local model (Whisper or Parakeet). Cloud uses ChatGPT transcription (requires Codex login).
+                    </div>
+                  </div>
+
+                  <div class="notes-dictation-card notes-dictation-card-insertion">
+                    <div class="notes-dictation-card-title">Insertion</div>
+                    <label class="notes-dictation-check">
+                      <input type="checkbox" id="notesDictationPasteToggle">
+                      <span>Paste into focused inputs (requires Accessibility)</span>
+                    </label>
+                    <label class="notes-dictation-check">
+                      <input type="checkbox" id="notesDictationClipboardFallbackToggle">
+                      <span>Copy to clipboard when no input is focused</span>
+                    </label>
+                    <label class="notes-dictation-check">
+                      <input type="checkbox" id="notesDictationRestoreClipboardToggle">
+                      <span>Restore clipboard after paste (text only)</span>
+                    </label>
+                    <label class="notes-dictation-check">
+                      <input type="checkbox" id="notesDictationFlattenToggle">
+                      <span>Flatten newlines when pasting into single-line fields</span>
+                    </label>
+                  </div>
+
+                  <div class="notes-dictation-actions notes-dictation-actions-bar">
+                    <button class="notes-btn notes-btn-sm" id="notesDictationRefreshBtn" type="button">
+                      <i class="fal fa-sync"></i> Refresh
+                    </button>
+                    <button class="notes-btn notes-btn-sm" id="notesDictationStartBtn" type="button">
+                      <i class="fal fa-microphone"></i> Start
+                    </button>
+                    <button class="notes-btn notes-btn-sm notes-btn-danger" id="notesDictationStopBtn" type="button">
+                      <i class="fal fa-stop"></i> Stop
+                    </button>
+                  </div>
+
+                  <div class="notes-dictation-card notes-dictation-last">
+                    <div class="notes-dictation-card-title">Last Transcript</div>
+                    <textarea id="notesDictationLastTranscript" class="notes-dictation-textarea" readonly placeholder="No transcript yet."></textarea>
+                    <div class="notes-dictation-actions">
+                      <button class="notes-btn notes-btn-sm" id="notesDictationCopyBtn" type="button">
+                        <i class="fal fa-copy"></i> Copy
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Cmd+K Search Palette -->
+        <div class="notes-palette-overlay" id="notesSearchPalette" hidden>
+          <div class="notes-palette" role="dialog" aria-modal="true" aria-label="Search notes">
+            <div class="notes-palette-top">
+              <i class="fal fa-search notes-palette-icon"></i>
+              <input
+                type="text"
+                id="notesPaletteInput"
+                class="notes-palette-input"
+                placeholder="Search people, folders, companies, or meetings"
+                autocomplete="off"
+                spellcheck="false"
+              >
+              <kbd class="notes-palette-kbd">esc</kbd>
+            </div>
+            <div class="notes-palette-results" id="notesPaletteResults"></div>
+            <div class="notes-palette-footer">
+              <div class="notes-palette-hint">
+                <kbd>↑</kbd><kbd>↓</kbd> Navigate <kbd>↵</kbd> Open
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!--Settings Page-->
       <section
         id="settingsPage"
@@ -2536,14 +3006,16 @@
 
     <script src="js/gui.js"></script>
     <!-- Mock Electron layer for browser compatibility -->
-    <script src="js/tauri-bridge.js"></script>
+    <script src="js/tauri-bridge.js?v=1.0.3.2"></script>
     <!-- Slash command autocomplete -->
     <script src="js/slash-commands-data.js"></script>
     <script src="js/slash-commands.js"></script>
-    <script src="js/custom-dropdown.js"></script>
+    <script src="js/custom-dropdown.js?v=1.0.3.1"></script>
     <script src="js/review.js"></script>
     <script src="js/command-center.js"></script>
     <script src="js/command-center-config.js"></script>
+    <script src="js/vendor/marked-17.0.1.min.js"></script>
+    <script src="js/meeting-notes.js?v=1.0.3.6"></script>
     <script src="js/application.js"></script>
     <script src="js/task-scheduler.js"></script>
 

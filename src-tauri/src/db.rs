@@ -131,6 +131,31 @@ pub struct MessageRecord {
     pub timestamp: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingSessionRecord {
+    pub id: String,
+    pub title: Option<String>,
+    pub status: String,
+    pub capture_mic: bool,
+    pub capture_system: bool,
+    pub started_at: Option<i64>,
+    pub stopped_at: Option<i64>,
+    pub duration_ms: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MeetingSegmentRecord {
+    pub id: i64,
+    pub session_id: String,
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub speaker: Option<String>,
+    pub created_at: i64,
+}
+
 pub fn init_db(path: &PathBuf) -> Result<Connection> {
     let conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_secs(5))?;
@@ -437,6 +462,44 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_pending_attachments_task_id_created_at
          ON pending_attachments(task_id, created_at)",
+        [],
+    )?;
+
+    // Meeting sessions table for meeting notes feature
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meeting_sessions (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            status TEXT NOT NULL DEFAULT 'idle',
+            capture_mic INTEGER NOT NULL DEFAULT 1,
+            capture_system INTEGER NOT NULL DEFAULT 0,
+            started_at INTEGER,
+            stopped_at INTEGER,
+            duration_ms INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    // Meeting segments table for transcription segments
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS meeting_segments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            text TEXT NOT NULL,
+            start_ms INTEGER NOT NULL,
+            end_ms INTEGER NOT NULL,
+            speaker TEXT,
+            created_at INTEGER NOT NULL,
+            FOREIGN KEY (session_id) REFERENCES meeting_sessions(id) ON DELETE CASCADE
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_meeting_segments_session
+         ON meeting_segments(session_id, start_ms)",
         [],
     )?;
 
@@ -1608,6 +1671,127 @@ pub fn compact_history(
 
     output.push_str("---\n\n");
     (output, true)
+}
+
+/// Insert a new meeting session
+pub fn insert_meeting_session(conn: &Connection, session: &MeetingSessionRecord) -> Result<()> {
+    conn.execute(
+        "INSERT INTO meeting_sessions (id, title, status, capture_mic, capture_system, started_at, stopped_at, duration_ms, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            session.id,
+            session.title,
+            session.status,
+            session.capture_mic as i64,
+            session.capture_system as i64,
+            session.started_at,
+            session.stopped_at,
+            session.duration_ms,
+            session.created_at,
+            session.updated_at,
+        ],
+    )?;
+    Ok(())
+}
+
+/// Update meeting session status, stopped_at, duration_ms, and updated_at
+pub fn update_meeting_session_status(
+    conn: &Connection,
+    id: &str,
+    status: &str,
+    stopped_at: Option<i64>,
+    duration_ms: Option<i64>,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE meeting_sessions SET status = ?1, stopped_at = COALESCE(?2, stopped_at), duration_ms = COALESCE(?3, duration_ms), updated_at = ?4 WHERE id = ?5",
+        params![status, stopped_at, duration_ms, now, id],
+    )?;
+    Ok(())
+}
+
+/// Update meeting session title and updated_at.
+pub fn update_meeting_session_title(
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE meeting_sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+        params![title, now, id],
+    )?;
+    Ok(())
+}
+
+/// List all meeting sessions ordered by created_at DESC
+pub fn list_meeting_sessions(conn: &Connection) -> Result<Vec<MeetingSessionRecord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, title, status, capture_mic, capture_system, started_at, stopped_at, duration_ms, created_at, updated_at
+         FROM meeting_sessions ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(MeetingSessionRecord {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            status: row.get(2)?,
+            capture_mic: row.get::<_, i64>(3)? != 0,
+            capture_system: row.get::<_, i64>(4)? != 0,
+            started_at: row.get(5)?,
+            stopped_at: row.get(6)?,
+            duration_ms: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Get all segments for a meeting session ordered by start_ms ASC
+pub fn get_meeting_segments(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<MeetingSegmentRecord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, session_id, text, start_ms, end_ms, speaker, created_at
+         FROM meeting_segments WHERE session_id = ?1 ORDER BY start_ms ASC",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(MeetingSegmentRecord {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            text: row.get(2)?,
+            start_ms: row.get(3)?,
+            end_ms: row.get(4)?,
+            speaker: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Save a transcription segment and return the inserted row ID
+pub fn save_meeting_segment(
+    conn: &Connection,
+    session_id: &str,
+    text: &str,
+    start_ms: i64,
+    end_ms: i64,
+    speaker: Option<&str>,
+) -> Result<i64> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO meeting_segments (session_id, text, start_ms, end_ms, speaker, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![session_id, text, start_ms, end_ms, speaker, now],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Delete a meeting session (segments auto-deleted via CASCADE)
+pub fn delete_meeting_session(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM meeting_sessions WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 /// Optimize database and checkpoint WAL on shutdown

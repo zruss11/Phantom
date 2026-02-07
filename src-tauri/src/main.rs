@@ -1,20 +1,27 @@
 mod amp_cli;
+mod audio_capture;
 mod automations;
+mod calendar;
 mod claude_local_usage;
 mod claude_usage_watcher;
 mod command_center;
 mod db;
 mod debug_http;
+mod dictation;
 mod discord_bot;
+mod local_asr_model;
 mod local_usage;
 mod logger;
 mod mcp_server;
+mod meeting_notes;
 mod namegen;
 mod opencode_cli;
+mod parakeet_model;
 mod summarize;
 mod transcription;
 mod utils;
 mod webhook;
+mod whisper_model;
 mod worktree;
 
 use command_center::{
@@ -357,6 +364,10 @@ pub(crate) struct AppState {
     claude_oauth_state: Arc<Mutex<ClaudeOauthState>>,
     terminal_sessions: Arc<Mutex<HashMap<String, TerminalSession>>>,
     task_terminal_sessions: Arc<Mutex<HashMap<String, String>>>,
+    meeting_manager: Arc<StdMutex<meeting_notes::MeetingSessionManager>>,
+    whisper_models: Arc<tokio::sync::Mutex<whisper_model::WhisperModelManagerState>>,
+    parakeet_models: Arc<tokio::sync::Mutex<parakeet_model::ParakeetModelManagerState>>,
+    pub(crate) dictation: Arc<StdMutex<dictation::DictationService>>,
 }
 
 #[derive(Debug, Default)]
@@ -486,6 +497,10 @@ pub(crate) struct CreateAgentPayload {
     /// True when creating multiple agent sessions in one action
     #[serde(rename = "multiCreate", default)]
     pub(crate) multi_create: bool,
+    /// When true, suppress external side effects (Discord/webhook/app notifications).
+    /// Used for embedded/ephemeral chats like Notes sidebar.
+    #[serde(rename = "suppressNotifications", default)]
+    pub(crate) suppress_notifications: bool,
     #[serde(default)]
     pub(crate) attachments: Vec<AttachmentRef>,
 }
@@ -605,6 +620,38 @@ struct Settings {
     // Values: "auto" (use task agent), "amp", "codex", "claude-code", "opencode"
     #[serde(rename = "summariesAgent")]
     summaries_agent: Option<String>,
+    // Notes calendar integration (Apple Calendar/EventKit)
+    #[serde(rename = "appleCalendarEnabled")]
+    apple_calendar_enabled: Option<bool>,
+    #[serde(rename = "appleCalendarsSelected", default)]
+    apple_calendars_selected: Option<std::collections::HashMap<String, bool>>,
+    // Notes prompt templates (stored as a list so ordering is stable)
+    #[serde(rename = "notesTemplates", default)]
+    notes_templates: Option<Vec<NotesTemplate>>,
+
+    // Notes dictation / global transcription settings
+    #[serde(rename = "notesDictationEnabled")]
+    notes_dictation_enabled: Option<bool>,
+    /// "fn_hold" (macOS), "fn_double_press" (legacy), or "global_shortcut"
+    #[serde(rename = "notesDictationActivation")]
+    notes_dictation_activation: Option<String>,
+    /// Only used when activation is "global_shortcut" (e.g. "Alt+Space")
+    #[serde(rename = "notesDictationShortcut")]
+    notes_dictation_shortcut: Option<String>,
+    /// Double-press window for Fn activation (milliseconds)
+    #[serde(rename = "notesDictationFnWindowMs")]
+    notes_dictation_fn_window_ms: Option<u32>,
+    /// Dictation transcription engine: "local" (default; uses active local model) or "chatgpt"
+    #[serde(rename = "notesDictationEngine")]
+    notes_dictation_engine: Option<String>,
+    #[serde(rename = "notesDictationPasteIntoInputs")]
+    notes_dictation_paste_into_inputs: Option<bool>,
+    #[serde(rename = "notesDictationClipboardFallback")]
+    notes_dictation_clipboard_fallback: Option<bool>,
+    #[serde(rename = "notesDictationRestoreClipboard")]
+    notes_dictation_restore_clipboard: Option<bool>,
+    #[serde(rename = "notesDictationFlattenNewlinesInSingleLine")]
+    notes_dictation_flatten_newlines_in_single_line: Option<bool>,
     // Task creation settings (sticky between restarts)
     #[serde(rename = "taskProjectPath")]
     pub(crate) task_project_path: Option<String>,
@@ -664,6 +711,20 @@ struct Settings {
     sentry_organization: Option<String>,
     #[serde(rename = "sentryWatchedProjects")]
     sentry_watched_projects: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NotesTemplate {
+    #[serde(rename = "id")]
+    id: String,
+    #[serde(rename = "name")]
+    name: String,
+    #[serde(rename = "prompt")]
+    prompt: String,
+    #[serde(rename = "command", default)]
+    command: Option<String>,
+    #[serde(rename = "pinned", default)]
+    pinned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -737,6 +798,7 @@ struct SessionHandle {
     pending_prompt: Option<String>,
     pending_attachments: Vec<AttachmentRef>,
     messages: Vec<serde_json::Value>,
+    suppress_notifications: bool,
     /// Real-time cost watcher for Claude Code sessions (None for other agents)
     #[allow(dead_code)] // Kept for future graceful shutdown
     claude_watcher: Option<claude_usage_watcher::WatcherHandle>,
@@ -1305,9 +1367,7 @@ fn write_codex_config_overlay(
     }
 
     if !feature_updates.is_empty() {
-        let features_header_idx = lines
-            .iter()
-            .position(|l| l.trim() == "[features]");
+        let features_header_idx = lines.iter().position(|l| l.trim() == "[features]");
 
         let (body_start, mut body_end) = if let Some(h) = features_header_idx {
             let start = h + 1;
@@ -4586,8 +4646,14 @@ pub(crate) async fn create_agent_session_internal(
             .map_err(|err| format!("set model failed: {}", err))?;
     }
 
+    let id_prefix = if payload.suppress_notifications {
+        "notes"
+    } else {
+        "task"
+    };
     let task_id = format!(
-        "task-{}-{}",
+        "{}-{}-{}",
+        id_prefix,
         chrono::Utc::now().timestamp_millis(),
         uuid::Uuid::new_v4()
             .to_string()
@@ -4616,6 +4682,7 @@ pub(crate) async fn create_agent_session_internal(
         pending_prompt: Some(payload.prompt.clone()),
         pending_attachments: payload.attachments.clone(),
         messages: Vec::new(),
+        suppress_notifications: payload.suppress_notifications,
         claude_watcher,
         cancel_token: CancellationToken::new(),
         needs_history_injection: false,
@@ -4973,6 +5040,7 @@ pub(crate) async fn create_task_from_discord(
         claude_runtime: None,
         attachments: Vec::new(),
         multi_create: false,
+        suppress_notifications: false,
     };
 
     let result = create_agent_session_internal(app.clone(), payload, state, false, true).await?;
@@ -5261,6 +5329,7 @@ pub(crate) async fn start_task_internal(
             pending_prompt: prompt_with_context,
             pending_attachments: Vec::new(),
             messages: Vec::new(),
+            suppress_notifications: task_id.starts_with("notes-"),
             claude_watcher,
             cancel_token: CancellationToken::new(),
             needs_history_injection: false,
@@ -5416,6 +5485,23 @@ pub(crate) async fn start_task_internal(
             })
         };
         let _ = chat_window.emit("ChatLogUpdate", (&task_id, user_chat_msg));
+    }
+    if let Some(main_window) = app.get_webview_window("main") {
+        let user_chat_msg = if chat_attachments.is_empty() {
+            serde_json::json!({
+                "message_type": "user_message",
+                "content": prompt.clone(),
+                "timestamp": user_timestamp
+            })
+        } else {
+            serde_json::json!({
+                "message_type": "user_message",
+                "content": prompt.clone(),
+                "timestamp": user_timestamp,
+                "attachments": chat_attachments
+            })
+        };
+        let _ = main_window.emit("ChatLogUpdate", (&task_id, user_chat_msg));
     }
 
     post_discord_user_message(state, &task_id, &agent_id, &prompt).await;
@@ -5750,7 +5836,10 @@ pub(crate) async fn start_task_internal(
                         })
                     }
                 };
-                let _ = chat_window.emit("ChatLogStreaming", (&task_id_clone, chat_msg));
+                let _ = chat_window.emit("ChatLogStreaming", (&task_id_clone, chat_msg.clone()));
+                if let Some(main_window) = app_handle.get_webview_window("main") {
+                    let _ = main_window.emit("ChatLogStreaming", (&task_id_clone, chat_msg));
+                }
             }
         }
     });
@@ -6111,6 +6200,10 @@ pub(crate) async fn start_task_internal(
         // Emit to chat window
         if let Some(chat_window) = app.get_webview_window(&chat_window_label) {
             let _ = chat_window.emit("ChatLogUpdate", (&task_id, &chat_msg));
+        }
+        // Mirror updates to the main window for embedded chat UIs.
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("ChatLogUpdate", (&task_id, &chat_msg));
         }
 
         let status = match msg.message_type.as_str() {
@@ -6502,6 +6595,85 @@ async fn save_settings(
     }
 
     // NOTE: We intentionally do not write to CODEX_HOME/config.toml from Phantom.
+
+    // Reconfigure dictation activation (Fn listener + global shortcut).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
+
+        let prev_enabled = prev.notes_dictation_enabled.unwrap_or(true);
+        let prev_activation =
+            prev.notes_dictation_activation
+                .as_deref()
+                .unwrap_or(if cfg!(target_os = "macos") {
+                    "fn_hold"
+                } else {
+                    "global_shortcut"
+                });
+        if prev_enabled && prev_activation == "global_shortcut" {
+            let prev_shortcut = prev
+                .notes_dictation_shortcut
+                .clone()
+                .unwrap_or_else(|| "Alt+Space".to_string());
+            match prev_shortcut.parse::<Shortcut>() {
+                Ok(hk) => {
+                    if let Err(err) = app.global_shortcut().unregister(hk) {
+                        tracing::warn!(
+                            shortcut = %prev_shortcut,
+                            error = %err,
+                            "Failed to unregister previous dictation shortcut"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        shortcut = %prev_shortcut,
+                        error = %err,
+                        "Invalid previous dictation shortcut"
+                    );
+                }
+            }
+        }
+
+        let next_enabled = next.notes_dictation_enabled.unwrap_or(true);
+        let next_activation =
+            next.notes_dictation_activation
+                .as_deref()
+                .unwrap_or(if cfg!(target_os = "macos") {
+                    "fn_hold"
+                } else {
+                    "global_shortcut"
+                });
+        if next_enabled && next_activation == "global_shortcut" {
+            let next_shortcut = next
+                .notes_dictation_shortcut
+                .clone()
+                .unwrap_or_else(|| "Alt+Space".to_string());
+            match next_shortcut.parse::<Shortcut>() {
+                Ok(hk) => {
+                    if let Err(err) = app.global_shortcut().register(hk) {
+                        tracing::warn!(
+                            shortcut = %next_shortcut,
+                            error = %err,
+                            "Failed to register dictation shortcut"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        shortcut = %next_shortcut,
+                        error = %err,
+                        "Invalid dictation shortcut"
+                    );
+                }
+            }
+        }
+    }
+
+    // Keep the dictation service in sync with the stored settings.
+    if let Ok(mut svc) = state.dictation.lock() {
+        let _ = svc.configure(&app, &next);
+    }
 
     let discord_config_changed = prev.discord_enabled != next.discord_enabled
         || prev.discord_bot_token != next.discord_bot_token
@@ -8804,6 +8976,7 @@ async fn run_automation_and_start_task(
         codex_mode: automation.codex_mode.clone(),
         claude_runtime: automation.claude_runtime.clone(),
         multi_create: false,
+        suppress_notifications: false,
         attachments: Vec::new(),
     };
 
@@ -10579,8 +10752,28 @@ async fn ensure_discord_thread(
     .ok()
 }
 
+async fn suppress_notifications_for_task(state: &AppState, task_id: &str) -> bool {
+    // Fast path: notes tasks are always quiet (even if session handle isn't loaded yet).
+    if task_id.starts_with("notes-") {
+        return true;
+    }
+    let handle_ref = {
+        let sessions = state.sessions.lock().await;
+        sessions.get(task_id).cloned()
+    };
+    if let Some(handle_ref) = handle_ref {
+        let handle = handle_ref.lock().await;
+        handle.suppress_notifications
+    } else {
+        false
+    }
+}
+
 async fn post_discord_user_message(state: &AppState, task_id: &str, agent_id: &str, content: &str) {
     if content.trim().is_empty() {
+        return;
+    }
+    if suppress_notifications_for_task(state, task_id).await {
         return;
     }
     let settings = state.settings.lock().await.clone();
@@ -10600,6 +10793,9 @@ async fn post_discord_user_message(state: &AppState, task_id: &str, agent_id: &s
 
 async fn post_discord_assistant_message(state: &AppState, task_id: &str, content: &str) {
     if content.trim().is_empty() {
+        return;
+    }
+    if suppress_notifications_for_task(state, task_id).await {
         return;
     }
     let settings = state.settings.lock().await.clone();
@@ -10623,6 +10819,9 @@ async fn post_discord_user_input_request(
     request_id: &str,
     questions: &[UserInputQuestion],
 ) {
+    if suppress_notifications_for_task(state, task_id).await {
+        return;
+    }
     let settings = state.settings.lock().await.clone();
     if !discord_enabled(&settings) {
         return;
@@ -10676,6 +10875,9 @@ async fn maybe_show_agent_notification(
     agent_id: &str,
     preview: &str,
 ) -> Result<(), String> {
+    if suppress_notifications_for_task(state, task_id).await {
+        return Ok(());
+    }
     let settings = state.settings.lock().await.clone();
     if !notification_enabled(&settings) {
         return Ok(());
@@ -10905,6 +11107,9 @@ pub(crate) async fn send_chat_message_internal(
     if let Some(window) = app.get_webview_window(&window_label) {
         let _ = window.emit("ChatLogStatus", (&task_id, "Working...", "running"));
     }
+    if let Some(main_window) = app.get_webview_window("main") {
+        let _ = main_window.emit("ChatLogStatus", (&task_id, "Working...", "running"));
+    }
 
     // Extract session handle without removing it from the map.
     let handle_ref = {
@@ -11076,6 +11281,7 @@ pub(crate) async fn send_chat_message_internal(
             pending_prompt: Some(message_with_context),
             pending_attachments: Vec::new(),
             messages: Vec::new(),
+            suppress_notifications: task_id.starts_with("notes-"),
             claude_watcher,
             cancel_token: CancellationToken::new(),
             needs_history_injection: false,
@@ -11405,7 +11611,11 @@ pub(crate) async fn send_chat_message_internal(
                         })
                     }
                 };
-                let _ = chat_window.emit("ChatLogStreaming", (&task_id_streaming, chat_msg));
+                let _ =
+                    chat_window.emit("ChatLogStreaming", (&task_id_streaming, chat_msg.clone()));
+                if let Some(main_window) = app_handle.get_webview_window("main") {
+                    let _ = main_window.emit("ChatLogStreaming", (&task_id_streaming, chat_msg));
+                }
             }
         }
     });
@@ -11848,7 +12058,10 @@ pub(crate) async fn send_chat_message_internal(
                 );
             }
 
-            let _ = window.emit("ChatLogUpdate", (&task_id, chat_msg));
+            let _ = window.emit("ChatLogUpdate", (&task_id, chat_msg.clone()));
+            if let Some(main_window) = app.get_webview_window("main") {
+                let _ = main_window.emit("ChatLogUpdate", (&task_id, chat_msg));
+            }
         }
 
         // Emit completion status
@@ -11877,6 +12090,9 @@ pub(crate) async fn send_chat_message_internal(
             let _ = window.emit("ChatLogStatus", (&task_id, "Ready", "idle"));
         }
         if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("ChatLogStatus", (&task_id, "Ready", "idle"));
+        }
+        if let Some(main_window) = app.get_webview_window("main") {
             let _ = main_window.emit("StatusUpdate", (&task_id, "Ready", "#04d885", "idle"));
         }
         {
@@ -11898,6 +12114,9 @@ pub(crate) async fn send_chat_message_internal(
                 .await;
         if let Some(window) = app.get_webview_window(&window_label) {
             let _ = window.emit("ChatLogStatus", (&task_id, &summary_status, "completed"));
+        }
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("ChatLogStatus", (&task_id, &summary_status, "completed"));
         }
         if let Some(main_window) = app.get_webview_window("main") {
             let _ = main_window.emit(
@@ -12672,25 +12891,35 @@ fn main() {
                 .with_handler(|app, shortcut, event| {
                     use tauri_plugin_global_shortcut::ShortcutState;
                     if event.state() == ShortcutState::Pressed {
+                        // Dictation shortcut (if configured in Notes settings).
+                        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                        {
+                            if dictation::handle_global_shortcut(app, shortcut) {
+                                return;
+                            }
+                        }
                         let shortcut_str = shortcut.to_string();
                         if shortcut_str.contains("R") {
                             if let Some(window) = app.get_webview_window("main") {
                                 let _ = window.eval("location.reload()");
                             }
-                        } else if shortcut_str.contains("Alt+I")
-                            || shortcut_str.contains("Option+I")
+                        }
+
+                        #[cfg(feature = "devtools")]
                         {
-                            let mut opened = false;
-                            for (_, window) in app.webview_windows() {
-                                if window.is_focused().unwrap_or(false) {
-                                    window.open_devtools();
-                                    opened = true;
-                                    break;
+                            if shortcut_str.contains("Alt+I") || shortcut_str.contains("Option+I") {
+                                let mut opened = false;
+                                for (_, window) in app.webview_windows() {
+                                    if window.is_focused().unwrap_or(false) {
+                                        window.open_devtools();
+                                        opened = true;
+                                        break;
+                                    }
                                 }
-                            }
-                            if !opened {
-                                if let Some(window) = app.get_webview_window("main") {
-                                    window.open_devtools();
+                                if !opened {
+                                    if let Some(window) = app.get_webview_window("main") {
+                                        window.open_devtools();
+                                    }
                                 }
                             }
                         }
@@ -12708,12 +12937,121 @@ fn main() {
                 .register(shortcut)
                 .map_err(|e| e.to_string())?;
 
-            let devtools_shortcut = "CmdOrCtrl+Alt+I"
-                .parse::<Shortcut>()
+            #[cfg(feature = "devtools")]
+            {
+                let devtools_shortcut = "CmdOrCtrl+Alt+I"
+                    .parse::<Shortcut>()
+                    .map_err(|e| e.to_string())?;
+                app.global_shortcut()
+                    .register(devtools_shortcut)
+                    .map_err(|e| e.to_string())?;
+            }
+
+            // Configure dictation (Fn listener / optional shortcut) from persisted settings.
+            {
+                let state = app.state::<AppState>().inner().clone();
+                let settings = state.settings.blocking_lock().clone();
+                let dictation_mutex = state.dictation.clone();
+                let lock = dictation_mutex.lock();
+                if let Ok(mut dictation) = lock {
+                    let _ = dictation.configure(app.app_handle(), &settings);
+
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    if let Some(hk) = dictation.wants_global_shortcut() {
+                        if let Err(err) = app.global_shortcut().register(hk) {
+                            tracing::warn!(error = %err, "Failed to register dictation shortcut");
+                        }
+                    }
+                }
+            }
+
+            // macOS menu bar tray icon (ghost icon) for dictation controls/settings.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{MenuBuilder, MenuItem, PredefinedMenuItem};
+                use tauri::tray::TrayIconBuilder;
+
+                const TRAY_PNG: &[u8] = include_bytes!("../icons/tray-ghost.png");
+                let tray_icon =
+                    tauri::image::Image::from_bytes(TRAY_PNG).map_err(|e| e.to_string())?;
+
+                let start_item = MenuItem::with_id(
+                    app,
+                    "tray_dictation_start",
+                    "Start Dictation",
+                    true,
+                    None::<&str>,
+                )
                 .map_err(|e| e.to_string())?;
-            app.global_shortcut()
-                .register(devtools_shortcut)
+                let stop_item = MenuItem::with_id(
+                    app,
+                    "tray_dictation_stop",
+                    "Stop Dictation",
+                    true,
+                    None::<&str>,
+                )
                 .map_err(|e| e.to_string())?;
+                let settings_item = MenuItem::with_id(
+                    app,
+                    "tray_dictation_settings",
+                    "Notes Settings...",
+                    true,
+                    None::<&str>,
+                )
+                .map_err(|e| e.to_string())?;
+                let quit_item =
+                    PredefinedMenuItem::quit(app, Some("Quit")).map_err(|e| e.to_string())?;
+
+                let menu = MenuBuilder::new(app)
+                    .item(&start_item)
+                    .item(&stop_item)
+                    .separator()
+                    .item(&settings_item)
+                    .separator()
+                    .item(&quit_item)
+                    .build()
+                    .map_err(|e| e.to_string())?;
+
+                let _tray = TrayIconBuilder::with_id("phantom-dictation")
+                    .icon(tray_icon)
+                    .icon_as_template(true)
+                    .tooltip("Phantom")
+                    .menu(&menu)
+                    .on_menu_event(|app, event| {
+                        let id = event.id().0.as_str();
+                        match id {
+                            "tray_dictation_start" => {
+                                let state = app.state::<AppState>().inner().clone();
+                                let dictation_mutex = state.dictation.clone();
+                                let lock = dictation_mutex.lock();
+                                if let Ok(mut svc) = lock {
+                                    let _ = svc.start(app);
+                                }
+                            }
+                            "tray_dictation_stop" => {
+                                let state = app.state::<AppState>().inner().clone();
+                                let settings = state.settings.blocking_lock().clone();
+                                let dictation_mutex = state.dictation.clone();
+                                let lock = dictation_mutex.lock();
+                                if let Ok(mut svc) = lock {
+                                    let _ = svc.stop(app, &settings);
+                                }
+                            }
+                            "tray_dictation_settings" => {
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                                let _ = app.emit(
+                                    "DictationOpenSettings",
+                                    serde_json::json!({ "tab": "dictation" }),
+                                );
+                            }
+                            _ => {}
+                        }
+                    })
+                    .build(app);
+            }
 
             // Optional: lightweight debug HTTP server for automation/testing.
             // Enable with: PHANTOM_DEBUG_HTTP=1 (default port 43777)
@@ -12852,10 +13190,12 @@ fn main() {
                     eprintln!("[Harness] Failed to persist MCP settings: {err}");
                 }
             }
+            let dictation = dictation::DictationService::new(&settings);
+            let settings = Arc::new(Mutex::new(settings));
             AppState {
                 config,
                 sessions: Arc::new(Mutex::new(HashMap::new())),
-                settings: Arc::new(Mutex::new(settings)),
+                settings,
                 db: Arc::new(StdMutex::new(db_conn)),
                 notification_windows: Arc::new(StdMutex::new(Vec::new())),
                 agent_availability: Arc::new(StdMutex::new(HashMap::new())),
@@ -12868,6 +13208,16 @@ fn main() {
                 claude_oauth_state: Arc::new(Mutex::new(ClaudeOauthState::default())),
                 terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
                 task_terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
+                meeting_manager: Arc::new(StdMutex::new(
+                    meeting_notes::MeetingSessionManager::new(),
+                )),
+                whisper_models: Arc::new(tokio::sync::Mutex::new(
+                    whisper_model::WhisperModelManagerState::default(),
+                )),
+                parakeet_models: Arc::new(tokio::sync::Mutex::new(
+                    parakeet_model::ParakeetModelManagerState::default(),
+                )),
+                dictation: Arc::new(StdMutex::new(dictation)),
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -12964,6 +13314,10 @@ fn main() {
             check_transcription_available,
             transcribe_audio_file,
             transcribe_audio_bytes,
+            // Dictation commands
+            dictation::dictation_get_status,
+            dictation::dictation_start,
+            dictation::dictation_stop,
             // Code review commands
             gather_code_review_context,
             // Auto-update commands
@@ -12985,7 +13339,34 @@ fn main() {
             cc_fetch_linear_projects,
             cc_fetch_sentry_organizations,
             cc_fetch_sentry_projects,
-            fetch_command_center_data
+            fetch_command_center_data,
+            // Unified local ASR model commands (Whisper + Parakeet)
+            local_asr_model::check_local_asr_model,
+            local_asr_model::local_asr_model_status,
+            local_asr_model::download_local_asr_model,
+            local_asr_model::cancel_local_asr_download,
+            local_asr_model::delete_local_asr_model,
+            local_asr_model::set_active_local_asr_model,
+            // Whisper model commands
+            whisper_model::check_whisper_model,
+            whisper_model::whisper_model_status,
+            whisper_model::download_whisper_model,
+            whisper_model::whisper_cancel_download,
+            whisper_model::delete_whisper_model,
+            whisper_model::set_active_whisper_model,
+            // Meeting notes commands
+            meeting_notes::meeting_start,
+            meeting_notes::meeting_pause,
+            meeting_notes::meeting_resume,
+            meeting_notes::meeting_stop,
+            meeting_notes::meeting_update_title,
+            meeting_notes::meeting_state,
+            meeting_notes::meeting_list_sessions,
+            meeting_notes::meeting_get_transcript,
+            meeting_notes::meeting_delete_session,
+            meeting_notes::meeting_export_transcript,
+            calendar::calendar_get_upcoming_events,
+            calendar::calendar_list_calendars,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
