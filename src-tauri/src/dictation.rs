@@ -459,7 +459,8 @@ fn insert_transcript<R: tauri::Runtime>(
     settings: &Settings,
     transcript: &str,
 ) -> Result<DictationOutcome, String> {
-    let paste_into_inputs = settings.notes_dictation_paste_into_inputs.unwrap_or(true);
+    // UX: default OFF; user can opt in (and grant Accessibility) from Notes Settings.
+    let paste_into_inputs = settings.notes_dictation_paste_into_inputs.unwrap_or(false);
     let clipboard_fallback = settings.notes_dictation_clipboard_fallback.unwrap_or(true);
     let restore_clipboard = settings.notes_dictation_restore_clipboard.unwrap_or(true);
     let flatten_single_line = settings
@@ -479,7 +480,9 @@ fn insert_transcript<R: tauri::Runtime>(
                     }
 
                     // If we are not accessibility-trusted, we can only copy to clipboard.
-                    if !macos::accessibility_trusted(true) {
+                    // UX: don't trigger the scary macOS prompt during dictation.
+                    // We only request Accessibility when the user explicitly opts in from settings.
+                    if !macos::accessibility_trusted(false) {
                         macos::clipboard_set_text(&text)?;
                         return Ok(DictationOutcome::CopiedToClipboard);
                     }
@@ -525,7 +528,8 @@ pub struct DictationService {
 
 impl DictationService {
     pub fn new(settings: &Settings) -> Self {
-        let enabled = settings.notes_dictation_enabled.unwrap_or(true);
+        // UX: default dictation OFF so we don't trigger OS permission prompts on first launch.
+        let enabled = settings.notes_dictation_enabled.unwrap_or(false);
         let activation = ActivationMode::from_settings(settings);
         Self {
             mgr: DictationManager::new(),
@@ -544,7 +548,8 @@ impl DictationService {
         app: &AppHandle<R>,
         settings: &Settings,
     ) -> Result<(), String> {
-        self.enabled = settings.notes_dictation_enabled.unwrap_or(true);
+        // UX: default dictation OFF so we don't trigger OS permission prompts on first launch.
+        self.enabled = settings.notes_dictation_enabled.unwrap_or(false);
         self.activation = ActivationMode::from_settings(settings);
 
         // Fn listener (macOS).
@@ -793,7 +798,7 @@ impl DictationService {
                     }
                 };
 
-                let enabled = settings.notes_dictation_enabled.unwrap_or(true);
+                let enabled = settings.notes_dictation_enabled.unwrap_or(false);
                 let outcome = if !enabled {
                     #[cfg(target_os = "macos")]
                     {
@@ -895,6 +900,20 @@ pub fn dictation_stop(app: AppHandle, state: tauri::State<'_, AppState>) -> Resu
         .lock()
         .map_err(|e| format!("Lock error: {e}"))?;
     svc.stop(&app, &settings)
+}
+
+/// Best-effort: trigger the macOS Accessibility permission prompt.
+/// This is intentionally user-initiated from the UI (not on startup).
+#[tauri::command]
+pub fn dictation_request_accessibility() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(macos::accessibility_trusted(true))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("Accessibility permission prompt is only supported on macOS".to_string())
+    }
 }
 
 // =============================================================================

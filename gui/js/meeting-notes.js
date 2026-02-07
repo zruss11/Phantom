@@ -39,12 +39,14 @@
     fullSettings: null,
 
     // Dictation (global transcription)
-    dictationEnabled: true,
+    // UX: default OFF so we don't trigger OS permission prompts on first launch.
+    dictationEnabled: false,
     dictationActivation: 'fn_hold',
     dictationEngine: 'local',
     dictationShortcut: 'Option+Space',
     dictationFnWindowMs: 350,
-    dictationPasteIntoInputs: true,
+    // UX: default OFF; turning this on will prompt for macOS Accessibility permission.
+    dictationPasteIntoInputs: false,
     dictationClipboardFallback: true,
     dictationRestoreClipboard: true,
     dictationFlattenNewlinesInSingleLine: true,
@@ -751,6 +753,43 @@
     if (modal) modal.style.display = 'none';
   }
 
+  // ─── Permission Modal (used to pre-explain scary macOS dialogs) ───
+  var permissionModalResolve = null;
+
+  function openPermissionModal(opts) {
+    opts = opts || {};
+    var modal = $('notesPermissionModal');
+    var title = $('notesPermissionTitle');
+    var body = $('notesPermissionBody');
+    var continueBtn = $('notesPermissionContinueBtn');
+
+    if (title) title.textContent = (opts.title || 'Permission Required').toString();
+    if (body) body.textContent = (opts.body || '').toString();
+    if (continueBtn) continueBtn.textContent = (opts.continueLabel || 'Continue').toString();
+
+    if (modal) modal.style.display = 'flex';
+
+    // Ensure only one outstanding resolver at a time.
+    if (permissionModalResolve) {
+      try { permissionModalResolve(false); } catch (e) {}
+      permissionModalResolve = null;
+    }
+
+    return new Promise(function (resolve) {
+      permissionModalResolve = resolve;
+    });
+  }
+
+  function closePermissionModal(result) {
+    var modal = $('notesPermissionModal');
+    if (modal) modal.style.display = 'none';
+    if (permissionModalResolve) {
+      var resolve = permissionModalResolve;
+      permissionModalResolve = null;
+      try { resolve(!!result); } catch (e) {}
+    }
+  }
+
   function setNotesSettingsTab(tab) {
     state.notesSettingsTab = (tab === 'calendar') ? 'calendar' : (tab === 'dictation' ? 'dictation' : 'models');
 
@@ -881,6 +920,14 @@
     if (!st) {
       el.textContent = 'Dictation status: unknown';
       el.className = 'notes-modal-status downloading';
+      return;
+    }
+
+    if (!state.dictationEnabled) {
+      el.textContent = 'Dictation: Disabled (enable it to use global dictation)';
+      el.className = 'notes-modal-status missing';
+      var last0 = $('notesDictationLastTranscript');
+      if (last0) last0.value = (st.last_transcript || '').toString();
       return;
     }
 
@@ -1485,18 +1532,25 @@
     var isRecording = state.recording && !state.paused;
     var isPaused = state.recording && state.paused;
 
-    if (startBtn) startBtn.disabled = !canStart;
-    if (startBtn && !state.recording) {
-      if (state.modelDownloaded) {
-        startBtn.title = 'Start Recording';
-        startBtn.innerHTML = '<span class="notes-record-icon" aria-hidden="true"></span>';
-        startBtn.classList.remove('needs-model');
-      } else {
-        startBtn.title = 'Download a local model to start';
-        startBtn.innerHTML = '<i class="fal fa-download"></i>';
-        startBtn.classList.add('needs-model');
+    if (startBtn) {
+      startBtn.disabled = !canStart;
+      // While recording, keep the UI focused on Pause/Stop. The recording state
+      // is shown on the right (REC + timer), so we avoid a large center pill.
+      startBtn.classList.toggle('hidden', !!state.recording);
+
+      if (!state.recording) {
+        if (state.modelDownloaded) {
+          startBtn.title = 'Start Recording';
+          startBtn.innerHTML = '<span class="notes-record-btn-dot" aria-hidden="true"></span><span class="notes-record-btn-label">Record</span>';
+          startBtn.classList.remove('needs-model');
+        } else {
+          startBtn.title = 'Download a local model to start';
+          startBtn.innerHTML = '<span class="notes-record-btn-dot" aria-hidden="true"></span><span class="notes-record-btn-label"><i class="fal fa-download notes-record-btn-aux-icon"></i> Get model</span>';
+          startBtn.classList.add('needs-model');
+        }
       }
     }
+
     if (pauseBtn) {
       pauseBtn.disabled = !isRecording;
       pauseBtn.classList.toggle('hidden', !isRecording);
@@ -2740,10 +2794,10 @@
       state.calendarSelected = (settings && settings.appleCalendarsSelected) ? settings.appleCalendarsSelected : {};
       state.templates = normalizeNotesTemplates(settings && settings.notesTemplates);
 
-      // Dictation settings (default on).
+      // Dictation settings (default off; request permissions only when user opts in).
       state.dictationEnabled = (settings && settings.notesDictationEnabled !== undefined && settings.notesDictationEnabled !== null)
         ? !!settings.notesDictationEnabled
-        : true;
+        : false;
       state.dictationActivation = (settings && settings.notesDictationActivation)
         ? settings.notesDictationActivation
         : 'fn_hold';
@@ -2758,7 +2812,7 @@
         : 350;
       state.dictationPasteIntoInputs = (settings && settings.notesDictationPasteIntoInputs !== undefined && settings.notesDictationPasteIntoInputs !== null)
         ? !!settings.notesDictationPasteIntoInputs
-        : true;
+        : false;
       state.dictationClipboardFallback = (settings && settings.notesDictationClipboardFallback !== undefined && settings.notesDictationClipboardFallback !== null)
         ? !!settings.notesDictationClipboardFallback
         : true;
@@ -2777,12 +2831,12 @@
       state.calendarEnabled = true;
       state.calendarSelected = {};
       state.templates = defaultNotesTemplates();
-      state.dictationEnabled = true;
+      state.dictationEnabled = false;
       state.dictationActivation = 'fn_hold';
       state.dictationEngine = 'local';
       state.dictationShortcut = 'Option+Space';
       state.dictationFnWindowMs = 350;
-      state.dictationPasteIntoInputs = true;
+      state.dictationPasteIntoInputs = false;
       state.dictationClipboardFallback = true;
       state.dictationRestoreClipboard = true;
       state.dictationFlattenNewlinesInSingleLine = true;
@@ -3501,6 +3555,23 @@
     var modalCloseBtn = $('notesModalCloseBtn');
     if (modalCloseBtn) modalCloseBtn.addEventListener('click', closeModelModal);
 
+    // Permission modal (Accessibility prompt preflight)
+    var permCloseBtn = $('notesPermissionCloseBtn');
+    if (permCloseBtn) permCloseBtn.addEventListener('click', function () { closePermissionModal(false); });
+
+    var permCancelBtn = $('notesPermissionCancelBtn');
+    if (permCancelBtn) permCancelBtn.addEventListener('click', function () { closePermissionModal(false); });
+
+    var permContinueBtn = $('notesPermissionContinueBtn');
+    if (permContinueBtn) permContinueBtn.addEventListener('click', function () { closePermissionModal(true); });
+
+    var permModal = $('notesPermissionModal');
+    if (permModal) {
+      permModal.addEventListener('click', function (e) {
+        if (e.target === permModal) closePermissionModal(false);
+      });
+    }
+
     var tabModels = $('notesModalTabModels');
     if (tabModels) tabModels.addEventListener('click', function () { setNotesSettingsTab('models'); });
 
@@ -3629,7 +3700,63 @@
     var dictPaste = $('notesDictationPasteToggle');
     if (dictPaste) {
       var onDictPasteChanged = function () {
-        state.dictationPasteIntoInputs = !!dictPaste.checked;
+        var want = !!dictPaste.checked;
+
+        // If toggling ON, pre-explain the macOS dialog and only then trigger it.
+        if (want && !state.dictationPasteIntoInputs) {
+          dictPaste.checked = false;
+
+          openPermissionModal({
+            title: 'Enable Paste Into Other Apps',
+            body: 'To paste transcripts directly into other apps, macOS will show an Accessibility permissions prompt for Phantom. Phantom only uses this to paste your transcript (Cmd+V). You can keep using clipboard-only mode if you prefer.',
+            continueLabel: 'Enable Paste'
+          }).then(function (confirmed) {
+            if (!confirmed) {
+              // Leave setting off.
+              syncDictationSettingsUI();
+              return;
+            }
+            if (!ipcRenderer) {
+              state.dictationPasteIntoInputs = true;
+              saveSettingsPatch({ notesDictationPasteIntoInputs: true }).then(function () {
+                syncDictationSettingsUI();
+              });
+              return;
+            }
+
+            ipcRenderer.invoke('dictation_request_accessibility').then(function (trusted) {
+              if (trusted === true) {
+                state.dictationPasteIntoInputs = true;
+                dictPaste.checked = true;
+                saveSettingsPatch({ notesDictationPasteIntoInputs: true }).then(function (next) {
+                  syncDictationSettingsUI();
+                  if (!next) refreshDictationStatus();
+                });
+              } else {
+                state.dictationPasteIntoInputs = false;
+                dictPaste.checked = false;
+                // Best-effort: show a gentle hint; dictation will still copy to clipboard.
+                if (typeof sendNotification === 'function') {
+                  sendNotification('Accessibility not granted. Dictation will copy to clipboard instead of pasting.', 'yellow');
+                }
+                refreshDictationStatus();
+                syncDictationSettingsUI();
+              }
+            }).catch(function () {
+              // Non-macOS (or command unavailable): allow the toggle without prompting.
+              state.dictationPasteIntoInputs = true;
+              dictPaste.checked = true;
+              saveSettingsPatch({ notesDictationPasteIntoInputs: true }).then(function (next) {
+                syncDictationSettingsUI();
+                if (!next) refreshDictationStatus();
+              });
+            });
+          });
+          return;
+        }
+
+        // Toggling OFF (or unchanged): just persist.
+        state.dictationPasteIntoInputs = want;
         saveSettingsPatch({ notesDictationPasteIntoInputs: state.dictationPasteIntoInputs }).then(function (next) {
           syncDictationSettingsUI();
           if (!next) refreshDictationStatus();
@@ -3895,6 +4022,13 @@
     // Keyboard shortcut: Cmd+K for search focus
     document.addEventListener('keydown', function (e) {
       if (!isNotesVisible()) return;
+
+      var perm = $('notesPermissionModal');
+      if (perm && perm.style.display !== 'none' && e.key === 'Escape') {
+        e.preventDefault();
+        closePermissionModal(false);
+        return;
+      }
 
       if (state.templatesModalOpen && e.key === 'Escape') {
         e.preventDefault();

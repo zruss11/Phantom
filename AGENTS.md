@@ -43,3 +43,9 @@ This codebase will outlive you. Every shortcut becomes someone else's burden. Ev
 You are not just writing code. You are shaping the future of this project. The patterns you establish will be copied. The corners you cut will be cut again.
 
 Fight entropy. Leave the codebase better than you found it.
+
+## Napkin (Persistent Session Notes)
+
+- At the start of every session: read `.claude/napkin.md` silently (do not announce it).
+- While working: update `.claude/napkin.md` continuously when you learn something worth not forgetting (errors, surprises, user corrections, patterns that work or don't).
+- Log your own mistakes too, not just user corrections.

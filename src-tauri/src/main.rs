@@ -6601,7 +6601,8 @@ async fn save_settings(
     {
         use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 
-        let prev_enabled = prev.notes_dictation_enabled.unwrap_or(true);
+        // UX: dictation defaults OFF; don't register/unregister shortcuts unless explicitly enabled.
+        let prev_enabled = prev.notes_dictation_enabled.unwrap_or(false);
         let prev_activation =
             prev.notes_dictation_activation
                 .as_deref()
@@ -6635,7 +6636,7 @@ async fn save_settings(
             }
         }
 
-        let next_enabled = next.notes_dictation_enabled.unwrap_or(true);
+        let next_enabled = next.notes_dictation_enabled.unwrap_or(false);
         let next_activation =
             next.notes_dictation_activation
                 .as_deref()
@@ -13318,6 +13319,7 @@ fn main() {
             dictation::dictation_get_status,
             dictation::dictation_start,
             dictation::dictation_stop,
+            dictation::dictation_request_accessibility,
             // Code review commands
             gather_code_review_context,
             // Auto-update commands
