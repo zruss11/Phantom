@@ -18,6 +18,7 @@
     textNoteLastSavedText: '',
     sessions: [],
     selectedSessionId: null,
+    pendingOpenSessionId: null,
     visibilityObserver: null,
 
     // New for 3-panel layout
@@ -4216,6 +4217,19 @@
       init();
     });
 
+    // Open a note session from elsewhere in the app (e.g. global Cmd+K palette).
+    window.addEventListener('PhantomOpenNote', function (event) {
+      var sessionId = event && event.detail && event.detail.sessionId;
+      if (!sessionId) return;
+      state.pendingOpenSessionId = sessionId;
+      if (!isNotesVisible()) return;
+      init().then(function () {
+        if (state.pendingOpenSessionId !== sessionId) return;
+        state.pendingOpenSessionId = null;
+        switchView('transcript', sessionId);
+      }).catch(function () {});
+    });
+
     // Keyboard shortcut: Cmd+K for search focus
     document.addEventListener('keydown', function (e) {
       if (!isNotesVisible()) return;
@@ -4256,13 +4270,6 @@
           return;
         }
       }
-
-      // Cmd/Ctrl+K opens palette.
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
-        e.preventDefault();
-        openSearchPalette();
-        return;
-      }
     });
 
     watchNotesVisibility();
@@ -4274,7 +4281,12 @@
 
     state.visibilityObserver = new MutationObserver(function () {
       if (!page.hasAttribute('hidden')) {
-        init();
+        init().then(function () {
+          if (!state.pendingOpenSessionId) return;
+          var sessionId = state.pendingOpenSessionId;
+          state.pendingOpenSessionId = null;
+          switchView('transcript', sessionId);
+        }).catch(function () {});
         startUpcomingRefresh();
       } else {
         stopUpcomingRefresh();
@@ -4287,7 +4299,12 @@
     });
 
     if (!page.hasAttribute('hidden')) {
-      init();
+      init().then(function () {
+        if (!state.pendingOpenSessionId) return;
+        var sessionId = state.pendingOpenSessionId;
+        state.pendingOpenSessionId = null;
+        switchView('transcript', sessionId);
+      }).catch(function () {});
       startUpcomingRefresh();
     }
   }

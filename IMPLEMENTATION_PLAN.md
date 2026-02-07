@@ -21,10 +21,10 @@
   - [x] `semantic_delete_for_entity` (deletes from `semantic_chunks` + `semantic_fts`)
 
 ### M2 — Global Cmd+K palette (app-wide)
-- [ ] Move command palette overlay out of `notesPage` so it exists globally
-- [ ] Add document-level key handler in `gui/js/application.js` (Cmd/Ctrl+K)
-- [ ] Render results grouped by type (Tasks / Notes)
-- [ ] Selecting result navigates + opens the item
+- [x] Move command palette overlay out of `notesPage` so it exists globally (moved to top-level in `gui/menu.html`)
+- [x] Add document-level key handler in `gui/js/application.js` (Cmd/Ctrl+K) (via keybind `action.commandPalette`)
+- [x] Render results grouped by type (Tasks / Notes) (global palette UI)
+- [x] Selecting result navigates + opens the item (tasks open chat, notes open transcript)
 
 ### M3 — Keyword search (MVP fallback)
 - [ ] Implement keyword-only search via FTS if available
