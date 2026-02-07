@@ -4,6 +4,8 @@ mod automations;
 mod calendar;
 mod claude_local_usage;
 mod claude_usage_watcher;
+mod claude_controller;
+mod claude_controller_api;
 mod command_center;
 mod db;
 mod debug_http;
@@ -32,8 +34,8 @@ use utils::{default_search_paths, resolve_command_path, resolve_gh_binary, trunc
 
 use chrono::{Local, TimeZone};
 use phantom_harness_backend::cli::{
-    AgentCliKind, AgentProcessClient, AvailableCommand, ImageContent, StreamingUpdate,
-    TokenUsageInfo, UserInputQuestion,
+    AgentCliKind, AgentProcessClient, AvailableCommand, ImageContent, PromptMessage,
+    SessionPromptResult, StreamingUpdate, TokenUsageInfo, UserInputQuestion,
 };
 use phantom_harness_backend::{
     apply_model_selection, get_agent_models as backend_get_agent_models,
@@ -67,6 +69,8 @@ use tokio::time::{timeout, Duration};
 use libc::{getegid, geteuid};
 
 use debug_http::start_debug_http;
+use claude_controller::ClaudeTeamsController;
+use claude_controller_api::start_claude_controller_api;
 use mcp_server::{start_mcp_server, McpConfig};
 
 /// Model pricing (per million tokens): (model_pattern, input_rate, output_rate)
@@ -362,6 +366,7 @@ pub(crate) struct AppState {
     codex_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
     claude_command_cache: Arc<StdMutex<HashMap<String, Vec<AvailableCommand>>>>,
     claude_oauth_state: Arc<Mutex<ClaudeOauthState>>,
+    claude_teams_controller: Arc<tokio::sync::Mutex<Option<ClaudeTeamsController>>>,
     terminal_sessions: Arc<Mutex<HashMap<String, TerminalSession>>>,
     task_terminal_sessions: Arc<Mutex<HashMap<String, String>>>,
     meeting_manager: Arc<StdMutex<meeting_notes::MeetingSessionManager>>,
@@ -607,6 +612,12 @@ struct Settings {
     claude_auth_method: Option<String>,
     #[serde(rename = "claudeDockerImage")]
     claude_docker_image: Option<String>,
+    /// Claude integration mode: "stream_json" (default) or "teammate_controller"
+    #[serde(rename = "claudeIntegrationMode")]
+    claude_integration_mode: Option<String>,
+    /// Token used to authorize the local Claude controller REST API.
+    #[serde(rename = "claudeControllerToken")]
+    claude_controller_token: Option<String>,
     #[serde(rename = "agentNotificationsEnabled")]
     agent_notifications_enabled: Option<bool>,
     #[serde(rename = "agentNotificationStack")]
@@ -800,9 +811,8 @@ struct AgentModelPrefs {
 
 struct SessionHandle {
     agent_id: String,
-    session_id: String,
     model: String,
-    client: Arc<AgentProcessClient>,
+    backend: SessionBackend,
     pending_prompt: Option<String>,
     pending_attachments: Vec<AttachmentRef>,
     messages: Vec<serde_json::Value>,
@@ -815,6 +825,19 @@ struct SessionHandle {
     /// When true, the next message should be wrapped with conversation history context.
     /// This is set when a session is reconnected without session/load (e.g., after account switch).
     needs_history_injection: bool,
+}
+
+#[derive(Clone)]
+enum SessionBackend {
+    Acp {
+        client: Arc<AgentProcessClient>,
+        session_id: String,
+    },
+    ClaudeTeams {
+        team_name: String,
+        agent_name: String,
+        pid: i32,
+    },
 }
 
 type SharedSessionHandle = Arc<Mutex<SessionHandle>>;
@@ -1463,8 +1486,35 @@ fn ensure_mcp_settings(settings: &mut Settings) -> bool {
     changed
 }
 
+fn ensure_claude_controller_settings(settings: &mut Settings) -> bool {
+    let mut changed = false;
+    if settings
+        .claude_controller_token
+        .as_ref()
+        .map(|token| token.trim().is_empty())
+        .unwrap_or(true)
+    {
+        settings.claude_controller_token = Some(generate_mcp_token());
+        changed = true;
+    }
+    changed
+}
+
 fn mcp_enabled(settings: &Settings) -> bool {
     settings.mcp_enabled.unwrap_or(true)
+}
+
+fn claude_use_teammate_controller(settings: &Settings) -> bool {
+    if std::env::var("PHANTOM_CLAUDE_TEAMS").ok().as_deref() == Some("1") {
+        return true;
+    }
+    matches!(
+        settings
+            .claude_integration_mode
+            .as_deref()
+            .map(|s| s.trim()),
+        Some("teammate_controller")
+    )
 }
 
 fn claude_credentials_write_enabled(settings: &Settings) -> bool {
@@ -4554,6 +4604,258 @@ pub(crate) async fn create_agent_session_internal(
     let env = build_env(&agent.required_env, &overrides, allow_missing)?;
     let args = substitute_args(&agent.args, &cwd_str);
     let claude_runtime = claude_runtime_from_payload(&payload, &settings);
+
+    // Claude teammate-controller integration (opt-in).
+    if payload.agent_id == "claude-code"
+        && claude_runtime == ClaudeRuntime::Native
+        && claude_use_teammate_controller(&settings)
+    {
+        let no_fallback = std::env::var("PHANTOM_CLAUDE_TEAMS_NO_FALLBACK")
+            .ok()
+            .map(|v| v == "1")
+            .unwrap_or(false);
+
+        let deferred_branch_rename_clone = deferred_branch_rename.clone();
+        let worktree_path_clone = worktree_path.clone();
+
+        let teams_attempt: Result<CreateAgentResult, String> = async {
+            // Select model: use exec_model if specified, otherwise fall back to agent defaults
+            let selected = if payload.exec_model == "default" {
+                if payload.plan_mode {
+                    agent
+                        .default_plan_model
+                        .clone()
+                        .or_else(|| agent.default_exec_model.clone())
+                        .unwrap_or_else(|| "default".to_string())
+                } else {
+                    agent
+                        .default_exec_model
+                        .clone()
+                        .unwrap_or_else(|| "default".to_string())
+                }
+            } else {
+                payload.exec_model.clone()
+            };
+
+            let id_prefix = if payload.suppress_notifications {
+                "notes"
+            } else {
+                "task"
+            };
+            let task_id = format!(
+                "{}-{}-{}",
+                id_prefix,
+                chrono::Utc::now().timestamp_millis(),
+                uuid::Uuid::new_v4()
+                    .to_string()
+                    .split('-')
+                    .next()
+                    .unwrap_or("0000")
+            );
+
+            let team_name = claude_team_name_default();
+            let agent_name = derive_claude_agent_name(&task_id, None, &payload.prompt);
+
+            // Ensure controller is initialized.
+            let controller = {
+                let mut slot = state.claude_teams_controller.lock().await;
+                if slot.is_none() {
+                    let claude_binary = resolve_claude_command();
+                    let ctrl = ClaudeTeamsController::init(
+                        team_name.clone(),
+                        cwd_str.clone(),
+                        claude_binary,
+                        env.clone(),
+                    )
+                    .await?;
+                    *slot = Some(ctrl);
+                }
+                slot.as_ref().cloned().ok_or("controller init failed")?
+            };
+
+            // Spawn agent process (best-effort: if already running, keep going).
+            let pid = if controller.is_agent_running(&agent_name).await {
+                controller.subscribe(&agent_name).await; // ensure channel exists
+                0
+            } else {
+                controller
+                    .spawn_agent(
+                        agent_name.clone(),
+                        Some("general-purpose".to_string()),
+                        Some(selected.clone()).filter(|m| m != "default"),
+                        Some(cwd_str.clone()),
+                        Some(payload.permission_mode.clone()).filter(|m| m != "default"),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .await?
+            };
+
+            let handle = SessionHandle {
+                agent_id: payload.agent_id.clone(),
+                model: selected.clone(),
+                backend: SessionBackend::ClaudeTeams {
+                    team_name: team_name.clone(),
+                    agent_name: agent_name.clone(),
+                    pid,
+                },
+                pending_prompt: Some(payload.prompt.clone()),
+                pending_attachments: payload.attachments.clone(),
+                messages: Vec::new(),
+                suppress_notifications: payload.suppress_notifications,
+                claude_watcher: None,
+                cancel_token: CancellationToken::new(),
+                needs_history_injection: false,
+            };
+
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(task_id.clone(), Arc::new(Mutex::new(handle)));
+            drop(sessions);
+
+            // Persist task to database.
+            let initial_branch = if let Some(path) = worktree_path_clone.as_ref() {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string())
+            } else if let Some(repo_root) = resolve_repo_root(&source_path).await {
+                worktree::current_branch(&repo_root)
+                    .await
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            } else {
+                None
+            };
+            {
+                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                let now = chrono::Utc::now().timestamp();
+                let task = db::TaskRecord {
+                    id: task_id.clone(),
+                    agent_id: payload.agent_id.clone(),
+                    codex_account_id: None,
+                    model: selected.clone(),
+                    prompt: Some(payload.prompt.clone()),
+                    project_path: payload.project_path.clone(),
+                    worktree_path: worktree_path_clone
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().to_string()),
+                    branch: initial_branch,
+                    status: "Ready".to_string(),
+                    status_state: "idle".to_string(),
+                    cost: 0.0,
+                    created_at: now,
+                    updated_at: now,
+                    title_summary: None,
+                    agent_session_id: Some(format!("local-teams:{}:{}", team_name, agent_name)),
+                    total_tokens: None,
+                    context_window: None,
+                    claude_runtime: Some("native".to_string()),
+                    claude_team_name: Some(team_name.clone()),
+                    claude_agent_name: Some(agent_name.clone()),
+                };
+                db::insert_task(&conn, &task).map_err(|e| e.to_string())?;
+            }
+
+            // Generate AI title summary in the background (non-blocking)
+            if settings.ai_summaries_enabled.unwrap_or(true) {
+                let prompt_clone = payload.prompt.clone();
+                let agent_clone = payload.agent_id.clone();
+                let task_id_clone = task_id.clone();
+                let db_clone = state.db.clone();
+                let window_opt = app.get_webview_window("main");
+                let summaries_agent = settings.summaries_agent.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    let title = summarize::summarize_title_with_override(
+                        &prompt_clone,
+                        &agent_clone,
+                        summaries_agent.as_deref(),
+                    )
+                    .await;
+                    if let Ok(conn) = db_clone.lock() {
+                        let _ = db::update_task_title_summary(&conn, &task_id_clone, &title);
+                    }
+                    if let Some(window) = window_opt {
+                        let _ = window.emit("TitleUpdate", (&task_id_clone, &title));
+                    }
+                });
+            }
+
+            // Spawn async branch rename task (deferred branch naming)
+            if let Some((repo_root, animal_name, workspace_path)) = deferred_branch_rename_clone {
+                let prompt_clone = payload.prompt.clone();
+                let agent_clone = payload.agent_id.clone();
+                let task_id_clone = task_id.clone();
+                let window_opt = app.get_webview_window("main");
+                let multi_create = payload.multi_create;
+                let summaries_agent = settings.summaries_agent.clone();
+                let api_key = settings.anthropic_api_key.clone();
+                let _db_clone = state.db.clone();
+
+                tauri::async_runtime::spawn(async move {
+                    let timeout_secs = if summaries_agent.as_deref() == Some("opencode") {
+                        30
+                    } else {
+                        5
+                    };
+                    let metadata = namegen::generate_run_metadata_with_timeout_and_override(
+                        &prompt_clone,
+                        &agent_clone,
+                        summaries_agent.as_deref(),
+                        api_key.as_deref(),
+                        timeout_secs,
+                    )
+                    .await;
+                    let branch_seed = if multi_create {
+                        let suffix = uuid::Uuid::new_v4()
+                            .to_string()
+                            .split('-')
+                            .next()
+                            .unwrap_or("0000")
+                            .to_string();
+                        format!("{}-{}", metadata.branch_name, suffix)
+                    } else {
+                        metadata.branch_name.clone()
+                    };
+                    let new_branch = match worktree::unique_branch_name(&repo_root, &branch_seed).await
+                    {
+                        Ok(name) => name,
+                        Err(_) => return,
+                    };
+                    if new_branch == animal_name {
+                        return;
+                    }
+                    if worktree::rename_worktree_branch(&workspace_path, &animal_name, &new_branch)
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    if let Some(window) = window_opt {
+                        let _ = window.emit("BranchUpdate", (&task_id_clone, &new_branch));
+                    }
+                });
+            }
+
+            let result_session_id = format!("teams:{}:{}", team_name, agent_name);
+            Ok(CreateAgentResult {
+                task_id,
+                session_id: result_session_id,
+                worktree_path: worktree_path_clone.map(|p| p.to_string_lossy().to_string()),
+            })
+        }
+        .await;
+
+        match teams_attempt {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                eprintln!("[Harness] Claude teammate-controller init failed, falling back to stream-json: {err}");
+                if no_fallback {
+                    return Err(err);
+                }
+            }
+        }
+    }
+
     let workspace_root = worktree_path.as_ref().unwrap_or(&source_path);
     let spawn_spec = build_agent_spawn_spec(
         agent,
@@ -4684,9 +4986,11 @@ pub(crate) async fn create_agent_session_internal(
 
     let handle = SessionHandle {
         agent_id: payload.agent_id.clone(),
-        session_id: session.session_id.clone(),
         model: selected.clone(),
-        client,
+        backend: SessionBackend::Acp {
+            client,
+            session_id: session.session_id.clone(),
+        },
         pending_prompt: Some(payload.prompt.clone()),
         pending_attachments: payload.attachments.clone(),
         messages: Vec::new(),
@@ -4741,6 +5045,8 @@ pub(crate) async fn create_agent_session_internal(
             } else {
                 None
             },
+            claude_team_name: None,
+            claude_agent_name: None,
         };
         db::insert_task(&conn, &task).map_err(|e| e.to_string())?;
     }
@@ -5254,113 +5560,216 @@ pub(crate) async fn start_task_internal(
         emit_status("Reconnecting...", "yellow", "running")?;
 
         let claude_runtime = claude_runtime_from_task(&task, &settings);
-        let (client, session_id, used_session_load) = match reconnect_session_with_context(
-            agent,
-            &task,
-            &cwd,
-            &env,
-            &state.db,
-            false,
-            &settings,
-            claude_runtime,
-        )
-        .await
+
+        let handle_ref = if task.agent_id == "claude-code"
+            && matches!(claude_runtime, ClaudeRuntime::Native)
+            && claude_use_teammate_controller(&settings)
+            && task.claude_team_name.is_some()
+            && task.claude_agent_name.is_some()
         {
-            Ok(result) => result,
-            Err(e) => {
-                let error_msg = format!("Failed to reconnect: {}", e);
-                println!("[Harness] start_task reconnect error: {}", error_msg);
-                emit_status(&error_msg, "red", "error")?;
-                return Err(error_msg);
-            }
-        };
+            let team_name = task.claude_team_name.clone().unwrap_or_else(|| "phantom-harness".to_string());
+            let agent_name = task.claude_agent_name.clone().unwrap_or_else(|| "controller".to_string());
 
-        let model = task.model.clone();
-        let resume_prompt = if task.status == "Stopped" {
-            Some("Continue".to_string())
-        } else {
-            task.prompt.clone()
-        };
-
-        // Prepare the prompt with history context if needed
-        // For start_task, we're re-running the original prompt, so inject history before it
-        let prompt_with_context = if !used_session_load {
-            // Load history for context injection
-            let history_opt = {
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                let messages =
-                    db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
-                if !messages.is_empty() {
-                    let (history, _) = db::compact_history(&messages, None, 100_000);
-                    Some(history)
+            // In teammate mode we don't have session/load context restoration, so always inject
+            // history into "Continue"/prompt to preserve context after restarts.
+            let resume_prompt = if task.status == "Stopped" {
+                Some("Continue".to_string())
+            } else {
+                task.prompt.clone()
+            };
+            let prompt_with_context = {
+                let history_opt = {
+                    let conn = state.db.lock().map_err(|e| e.to_string())?;
+                    let messages =
+                        db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
+                    if !messages.is_empty() {
+                        let (history, _) = db::compact_history(&messages, None, 100_000);
+                        Some(history)
+                    } else {
+                        None
+                    }
+                };
+                if let Some(history) = history_opt {
+                    if let Some(ref base_prompt) = resume_prompt {
+                        Some(format_message_with_history(&history, base_prompt))
+                    } else {
+                        resume_prompt.clone()
+                    }
                 } else {
-                    None
+                    resume_prompt.clone()
                 }
             };
 
-            if let Some(history) = history_opt {
-                if let Some(ref base_prompt) = resume_prompt {
-                    Some(format_message_with_history(&history, base_prompt))
+            let cwd_str = cwd.to_string_lossy().to_string();
+            let controller = {
+                let mut slot = state.claude_teams_controller.lock().await;
+                if slot.is_none() {
+                    let controller = ClaudeTeamsController::init(
+                        team_name.clone(),
+                        cwd_str.clone(),
+                        "claude".to_string(),
+                        env.clone(),
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to init Claude teammate controller: {e}"))?;
+                    *slot = Some(controller);
+                }
+                slot.as_ref()
+                    .cloned()
+                    .ok_or_else(|| "Claude teammate controller not initialized".to_string())?
+            };
+
+            // Respawn best-effort after restarts.
+            if !controller.is_agent_running(&agent_name).await {
+                let _ = controller
+                    .spawn_agent(
+                        agent_name.clone(),
+                        Some("general-purpose".to_string()),
+                        Some(task.model.clone()).filter(|m| m != "default"),
+                        Some(cwd_str),
+                        Some("bypassPermissions".to_string()),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .await;
+            }
+
+            let handle = SessionHandle {
+                agent_id: task.agent_id.clone(),
+                model: task.model.clone(),
+                backend: SessionBackend::ClaudeTeams {
+                    team_name: team_name.clone(),
+                    agent_name: agent_name.clone(),
+                    pid: 0,
+                },
+                pending_prompt: prompt_with_context,
+                pending_attachments: Vec::new(),
+                messages: Vec::new(),
+                suppress_notifications: task_id.starts_with("notes-"),
+                claude_watcher: None,
+                cancel_token: CancellationToken::new(),
+                needs_history_injection: false,
+            };
+
+            let handle_ref = Arc::new(Mutex::new(handle));
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(task_id.clone(), handle_ref.clone());
+
+            let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
+            let commands = collect_claude_commands(state, &command_root);
+            emit_available_commands(&app, &task_id, &task.agent_id, &commands);
+
+            handle_ref
+        } else {
+            let (client, session_id, used_session_load) = match reconnect_session_with_context(
+                agent,
+                &task,
+                &cwd,
+                &env,
+                &state.db,
+                false,
+                &settings,
+                claude_runtime,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    let error_msg = format!("Failed to reconnect: {}", e);
+                    println!("[Harness] start_task reconnect error: {}", error_msg);
+                    emit_status(&error_msg, "red", "error")?;
+                    return Err(error_msg);
+                }
+            };
+
+            let model = task.model.clone();
+            let resume_prompt = if task.status == "Stopped" {
+                Some("Continue".to_string())
+            } else {
+                task.prompt.clone()
+            };
+
+            // Prepare the prompt with history context if needed
+            // For start_task, we're re-running the original prompt, so inject history before it
+            let prompt_with_context = if !used_session_load {
+                // Load history for context injection
+                let history_opt = {
+                    let conn = state.db.lock().map_err(|e| e.to_string())?;
+                    let messages =
+                        db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
+                    if !messages.is_empty() {
+                        let (history, _) = db::compact_history(&messages, None, 100_000);
+                        Some(history)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(history) = history_opt {
+                    if let Some(ref base_prompt) = resume_prompt {
+                        Some(format_message_with_history(&history, base_prompt))
+                    } else {
+                        resume_prompt.clone()
+                    }
                 } else {
                     resume_prompt.clone()
                 }
             } else {
+                // session/load restored context, use original prompt
                 resume_prompt.clone()
-            }
-        } else {
-            // session/load restored context, use original prompt
-            resume_prompt.clone()
-        };
-
-        println!(
-            "[Harness] Session reconnected for start_task: task_id={} session_id={} (used_session_load={})",
-            task_id, session_id, used_session_load
-        );
-
-        // Spawn Claude usage watcher for reconnected sessions
-        let claude_watcher = if task.agent_id == "claude-code" {
-            Some(claude_usage_watcher::start_watching(
-                &session_id,
-                &task_id,
-                app.clone(),
-                state.db.clone(),
-            ))
-        } else {
-            None
-        };
-
-        let handle = SessionHandle {
-            agent_id: task.agent_id.clone(),
-            session_id,
-            model: model.clone(),
-            client,
-            pending_prompt: prompt_with_context,
-            pending_attachments: Vec::new(),
-            messages: Vec::new(),
-            suppress_notifications: task_id.starts_with("notes-"),
-            claude_watcher,
-            cancel_token: CancellationToken::new(),
-            needs_history_injection: false,
-        };
-
-        let handle_ref = Arc::new(Mutex::new(handle));
-        let mut sessions = state.sessions.lock().await;
-        sessions.insert(task_id.clone(), handle_ref.clone());
-
-        if task.agent_id == "codex" || task.agent_id == "claude-code" {
-            let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
-            let commands = if task.agent_id == "codex" {
-                collect_codex_commands(state, &command_root)
-            } else {
-                collect_claude_commands(state, &command_root)
             };
-            emit_available_commands(&app, &task_id, &task.agent_id, &commands);
-        }
+
+            println!(
+                "[Harness] Session reconnected for start_task: task_id={} session_id={} (used_session_load={})",
+                task_id, session_id, used_session_load
+            );
+
+            // Spawn Claude usage watcher for reconnected sessions
+            let claude_watcher = if task.agent_id == "claude-code" {
+                Some(claude_usage_watcher::start_watching(
+                    &session_id,
+                    &task_id,
+                    app.clone(),
+                    state.db.clone(),
+                ))
+            } else {
+                None
+            };
+
+            let handle = SessionHandle {
+                agent_id: task.agent_id.clone(),
+                model: model.clone(),
+                backend: SessionBackend::Acp { client, session_id },
+                pending_prompt: prompt_with_context,
+                pending_attachments: Vec::new(),
+                messages: Vec::new(),
+                suppress_notifications: task_id.starts_with("notes-"),
+                claude_watcher,
+                cancel_token: CancellationToken::new(),
+                needs_history_injection: false,
+            };
+
+            let handle_ref = Arc::new(Mutex::new(handle));
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(task_id.clone(), handle_ref.clone());
+
+            if task.agent_id == "codex" || task.agent_id == "claude-code" {
+                let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
+                let commands = if task.agent_id == "codex" {
+                    collect_codex_commands(state, &command_root)
+                } else {
+                    collect_claude_commands(state, &command_root)
+                };
+                emit_available_commands(&app, &task_id, &task.agent_id, &commands);
+            }
+            handle_ref
+        };
+
         handle_ref
     };
 
     let user_timestamp = chrono::Utc::now().to_rfc3339();
-    let (agent_id, model, prompt, attachments, client, session_id, cancel_token) = {
+    let (agent_id, model, prompt, attachments, backend, cancel_token) = {
         let mut handle = handle_ref.lock().await;
         let prompt = handle
             .pending_prompt
@@ -5382,8 +5791,7 @@ pub(crate) async fn start_task_internal(
             handle.model.clone(),
             prompt,
             attachments,
-            handle.client.clone(),
-            handle.session_id.clone(),
+            handle.backend.clone(),
             handle.cancel_token.clone(),
         )
     };
@@ -5852,300 +6260,443 @@ pub(crate) async fn start_task_internal(
         }
     });
 
-    // Use streaming version of session_prompt (with images if present)
-    // Wrapped in retry logic for recoverable errors (exit code 143/SIGTERM)
-    const MAX_RECONNECT_ATTEMPTS: u32 = 2;
-    let mut attempt = 0;
-    let mut client = client;
-    let mut session_id = session_id;
-    let mut auto_switch_attempted = false;
+    let response: SessionPromptResult = match backend.clone() {
+        SessionBackend::ClaudeTeams {
+            team_name: _,
+            agent_name,
+            ..
+        } => {
+            // Ensure controller exists (should already be initialized when the session was created).
+            let controller = {
+                let slot = state.claude_teams_controller.lock().await;
+                slot.as_ref()
+                    .cloned()
+                    .ok_or_else(|| "Claude teammate controller not initialized".to_string())?
+            };
 
-    let response = loop {
-        attempt += 1;
+            // Respawn best-effort after restarts.
+            if !controller.is_agent_running(&agent_name).await {
+                let task = {
+                    let conn = state.db.lock().map_err(|e| e.to_string())?;
+                    db::list_tasks(&conn)
+                        .map_err(|e| e.to_string())?
+                        .into_iter()
+                        .find(|t| t.id == task_id)
+                };
+                let cwd_for_spawn = if let Some(task) = task.as_ref() {
+                    resolve_task_cwd(task)
+                        .ok()
+                        .unwrap_or_else(|| {
+                            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                        })
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                };
+                let _ = controller
+                    .spawn_agent(
+                        agent_name.clone(),
+                        Some("general-purpose".to_string()),
+                        Some(model.clone()).filter(|m| m != "default"),
+                        Some(cwd_for_spawn.to_string_lossy().to_string()),
+                        Some("bypassPermissions".to_string()),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .await;
+            }
 
-        let result = if images.is_empty() {
-            client
-                .session_prompt_streaming_with_cancellation(
-                    &session_id,
-                    &prompt,
-                    |update| {
-                        let _ = stream_tx.send(update);
-                    },
-                    Some(&cancel_token),
-                )
+            let mut rx = controller.subscribe(&agent_name).await;
+            controller
+                .send(&agent_name, &prompt, None)
                 .await
-        } else {
-            println!("[Harness] Sending prompt with {} image(s)", images.len());
-            client
-                .session_prompt_streaming_with_images_and_cancellation(
-                    &session_id,
-                    &prompt,
-                    &images,
-                    |update| {
-                        let _ = stream_tx.send(update);
-                    },
-                    Some(&cancel_token),
-                )
-                .await
-        };
+                .map_err(|e| format!("Claude teammate send failed: {e}"))?;
 
-        match result {
-            Ok(response) => break response,
-            Err(e) => {
-                let error_str = e.to_string();
-                println!(
-                    "[Harness] session/prompt error (attempt {}): {}",
-                    attempt, error_str
-                );
+            let mut full_text = String::new();
+            let deadline = Instant::now() + Duration::from_secs(60 * 30);
+            loop {
+                if cancel_token.is_cancelled() {
+                    let _ = controller
+                        .shutdown_agent(&agent_name, "Soft stop requested")
+                        .await;
+                    break;
+                }
+                if Instant::now() > deadline {
+                    break;
+                }
 
-                if agent_id == "codex"
-                    && !auto_switch_attempted
-                    && is_codex_rate_limit_error(&error_str)
-                {
-                    auto_switch_attempted = true;
-                    let task = {
-                        let conn = state.db.lock().map_err(|e| e.to_string())?;
-                        db::list_tasks(&conn)
-                            .map_err(|e| e.to_string())?
-                            .into_iter()
-                            .find(|t| t.id == task_id)
-                    };
+                let next = timeout(Duration::from_secs(1), rx.recv()).await;
+                let Ok(Ok(msg)) = next else {
+                    continue;
+                };
 
-                    if let Some(task) = task {
-                        let active_account_id =
-                            state.settings.lock().await.active_codex_account_id.clone();
-                        let current_account_id = task
-                            .codex_account_id
-                            .as_deref()
-                            .or(active_account_id.as_deref());
-                        if let Some(next_account) =
-                            pick_best_codex_account(state, current_account_id).await?
+                // Parse structured teammate messages.
+                let mut content_opt: Option<String> = None;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.text) {
+                    if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
+                        if t == "idle_notification" {
+                            break;
+                        }
+                        if t == "plain_text" {
+                            content_opt = v
+                                .get("text")
+                                .and_then(|x| x.as_str())
+                                .map(|s| s.to_string());
+                        }
+                    }
+                }
+                let content = content_opt.unwrap_or_else(|| msg.text.clone());
+                if content.trim().is_empty() {
+                    continue;
+                }
+
+                if !full_text.is_empty() {
+                    full_text.push_str("\n");
+                }
+                full_text.push_str(&content);
+                let _ = stream_tx.send(StreamingUpdate::TextChunk {
+                    text: content,
+                    item_id: None,
+                });
+            }
+
+            let mut messages: Vec<PromptMessage> = Vec::new();
+            if !full_text.trim().is_empty() {
+                messages.push(PromptMessage {
+                    message_type: "assistant_message".to_string(),
+                    content: Some(full_text),
+                    reasoning: None,
+                    name: None,
+                    arguments: None,
+                    tool_return: None,
+                });
+            }
+            SessionPromptResult {
+                messages,
+                stop_reason: None,
+                token_usage: None,
+                session_id: None,
+            }
+        }
+        SessionBackend::Acp { client, session_id } => {
+            // Use streaming version of session_prompt (with images if present)
+            // Wrapped in retry logic for recoverable errors (exit code 143/SIGTERM)
+            const MAX_RECONNECT_ATTEMPTS: u32 = 2;
+            let mut attempt = 0;
+            let mut client = client;
+            let mut session_id = session_id;
+            let mut auto_switch_attempted = false;
+
+            loop {
+                attempt += 1;
+
+                let result = if images.is_empty() {
+                    client
+                        .session_prompt_streaming_with_cancellation(
+                            &session_id,
+                            &prompt,
+                            |update| {
+                                let _ = stream_tx.send(update);
+                            },
+                            Some(&cancel_token),
+                        )
+                        .await
+                } else {
+                    println!("[Harness] Sending prompt with {} image(s)", images.len());
+                    client
+                        .session_prompt_streaming_with_images_and_cancellation(
+                            &session_id,
+                            &prompt,
+                            &images,
+                            |update| {
+                                let _ = stream_tx.send(update);
+                            },
+                            Some(&cancel_token),
+                        )
+                        .await
+                };
+
+                match result {
+                    Ok(response) => break response,
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        println!(
+                            "[Harness] session/prompt error (attempt {}): {}",
+                            attempt, error_str
+                        );
+
+                        if agent_id == "codex"
+                            && !auto_switch_attempted
+                            && is_codex_rate_limit_error(&error_str)
                         {
-                            let codex_home = PathBuf::from(&next_account.codex_home);
-                            {
-                                let mut settings = state.settings.lock().await;
-                                settings.active_codex_account_id = Some(next_account.id.clone());
-                                persist_settings(&settings)?;
-                            }
-                            set_process_codex_home(Some(&codex_home));
-                            {
+                            auto_switch_attempted = true;
+                            let task = {
                                 let conn = state.db.lock().map_err(|e| e.to_string())?;
-                                let _ = db::update_task_codex_account_id(
-                                    &conn,
-                                    &task_id,
-                                    Some(&next_account.id),
-                                );
-                            }
+                                db::list_tasks(&conn)
+                                    .map_err(|e| e.to_string())?
+                                    .into_iter()
+                                    .find(|t| t.id == task_id)
+                            };
 
+                            if let Some(task) = task {
+                                let active_account_id =
+                                    state.settings.lock().await.active_codex_account_id.clone();
+                                let current_account_id = task
+                                    .codex_account_id
+                                    .as_deref()
+                                    .or(active_account_id.as_deref());
+                                if let Some(next_account) =
+                                    pick_best_codex_account(state, current_account_id).await?
+                                {
+                                    let codex_home = PathBuf::from(&next_account.codex_home);
+                                    {
+                                        let mut settings = state.settings.lock().await;
+                                        settings.active_codex_account_id =
+                                            Some(next_account.id.clone());
+                                        persist_settings(&settings)?;
+                                    }
+                                    set_process_codex_home(Some(&codex_home));
+                                    {
+                                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                        let _ = db::update_task_codex_account_id(
+                                            &conn,
+                                            &task_id,
+                                            Some(&next_account.id),
+                                        );
+                                    }
+
+                                    let agent = match find_agent(&state.config, &task.agent_id) {
+                                        Some(a) => a,
+                                        None => {
+                                            let (formatted_error, _) =
+                                                format_agent_error(&error_str);
+                                            return Err(format!(
+                                                "session/prompt failed: {}",
+                                                formatted_error
+                                            ));
+                                        }
+                                    };
+                                    let cwd = resolve_task_cwd(&task)?;
+                                    let settings = state.settings.lock().await.clone();
+                                    let overrides =
+                                        auth_env_for(&task.agent_id, &settings, Some(&codex_home));
+                                    let allow_missing =
+                                        settings.codex_auth_method.as_deref() == Some("chatgpt");
+                                    let env = match build_env(
+                                        &agent.required_env,
+                                        &overrides,
+                                        allow_missing,
+                                    ) {
+                                        Ok(e) => e,
+                                        Err(e) => {
+                                            return Err(format!(
+                                                "Reconnection failed - auth error: {}",
+                                                e
+                                            ));
+                                        }
+                                    };
+
+                                    let claude_runtime = claude_runtime_from_task(&task, &settings);
+                                    let (new_client, new_session_id, _used_session_load) =
+                                        reconnect_session_with_context(
+                                            agent,
+                                            &task,
+                                            &cwd,
+                                            &env,
+                                            &state.db,
+                                            true,
+                                            &settings,
+                                            claude_runtime,
+                                        )
+                                        .await?;
+
+                                    {
+                                        let mut handle = handle_ref.lock().await;
+                                        handle.backend = SessionBackend::Acp {
+                                            client: new_client.clone(),
+                                            session_id: new_session_id.clone(),
+                                        };
+                                    }
+
+                                    let history_opt = {
+                                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                        let mut messages = db::get_message_records(&conn, &task.id)
+                                            .map_err(|e| e.to_string())?;
+                                        if let Some(last) = messages.last() {
+                                            if last.message_type == "user_message"
+                                                && last.content.as_deref() == Some(prompt.as_str())
+                                            {
+                                                messages.pop();
+                                            }
+                                        }
+                                        if !messages.is_empty() {
+                                            let (history, _) = db::compact_history(
+                                                &messages,
+                                                task.prompt.as_deref(),
+                                                100_000,
+                                            );
+                                            Some(history)
+                                        } else {
+                                            None
+                                        }
+                                    };
+                                    if let Some(history) = history_opt {
+                                        if !prompt.contains("[User's new message]") {
+                                            prompt = format_message_with_history(&history, &prompt);
+                                        }
+                                    }
+
+                                    client = new_client;
+                                    session_id = new_session_id;
+                                    let _ = emit_status(
+                                        "Rate limit reached, switched account. Retrying...",
+                                        "#FFA500",
+                                        "running",
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Check if this is a recoverable exit (SIGTERM/exit code 143)
+                        if is_recoverable_exit(&error_str) && attempt < MAX_RECONNECT_ATTEMPTS {
+                            println!(
+                                "[Harness] Detected recoverable exit, attempting reconnection..."
+                            );
+
+                            // Emit reconnection status
+                            let _ = emit_status(
+                                "Session terminated, reconnecting...",
+                                "#FFA500",
+                                "running",
+                            );
+
+                            // Look up task from DB to get reconnection info
+                            let task = {
+                                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                db::list_tasks(&conn)
+                                    .map_err(|e| e.to_string())?
+                                    .into_iter()
+                                    .find(|t| t.id == task_id)
+                            };
+
+                            let task = match task {
+                                Some(t) => t,
+                                None => {
+                                    let (formatted_error, _) = format_agent_error(&error_str);
+                                    return Err(format!("session/prompt failed: {}", formatted_error));
+                                }
+                            };
+
+                            // Find agent config
                             let agent = match find_agent(&state.config, &task.agent_id) {
                                 Some(a) => a,
                                 None => {
                                     let (formatted_error, _) = format_agent_error(&error_str);
+                                    return Err(format!("session/prompt failed: {}", formatted_error));
+                                }
+                            };
+
+                            // Set up working directory
+                            let cwd = resolve_task_cwd(&task)?;
+
+                            // Build environment
+                            let settings = state.settings.lock().await.clone();
+                            let codex_home = if task.agent_id == "codex" {
+                                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                resolve_codex_account_home(
+                                    &conn,
+                                    task.codex_account_id
+                                        .as_deref()
+                                        .or(settings.active_codex_account_id.as_deref()),
+                                )
+                            } else {
+                                None
+                            };
+                            let overrides =
+                                auth_env_for(&task.agent_id, &settings, codex_home.as_deref());
+                            let allow_missing = (task.agent_id == "codex"
+                                && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+                                || (task.agent_id == "claude-code"
+                                    && matches!(
+                                        settings.claude_auth_method.as_deref(),
+                                        Some("cli") | Some("oauth")
+                                    ));
+
+                            let env = match build_env(&agent.required_env, &overrides, allow_missing)
+                            {
+                                Ok(e) => e,
+                                Err(e) => {
                                     return Err(format!(
-                                        "session/prompt failed: {}",
-                                        formatted_error
+                                        "Reconnection failed - auth error: {}",
+                                        e
                                     ));
                                 }
                             };
-                            let cwd = resolve_task_cwd(&task)?;
-                            let settings = state.settings.lock().await.clone();
-                            let overrides =
-                                auth_env_for(&task.agent_id, &settings, Some(&codex_home));
-                            let allow_missing =
-                                settings.codex_auth_method.as_deref() == Some("chatgpt");
-                            let env =
-                                match build_env(&agent.required_env, &overrides, allow_missing) {
-                                    Ok(e) => e,
-                                    Err(e) => {
-                                        return Err(format!(
-                                            "Reconnection failed - auth error: {}",
-                                            e
-                                        ));
-                                    }
-                                };
 
+                            // Reconnect with context restoration
                             let claude_runtime = claude_runtime_from_task(&task, &settings);
-                            let (new_client, new_session_id, _used_session_load) =
-                                reconnect_session_with_context(
-                                    agent,
-                                    &task,
-                                    &cwd,
-                                    &env,
-                                    &state.db,
-                                    true,
-                                    &settings,
-                                    claude_runtime,
-                                )
-                                .await?;
-
+                            match reconnect_session_with_context(
+                                agent,
+                                &task,
+                                &cwd,
+                                &env,
+                                &state.db,
+                                false,
+                                &settings,
+                                claude_runtime,
+                            )
+                            .await
                             {
-                                let mut handle = handle_ref.lock().await;
-                                handle.client = new_client.clone();
-                                handle.session_id = new_session_id.clone();
-                            }
-
-                            let history_opt = {
-                                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                                let mut messages = db::get_message_records(&conn, &task.id)
-                                    .map_err(|e| e.to_string())?;
-                                if let Some(last) = messages.last() {
-                                    if last.message_type == "user_message"
-                                        && last.content.as_deref() == Some(prompt.as_str())
-                                    {
-                                        messages.pop();
-                                    }
-                                }
-                                if !messages.is_empty() {
-                                    let (history, _) = db::compact_history(
-                                        &messages,
-                                        task.prompt.as_deref(),
-                                        100_000,
+                                Ok((new_client, new_session_id, _used_session_load)) => {
+                                    println!(
+                                        "[Harness] Session reconnected after termination: {}",
+                                        new_session_id
                                     );
-                                    Some(history)
-                                } else {
-                                    None
+
+                                    {
+                                        let mut handle = handle_ref.lock().await;
+                                        handle.backend = SessionBackend::Acp {
+                                            client: new_client.clone(),
+                                            session_id: new_session_id.clone(),
+                                        };
+
+                                        // Also update Claude watcher if applicable
+                                        if task.agent_id == "claude-code" {
+                                            handle.claude_watcher =
+                                                Some(claude_usage_watcher::start_watching(
+                                                    &new_session_id,
+                                                    &task_id,
+                                                    app.clone(),
+                                                    state.db.clone(),
+                                                ));
+                                        }
+                                    }
+
+                                    client = new_client;
+                                    session_id = new_session_id.clone();
+
+                                    // Emit status and retry
+                                    let _ = emit_status(
+                                        "Reconnected, retrying...",
+                                        "#4ade80",
+                                        "running",
+                                    );
+                                    continue; // Retry the prompt
                                 }
-                            };
-                            if let Some(history) = history_opt {
-                                if !prompt.contains("[User's new message]") {
-                                    prompt = format_message_with_history(&history, &prompt);
+                                Err(reconnect_err) => {
+                                    let (formatted_error, _) = format_agent_error(&error_str);
+                                    return Err(format!(
+                                        "Session terminated and reconnection failed: {} (reconnect error: {})",
+                                        formatted_error, reconnect_err
+                                    ));
                                 }
                             }
-
-                            client = new_client;
-                            session_id = new_session_id;
-                            let _ = emit_status(
-                                "Rate limit reached, switched account. Retrying...",
-                                "#FFA500",
-                                "running",
-                            );
-                            continue;
-                        }
-                    }
-                }
-
-                // Check if this is a recoverable exit (SIGTERM/exit code 143)
-                if is_recoverable_exit(&error_str) && attempt < MAX_RECONNECT_ATTEMPTS {
-                    println!("[Harness] Detected recoverable exit, attempting reconnection...");
-
-                    // Emit reconnection status
-                    let _ =
-                        emit_status("Session terminated, reconnecting...", "#FFA500", "running");
-
-                    // Look up task from DB to get reconnection info
-                    let task = {
-                        let conn = state.db.lock().map_err(|e| e.to_string())?;
-                        db::list_tasks(&conn)
-                            .map_err(|e| e.to_string())?
-                            .into_iter()
-                            .find(|t| t.id == task_id)
-                    };
-
-                    let task = match task {
-                        Some(t) => t,
-                        None => {
+                        } else {
+                            // Not recoverable or max attempts reached
                             let (formatted_error, _) = format_agent_error(&error_str);
                             return Err(format!("session/prompt failed: {}", formatted_error));
                         }
-                    };
-
-                    // Find agent config
-                    let agent = match find_agent(&state.config, &task.agent_id) {
-                        Some(a) => a,
-                        None => {
-                            let (formatted_error, _) = format_agent_error(&error_str);
-                            return Err(format!("session/prompt failed: {}", formatted_error));
-                        }
-                    };
-
-                    // Set up working directory
-                    let cwd = resolve_task_cwd(&task)?;
-
-                    // Build environment
-                    let settings = state.settings.lock().await.clone();
-                    let codex_home = if task.agent_id == "codex" {
-                        let conn = state.db.lock().map_err(|e| e.to_string())?;
-                        resolve_codex_account_home(
-                            &conn,
-                            task.codex_account_id
-                                .as_deref()
-                                .or(settings.active_codex_account_id.as_deref()),
-                        )
-                    } else {
-                        None
-                    };
-                    let overrides = auth_env_for(&task.agent_id, &settings, codex_home.as_deref());
-                    let allow_missing = (task.agent_id == "codex"
-                        && settings.codex_auth_method.as_deref() == Some("chatgpt"))
-                        || (task.agent_id == "claude-code"
-                            && matches!(
-                                settings.claude_auth_method.as_deref(),
-                                Some("cli") | Some("oauth")
-                            ));
-
-                    let env = match build_env(&agent.required_env, &overrides, allow_missing) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            return Err(format!("Reconnection failed - auth error: {}", e));
-                        }
-                    };
-
-                    // Reconnect with context restoration
-                    let claude_runtime = claude_runtime_from_task(&task, &settings);
-                    match reconnect_session_with_context(
-                        agent,
-                        &task,
-                        &cwd,
-                        &env,
-                        &state.db,
-                        false,
-                        &settings,
-                        claude_runtime,
-                    )
-                    .await
-                    {
-                        Ok((new_client, new_session_id, _used_session_load)) => {
-                            println!(
-                                "[Harness] Session reconnected after termination: {}",
-                                new_session_id
-                            );
-
-                            {
-                                let mut handle = handle_ref.lock().await;
-                                handle.client = new_client.clone();
-                                handle.session_id = new_session_id.clone();
-
-                                // Also update Claude watcher if applicable
-                                if task.agent_id == "claude-code" {
-                                    handle.claude_watcher =
-                                        Some(claude_usage_watcher::start_watching(
-                                            &new_session_id,
-                                            &task_id,
-                                            app.clone(),
-                                            state.db.clone(),
-                                        ));
-                                }
-                            }
-
-                            client = new_client;
-                            session_id = new_session_id.clone();
-
-                            // Emit status and retry
-                            let _ = emit_status("Reconnected, retrying...", "#4ade80", "running");
-                            continue; // Retry the prompt
-                        }
-                        Err(reconnect_err) => {
-                            let (formatted_error, _) = format_agent_error(&error_str);
-                            return Err(format!(
-                                "Session terminated and reconnection failed: {} (reconnect error: {})",
-                                formatted_error, reconnect_err
-                            ));
-                        }
                     }
-                } else {
-                    // Not recoverable or max attempts reached
-                    let (formatted_error, _) = format_agent_error(&error_str);
-                    return Err(format!("session/prompt failed: {}", formatted_error));
                 }
             }
         }
@@ -6262,17 +6813,19 @@ pub(crate) async fn start_task_internal(
 
     if let Some(new_session_id) = response.session_id.as_ref() {
         let mut handle = handle_ref.lock().await;
-        if new_session_id != &handle.session_id {
-            handle.session_id = new_session_id.clone();
-            let conn = state.db.lock().map_err(|e| e.to_string())?;
-            let _ = db::update_task_agent_session_id(&conn, &task_id, new_session_id);
-            if agent_id == "claude-code" {
-                handle.claude_watcher = Some(claude_usage_watcher::start_watching(
-                    new_session_id,
-                    &task_id,
-                    app.clone(),
-                    state.db.clone(),
-                ));
+        if let SessionBackend::Acp { session_id, .. } = &mut handle.backend {
+            if new_session_id != session_id {
+                *session_id = new_session_id.clone();
+                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                let _ = db::update_task_agent_session_id(&conn, &task_id, new_session_id);
+                if agent_id == "claude-code" {
+                    handle.claude_watcher = Some(claude_usage_watcher::start_watching(
+                        new_session_id,
+                        &task_id,
+                        app.clone(),
+                        state.db.clone(),
+                    ));
+                }
             }
         }
     }
@@ -6367,14 +6920,27 @@ pub(crate) async fn stop_task_internal(
     };
 
     if let Some(handle_ref) = handle_ref {
-        let (client, claude_watcher) = {
+        let (backend, claude_watcher) = {
             let mut handle = handle_ref.lock().await;
-            (handle.client.clone(), handle.claude_watcher.take())
+            (handle.backend.clone(), handle.claude_watcher.take())
         };
         if let Some(watcher) = claude_watcher {
             watcher.stop().await;
         }
-        let _ = client.shutdown().await;
+        match backend {
+            SessionBackend::Acp { client, .. } => {
+                let _ = client.shutdown().await;
+            }
+            SessionBackend::ClaudeTeams { agent_name, .. } => {
+                let controller = {
+                    let slot = state.claude_teams_controller.lock().await;
+                    slot.as_ref().cloned()
+                };
+                if let Some(ctrl) = controller {
+                    let _ = ctrl.kill_agent(&agent_name).await;
+                }
+            }
+        }
     }
 
     {
@@ -7145,9 +7711,9 @@ async fn restart_all_agents(
     };
 
     for (task_id, handle_ref) in shutdown_targets {
-        let (agent_id, client) = {
+        let (agent_id, backend) = {
             let handle = handle_ref.lock().await;
-            (handle.agent_id.clone(), handle.client.clone())
+            (handle.agent_id.clone(), handle.backend.clone())
         };
 
         println!(
@@ -7174,7 +7740,20 @@ async fn restart_all_agents(
 
         restarted_task_ids.push(task_id);
 
-        let _ = client.shutdown().await;
+        match backend {
+            SessionBackend::Acp { client, .. } => {
+                let _ = client.shutdown().await;
+            }
+            SessionBackend::ClaudeTeams { agent_name, .. } => {
+                let controller = {
+                    let slot = state.claude_teams_controller.lock().await;
+                    slot.as_ref().cloned()
+                };
+                if let Some(ctrl) = controller {
+                    let _ = ctrl.kill_agent(&agent_name).await;
+                }
+            }
+        }
     }
 
     // Emit AgentAvailabilityUpdate to trigger UI refresh
@@ -7715,8 +8294,10 @@ async fn switch_running_codex_tasks(
 
         {
             let mut handle = handle_ref.lock().await;
-            handle.client = client.clone();
-            handle.session_id = session_id.clone();
+            handle.backend = SessionBackend::Acp {
+                client: client.clone(),
+                session_id: session_id.clone(),
+            };
             // Set pending_prompt with history context so start_task can resume with full context.
             // This is critical: without a pending_prompt, start_task will fail with "No prompt pending".
             handle.pending_prompt = resume_prompt;
@@ -9928,11 +10509,24 @@ pub(crate) async fn delete_task_internal(
         sessions.remove(&task_id)
     };
     if let Some(handle_ref) = handle_ref {
-        let client = {
+        let backend = {
             let handle = handle_ref.lock().await;
-            handle.client.clone()
+            handle.backend.clone()
         };
-        let _ = client.shutdown().await;
+        match backend {
+            SessionBackend::Acp { client, .. } => {
+                let _ = client.shutdown().await;
+            }
+            SessionBackend::ClaudeTeams { agent_name, .. } => {
+                let controller = {
+                    let slot = state.claude_teams_controller.lock().await;
+                    slot.as_ref().cloned()
+                };
+                if let Some(ctrl) = controller {
+                    let _ = ctrl.kill_agent(&agent_name).await;
+                }
+            }
+        }
     }
     // Fetch task info without holding DB lock across await points.
     let task_snapshot = {
@@ -10326,6 +10920,132 @@ fn chat_window_label(task_id: &str) -> String {
         "chat-{}",
         task_id.replace(|c: char| !c.is_alphanumeric() && c != '-', "_")
     )
+}
+
+fn claude_team_name_default() -> String {
+    // Must match safe name regex: ^[A-Za-z0-9_-]{1,64}$
+    "phantom-harness".to_string()
+}
+
+fn task_id_suffix(task_id: &str) -> String {
+    // Prefer the last '-' segment (UUID prefix), fall back to last 6 alnum chars.
+    if let Some((_, last)) = task_id.rsplit_once('-') {
+        let s: String = last
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(6)
+            .collect();
+        if s.len() >= 4 {
+            return s;
+        }
+    }
+    let filtered: String = task_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .rev()
+        .take(6)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    if filtered.len() >= 4 {
+        filtered
+    } else {
+        "task".to_string()
+    }
+}
+
+fn derive_claude_agent_name(task_id: &str, title_summary: Option<&str>, prompt: &str) -> String {
+    let base = title_summary
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            // First sentence or first ~8 words.
+            let first = prompt
+                .split_terminator(|c| c == '.' || c == '\n')
+                .next()
+                .unwrap_or(prompt);
+            first
+                .split_whitespace()
+                .take(8)
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in base.to_lowercase().chars() {
+        let out = if ch.is_ascii_alphanumeric() {
+            Some(ch)
+        } else if ch.is_whitespace() || ch == '-' || ch == '_' {
+            Some('-')
+        } else {
+            None
+        };
+        if let Some(c) = out {
+            if c == '-' {
+                if last_dash || slug.is_empty() {
+                    continue;
+                }
+                last_dash = true;
+                slug.push('-');
+            } else {
+                last_dash = false;
+                slug.push(c);
+            }
+        }
+        if slug.len() >= 48 {
+            break;
+        }
+    }
+    slug = slug.trim_matches('-').to_string();
+    if slug.is_empty() {
+        slug = "task".to_string();
+    }
+
+    let suffix = task_id_suffix(task_id);
+    let mut name = format!("{slug}-{suffix}");
+    if name.len() > 64 {
+        name.truncate(64);
+        name = name.trim_matches('-').to_string();
+    }
+    name
+}
+
+#[cfg(test)]
+mod claude_agent_name_tests {
+    use super::derive_claude_agent_name;
+
+    #[test]
+    fn test_derive_claude_agent_name_from_prompt() {
+        let name = derive_claude_agent_name("task-123-7f3a", None, "Fix Login Redirect Loop!!!");
+        assert_eq!(name, "fix-login-redirect-loop-7f3a");
+    }
+
+    #[test]
+    fn test_derive_claude_agent_name_strips_invalid_chars_and_collapses_dashes() {
+        let name = derive_claude_agent_name(
+            "task-123-abcdef",
+            None,
+            "Refactor:   foo/bar -> baz_qux (v2)",
+        );
+        assert!(name.starts_with("refactor-foobar-baz-qux-v2-"));
+        assert!(!name.contains("--"));
+        assert!(name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'));
+    }
+
+    #[test]
+    fn test_derive_claude_agent_name_uses_title_summary_when_present() {
+        let name = derive_claude_agent_name("task-123-zz99", Some("Ship It"), "ignored prompt");
+        assert_eq!(name, "ship-it-zz99");
+    }
+
+    #[test]
+    fn test_derive_claude_agent_name_clamps_length() {
+        let prompt = "This is an extremely long prompt that should be truncated into a stable agent name that does not exceed the maximum length";
+        let name = derive_claude_agent_name("task-123-abcdef", None, prompt);
+        assert!(name.len() <= 64);
+    }
 }
 
 async fn cleanup_terminal_session_by_task(state: &AppState, task_id: &str) {
@@ -11212,103 +11932,181 @@ pub(crate) async fn send_chat_message_internal(
         }
 
         let claude_runtime = claude_runtime_from_task(&task, &settings);
-        let (client, session_id, used_session_load) = match reconnect_session_with_context(
-            agent,
-            &task,
-            &cwd,
-            &env,
-            &state.db,
-            false,
-            &settings,
-            claude_runtime,
-        )
-        .await
+
+        let handle_ref = if task.agent_id == "claude-code"
+            && matches!(claude_runtime, ClaudeRuntime::Native)
+            && claude_use_teammate_controller(&settings)
+            && task.claude_team_name.is_some()
+            && task.claude_agent_name.is_some()
         {
-            Ok(result) => result,
-            Err(e) => {
-                let error_msg = format!("Failed to reconnect: {}", e);
-                println!("[Harness] send_chat_message error: {}", error_msg);
-                if let Some(window) = app.get_webview_window(&window_label) {
-                    let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+            let team_name = task
+                .claude_team_name
+                .clone()
+                .unwrap_or_else(|| "phantom-harness".to_string());
+            let agent_name = task
+                .claude_agent_name
+                .clone()
+                .unwrap_or_else(|| "controller".to_string());
+
+            let cwd_str = cwd.to_string_lossy().to_string();
+            let controller = {
+                let mut slot = state.claude_teams_controller.lock().await;
+                if slot.is_none() {
+                    let ctrl = ClaudeTeamsController::init(
+                        team_name.clone(),
+                        cwd_str.clone(),
+                        resolve_claude_command(),
+                        env.clone(),
+                    )
+                    .await
+                    .map_err(|e| format!("Failed to init Claude teammate controller: {e}"))?;
+                    *slot = Some(ctrl);
                 }
-                return Err(error_msg);
+                slot.as_ref()
+                    .cloned()
+                    .ok_or_else(|| "Claude teammate controller not initialized".to_string())?
+            };
+
+            if !controller.is_agent_running(&agent_name).await {
+                let _ = controller
+                    .spawn_agent(
+                        agent_name.clone(),
+                        Some("general-purpose".to_string()),
+                        Some(task.model.clone()).filter(|m| m != "default"),
+                        Some(cwd_str),
+                        Some("bypassPermissions".to_string()),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .await;
             }
-        };
 
-        let model = task.model.clone();
+            let handle = SessionHandle {
+                agent_id: task.agent_id.clone(),
+                model: task.model.clone(),
+                backend: SessionBackend::ClaudeTeams {
+                    team_name: team_name.clone(),
+                    agent_name: agent_name.clone(),
+                    pid: 0,
+                },
+                pending_prompt: Some(message.clone()),
+                pending_attachments: Vec::new(),
+                messages: Vec::new(),
+                suppress_notifications: task_id.starts_with("notes-"),
+                claude_watcher: None,
+                cancel_token: CancellationToken::new(),
+                needs_history_injection: false,
+            };
 
-        println!(
-            "[Harness] Session reconnected: task_id={} session_id={} (used_session_load={})",
-            task_id, session_id, used_session_load
-        );
+            let handle_ref = Arc::new(Mutex::new(handle));
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(task_id.clone(), handle_ref.clone());
 
-        // Spawn Claude usage watcher for reconnected chat sessions
-        let claude_watcher = if task.agent_id == "claude-code" {
-            Some(claude_usage_watcher::start_watching(
-                &session_id,
-                &task_id,
-                app.clone(),
-                state.db.clone(),
-            ))
+            let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
+            let commands = collect_claude_commands(state, &command_root);
+            emit_available_commands(&app, &task_id, &task.agent_id, &commands);
+
+            handle_ref
         } else {
-            None
-        };
-
-        // Store whether we need history injection for this session
-        // (will be used when sending the actual message)
-        let needs_history_injection = !used_session_load;
-
-        // Prepare the message with history context if needed
-        let message_with_context = if needs_history_injection {
-            let history_opt = {
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
-                let messages_db =
-                    db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
-                if !messages_db.is_empty() {
-                    let (history, _) =
-                        db::compact_history(&messages_db, task.prompt.as_deref(), 100_000);
-                    Some(history)
-                } else {
-                    None
+            let (client, session_id, used_session_load) = match reconnect_session_with_context(
+                agent,
+                &task,
+                &cwd,
+                &env,
+                &state.db,
+                false,
+                &settings,
+                claude_runtime,
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    let error_msg = format!("Failed to reconnect: {}", e);
+                    println!("[Harness] send_chat_message error: {}", error_msg);
+                    if let Some(window) = app.get_webview_window(&window_label) {
+                        let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
+                    }
+                    return Err(error_msg);
                 }
             };
 
-            if let Some(history) = history_opt {
-                format_message_with_history(&history, &message)
+            let model = task.model.clone();
+
+            println!(
+                "[Harness] Session reconnected: task_id={} session_id={} (used_session_load={})",
+                task_id, session_id, used_session_load
+            );
+
+            // Spawn Claude usage watcher for reconnected chat sessions
+            let claude_watcher = if task.agent_id == "claude-code" {
+                Some(claude_usage_watcher::start_watching(
+                    &session_id,
+                    &task_id,
+                    app.clone(),
+                    state.db.clone(),
+                ))
+            } else {
+                None
+            };
+
+            // Store whether we need history injection for this session
+            // (will be used when sending the actual message)
+            let needs_history_injection = !used_session_load;
+
+            // Prepare the message with history context if needed
+            let message_with_context = if needs_history_injection {
+                let history_opt = {
+                    let conn = state.db.lock().map_err(|e| e.to_string())?;
+                    let messages_db =
+                        db::get_message_records(&conn, &task.id).map_err(|e| e.to_string())?;
+                    if !messages_db.is_empty() {
+                        let (history, _) =
+                            db::compact_history(&messages_db, task.prompt.as_deref(), 100_000);
+                        Some(history)
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(history) = history_opt {
+                    format_message_with_history(&history, &message)
+                } else {
+                    message.clone()
+                }
             } else {
                 message.clone()
-            }
-        } else {
-            message.clone()
-        };
-
-        let handle = SessionHandle {
-            agent_id: task.agent_id.clone(),
-            session_id,
-            model: model.clone(),
-            client,
-            pending_prompt: Some(message_with_context),
-            pending_attachments: Vec::new(),
-            messages: Vec::new(),
-            suppress_notifications: task_id.starts_with("notes-"),
-            claude_watcher,
-            cancel_token: CancellationToken::new(),
-            needs_history_injection: false,
-        };
-
-        let handle_ref = Arc::new(Mutex::new(handle));
-        let mut sessions = state.sessions.lock().await;
-        sessions.insert(task_id.clone(), handle_ref.clone());
-
-        if task.agent_id == "codex" || task.agent_id == "claude-code" {
-            let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
-            let commands = if task.agent_id == "codex" {
-                collect_codex_commands(state, &command_root)
-            } else {
-                collect_claude_commands(state, &command_root)
             };
-            emit_available_commands(&app, &task_id, &task.agent_id, &commands);
-        }
+
+            let handle = SessionHandle {
+                agent_id: task.agent_id.clone(),
+                model: model.clone(),
+                backend: SessionBackend::Acp { client, session_id },
+                pending_prompt: Some(message_with_context),
+                pending_attachments: Vec::new(),
+                messages: Vec::new(),
+                suppress_notifications: task_id.starts_with("notes-"),
+                claude_watcher,
+                cancel_token: CancellationToken::new(),
+                needs_history_injection: false,
+            };
+
+            let handle_ref = Arc::new(Mutex::new(handle));
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(task_id.clone(), handle_ref.clone());
+
+            if task.agent_id == "codex" || task.agent_id == "claude-code" {
+                let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
+                let commands = if task.agent_id == "codex" {
+                    collect_codex_commands(state, &command_root)
+                } else {
+                    collect_claude_commands(state, &command_root)
+                };
+                emit_available_commands(&app, &task_id, &task.agent_id, &commands);
+            }
+            handle_ref
+        };
+
         handle_ref
     };
 
@@ -11316,8 +12114,7 @@ pub(crate) async fn send_chat_message_internal(
     let (
         agent_id,
         model,
-        client,
-        session_id,
+        backend,
         effective_message,
         cancel_token,
         needs_history_injection,
@@ -11343,8 +12140,7 @@ pub(crate) async fn send_chat_message_internal(
         (
             handle.agent_id.clone(),
             handle.model.clone(),
-            handle.client.clone(),
-            handle.session_id.clone(),
+            handle.backend.clone(),
             effective_message,
             handle.cancel_token.clone(),
             needs_history,
@@ -11663,91 +12459,338 @@ pub(crate) async fn send_chat_message_internal(
         post_discord_user_message(state, &task_id, &agent_id, &message).await;
     }
 
-    // Send prompt to agent using STREAMING version (with images if present)
-    // Wrapped in retry logic for recoverable errors (exit code 143/SIGTERM)
-    const MAX_RECONNECT_ATTEMPTS: u32 = 2;
-    let mut attempt = 0;
-    let mut client = client;
-    let mut session_id = session_id;
-    let mut auto_switch_attempted = false;
+    let response: SessionPromptResult = match backend.clone() {
+        SessionBackend::ClaudeTeams { agent_name, .. } => {
+            if !images.is_empty() {
+                let _ = stream_tx.send(StreamingUpdate::Status {
+                    message:
+                        "Note: image attachments are not supported in Claude teammate mode yet (ignoring)."
+                            .to_string(),
+                });
+            }
 
-    let response = loop {
-        attempt += 1;
+            let controller = {
+                let slot = state.claude_teams_controller.lock().await;
+                slot.as_ref()
+                    .cloned()
+                    .ok_or_else(|| "Claude teammate controller not initialized".to_string())?
+            };
 
-        let result = if images.is_empty() {
-            client
-                .session_prompt_streaming_with_cancellation(
-                    &session_id,
-                    &effective_message,
-                    |update| {
-                        let _ = stream_tx.send(update);
-                    },
-                    Some(&cancel_token),
-                )
+            let mut rx = controller.subscribe(&agent_name).await;
+            controller
+                .send(&agent_name, &effective_message, None)
                 .await
-        } else {
-            println!("[Harness] send_chat_message with {} image(s)", images.len());
-            client
-                .session_prompt_streaming_with_images_and_cancellation(
-                    &session_id,
-                    &effective_message,
-                    &images,
-                    |update| {
-                        let _ = stream_tx.send(update);
-                    },
-                    Some(&cancel_token),
-                )
-                .await
-        };
+                .map_err(|e| format!("Claude teammate send failed: {e}"))?;
 
-        match result {
-            Ok(response) => break response,
-            Err(e) => {
-                let error_str = e.to_string();
-                println!(
-                    "[Harness] send_chat_message error (attempt {}): {}",
-                    attempt, error_str
-                );
+            let mut full_text = String::new();
+            let deadline = Instant::now() + Duration::from_secs(60 * 30);
+            loop {
+                if cancel_token.is_cancelled() {
+                    let _ = controller
+                        .shutdown_agent(&agent_name, "Soft stop requested")
+                        .await;
+                    break;
+                }
+                if Instant::now() > deadline {
+                    break;
+                }
 
-                if agent_id == "codex"
-                    && !auto_switch_attempted
-                    && is_codex_rate_limit_error(&error_str)
-                {
-                    auto_switch_attempted = true;
-                    let task = {
-                        let conn = state.db.lock().map_err(|e| e.to_string())?;
-                        db::list_tasks(&conn)
-                            .map_err(|e| e.to_string())?
-                            .into_iter()
-                            .find(|t| t.id == task_id)
-                    };
+                let next = timeout(Duration::from_secs(1), rx.recv()).await;
+                let Ok(Ok(msg)) = next else {
+                    continue;
+                };
 
-                    if let Some(task) = task {
-                        let active_account_id =
-                            state.settings.lock().await.active_codex_account_id.clone();
-                        let current_account_id = task
-                            .codex_account_id
-                            .as_deref()
-                            .or(active_account_id.as_deref());
-                        if let Some(next_account) =
-                            pick_best_codex_account(state, current_account_id).await?
+                let mut content_opt: Option<String> = None;
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&msg.text) {
+                    if let Some(t) = v.get("type").and_then(|x| x.as_str()) {
+                        if t == "idle_notification" {
+                            break;
+                        }
+                        if t == "plain_text" {
+                            content_opt = v
+                                .get("text")
+                                .and_then(|x| x.as_str())
+                                .map(|s| s.to_string());
+                        }
+                    }
+                }
+                let content = content_opt.unwrap_or_else(|| msg.text.clone());
+                if content.trim().is_empty() {
+                    continue;
+                }
+
+                if !full_text.is_empty() {
+                    full_text.push_str("\n");
+                }
+                full_text.push_str(&content);
+                let _ = stream_tx.send(StreamingUpdate::TextChunk {
+                    text: content,
+                    item_id: None,
+                });
+            }
+
+            let mut messages: Vec<PromptMessage> = Vec::new();
+            if !full_text.trim().is_empty() {
+                messages.push(PromptMessage {
+                    message_type: "assistant_message".to_string(),
+                    content: Some(full_text),
+                    reasoning: None,
+                    name: None,
+                    arguments: None,
+                    tool_return: None,
+                });
+            }
+            SessionPromptResult {
+                messages,
+                stop_reason: None,
+                token_usage: None,
+                session_id: None,
+            }
+        }
+        SessionBackend::Acp { client, session_id } => {
+            // Send prompt to agent using STREAMING version (with images if present)
+            // Wrapped in retry logic for recoverable errors (exit code 143/SIGTERM)
+            const MAX_RECONNECT_ATTEMPTS: u32 = 2;
+            let mut attempt = 0;
+            let mut client = client;
+            let mut session_id = session_id;
+            let mut auto_switch_attempted = false;
+
+            loop {
+                attempt += 1;
+
+                let result = if images.is_empty() {
+                    client
+                        .session_prompt_streaming_with_cancellation(
+                            &session_id,
+                            &effective_message,
+                            |update| {
+                                let _ = stream_tx.send(update);
+                            },
+                            Some(&cancel_token),
+                        )
+                        .await
+                } else {
+                    println!("[Harness] send_chat_message with {} image(s)", images.len());
+                    client
+                        .session_prompt_streaming_with_images_and_cancellation(
+                            &session_id,
+                            &effective_message,
+                            &images,
+                            |update| {
+                                let _ = stream_tx.send(update);
+                            },
+                            Some(&cancel_token),
+                        )
+                        .await
+                };
+
+                match result {
+                    Ok(response) => break response,
+                    Err(e) => {
+                        let error_str = e.to_string();
+                        println!(
+                            "[Harness] send_chat_message error (attempt {}): {}",
+                            attempt, error_str
+                        );
+
+                        if agent_id == "codex"
+                            && !auto_switch_attempted
+                            && is_codex_rate_limit_error(&error_str)
                         {
-                            let codex_home = PathBuf::from(&next_account.codex_home);
-                            {
-                                let mut settings = state.settings.lock().await;
-                                settings.active_codex_account_id = Some(next_account.id.clone());
-                                persist_settings(&settings)?;
-                            }
-                            set_process_codex_home(Some(&codex_home));
-                            {
+                            auto_switch_attempted = true;
+                            let task = {
                                 let conn = state.db.lock().map_err(|e| e.to_string())?;
-                                let _ = db::update_task_codex_account_id(
-                                    &conn,
-                                    &task_id,
-                                    Some(&next_account.id),
+                                db::list_tasks(&conn)
+                                    .map_err(|e| e.to_string())?
+                                    .into_iter()
+                                    .find(|t| t.id == task_id)
+                            };
+
+                            if let Some(task) = task {
+                                let active_account_id = state
+                                    .settings
+                                    .lock()
+                                    .await
+                                    .active_codex_account_id
+                                    .clone();
+                                let current_account_id = task
+                                    .codex_account_id
+                                    .as_deref()
+                                    .or(active_account_id.as_deref());
+                                if let Some(next_account) =
+                                    pick_best_codex_account(state, current_account_id).await?
+                                {
+                                    let codex_home = PathBuf::from(&next_account.codex_home);
+                                    {
+                                        let mut settings = state.settings.lock().await;
+                                        settings.active_codex_account_id =
+                                            Some(next_account.id.clone());
+                                        persist_settings(&settings)?;
+                                    }
+                                    set_process_codex_home(Some(&codex_home));
+                                    {
+                                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                        let _ = db::update_task_codex_account_id(
+                                            &conn,
+                                            &task_id,
+                                            Some(&next_account.id),
+                                        );
+                                    }
+
+                                    let agent = match find_agent(&state.config, &task.agent_id) {
+                                        Some(a) => a,
+                                        None => {
+                                            let (formatted_error, _) =
+                                                format_agent_error(&error_str);
+                                            if let Some(window) =
+                                                app.get_webview_window(&window_label)
+                                            {
+                                                let _ = window.emit(
+                                                    "ChatLogStatus",
+                                                    (&task_id, &formatted_error, "error"),
+                                                );
+                                            }
+                                            return Err(format!("Agent error: {}", formatted_error));
+                                        }
+                                    };
+                                    let cwd = resolve_task_cwd(&task)?;
+                                    let settings = state.settings.lock().await.clone();
+                                    let overrides =
+                                        auth_env_for(&task.agent_id, &settings, Some(&codex_home));
+                                    let allow_missing =
+                                        settings.codex_auth_method.as_deref() == Some("chatgpt");
+                                    let env = match build_env(
+                                        &agent.required_env,
+                                        &overrides,
+                                        allow_missing,
+                                    ) {
+                                        Ok(e) => e,
+                                        Err(e) => {
+                                            let error_msg = format!(
+                                                "Reconnection failed - auth error: {}",
+                                                e
+                                            );
+                                            if let Some(window) =
+                                                app.get_webview_window(&window_label)
+                                            {
+                                                let _ = window.emit(
+                                                    "ChatLogStatus",
+                                                    (&task_id, &error_msg, "error"),
+                                                );
+                                            }
+                                            return Err(error_msg);
+                                        }
+                                    };
+
+                                    let claude_runtime =
+                                        claude_runtime_from_task(&task, &settings);
+                                    let (new_client, new_session_id, _used_session_load) =
+                                        reconnect_session_with_context(
+                                            agent,
+                                            &task,
+                                            &cwd,
+                                            &env,
+                                            &state.db,
+                                            true,
+                                            &settings,
+                                            claude_runtime,
+                                        )
+                                        .await?;
+
+                                    {
+                                        let mut handle = handle_ref.lock().await;
+                                        handle.backend = SessionBackend::Acp {
+                                            client: new_client.clone(),
+                                            session_id: new_session_id.clone(),
+                                        };
+                                    }
+
+                                    let history_opt = {
+                                        let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                        let mut messages = db::get_message_records(&conn, &task.id)
+                                            .map_err(|e| e.to_string())?;
+                                        if let Some(last) = messages.last() {
+                                            if last.message_type == "user_message"
+                                                && last.content.as_deref()
+                                                    == Some(message.as_str())
+                                            {
+                                                messages.pop();
+                                            }
+                                        }
+                                        if !messages.is_empty() {
+                                            let (history, _) = db::compact_history(
+                                                &messages,
+                                                task.prompt.as_deref(),
+                                                100_000,
+                                            );
+                                            Some(history)
+                                        } else {
+                                            None
+                                        }
+                                    };
+                                    if let Some(history) = history_opt {
+                                        if !effective_message.contains("[User's new message]") {
+                                            effective_message = format_message_with_history(
+                                                &history,
+                                                &effective_message,
+                                            );
+                                        }
+                                    }
+
+                                    client = new_client;
+                                    session_id = new_session_id;
+                                    if let Some(window) = app.get_webview_window(&window_label) {
+                                        let _ = window.emit(
+                                            "ChatLogStatus",
+                                            (
+                                                &task_id,
+                                                "Rate limit reached, switched account. Retrying...",
+                                                "running",
+                                            ),
+                                        );
+                                    }
+                                    continue;
+                                }
+                            }
+                        }
+
+                        // Check if this is a recoverable exit (SIGTERM/exit code 143)
+                        if is_recoverable_exit(&error_str) && attempt < MAX_RECONNECT_ATTEMPTS {
+                            println!("[Harness] Detected recoverable exit in chat, attempting reconnection...");
+
+                            // Emit reconnection status
+                            if let Some(window) = app.get_webview_window(&window_label) {
+                                let _ = window.emit(
+                                    "ChatLogStatus",
+                                    (&task_id, "Session terminated, reconnecting...", "running"),
                                 );
                             }
 
+                            // Look up task from DB to get reconnection info
+                            let task = {
+                                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                                db::list_tasks(&conn)
+                                    .map_err(|e| e.to_string())?
+                                    .into_iter()
+                                    .find(|t| t.id == task_id)
+                            };
+
+                            let task = match task {
+                                Some(t) => t,
+                                None => {
+                                    let (formatted_error, _) = format_agent_error(&error_str);
+                                    if let Some(window) = app.get_webview_window(&window_label) {
+                                        let _ = window.emit(
+                                            "ChatLogStatus",
+                                            (&task_id, &formatted_error, "error"),
+                                        );
+                                    }
+                                    return Err(format!("Agent error: {}", formatted_error));
+                                }
+                            };
+
+                            // Find agent config
                             let agent = match find_agent(&state.config, &task.agent_id) {
                                 Some(a) => a,
                                 None => {
@@ -11761,235 +12804,120 @@ pub(crate) async fn send_chat_message_internal(
                                     return Err(format!("Agent error: {}", formatted_error));
                                 }
                             };
+
+                            // Set up working directory
                             let cwd = resolve_task_cwd(&task)?;
+
+                            // Build environment
                             let settings = state.settings.lock().await.clone();
-                            let overrides =
-                                auth_env_for(&task.agent_id, &settings, Some(&codex_home));
-                            let allow_missing =
-                                settings.codex_auth_method.as_deref() == Some("chatgpt");
-                            let env =
-                                match build_env(&agent.required_env, &overrides, allow_missing) {
-                                    Ok(e) => e,
-                                    Err(e) => {
-                                        let error_msg =
-                                            format!("Reconnection failed - auth error: {}", e);
-                                        if let Some(window) = app.get_webview_window(&window_label)
-                                        {
-                                            let _ = window.emit(
-                                                "ChatLogStatus",
-                                                (&task_id, &error_msg, "error"),
-                                            );
-                                        }
-                                        return Err(error_msg);
-                                    }
-                                };
-
-                            let claude_runtime = claude_runtime_from_task(&task, &settings);
-                            let (new_client, new_session_id, _used_session_load) =
-                                reconnect_session_with_context(
-                                    agent,
-                                    &task,
-                                    &cwd,
-                                    &env,
-                                    &state.db,
-                                    true,
-                                    &settings,
-                                    claude_runtime,
-                                )
-                                .await?;
-
-                            {
-                                let mut handle = handle_ref.lock().await;
-                                handle.client = new_client.clone();
-                                handle.session_id = new_session_id.clone();
-                            }
-
-                            let history_opt = {
+                            let codex_home = if task.agent_id == "codex" {
                                 let conn = state.db.lock().map_err(|e| e.to_string())?;
-                                let mut messages = db::get_message_records(&conn, &task.id)
-                                    .map_err(|e| e.to_string())?;
-                                if let Some(last) = messages.last() {
-                                    if last.message_type == "user_message"
-                                        && last.content.as_deref() == Some(message.as_str())
-                                    {
-                                        messages.pop();
+                                resolve_codex_account_home(
+                                    &conn,
+                                    task.codex_account_id
+                                        .as_deref()
+                                        .or(settings.active_codex_account_id.as_deref()),
+                                )
+                            } else {
+                                None
+                            };
+                            let overrides =
+                                auth_env_for(&task.agent_id, &settings, codex_home.as_deref());
+                            let allow_missing = (task.agent_id == "codex"
+                                && settings.codex_auth_method.as_deref() == Some("chatgpt"))
+                                || (task.agent_id == "claude-code"
+                                    && matches!(
+                                        settings.claude_auth_method.as_deref(),
+                                        Some("cli") | Some("oauth")
+                                    ));
+
+                            let env = match build_env(&agent.required_env, &overrides, allow_missing)
+                            {
+                                Ok(e) => e,
+                                Err(e) => {
+                                    let error_msg =
+                                        format!("Reconnection failed - auth error: {}", e);
+                                    if let Some(window) = app.get_webview_window(&window_label) {
+                                        let _ = window.emit(
+                                            "ChatLogStatus",
+                                            (&task_id, &error_msg, "error"),
+                                        );
                                     }
-                                }
-                                if !messages.is_empty() {
-                                    let (history, _) = db::compact_history(
-                                        &messages,
-                                        task.prompt.as_deref(),
-                                        100_000,
-                                    );
-                                    Some(history)
-                                } else {
-                                    None
+                                    return Err(error_msg);
                                 }
                             };
-                            if let Some(history) = history_opt {
-                                if !effective_message.contains("[User's new message]") {
-                                    effective_message =
-                                        format_message_with_history(&history, &effective_message);
-                                }
-                            }
 
-                            client = new_client;
-                            session_id = new_session_id;
-                            if let Some(window) = app.get_webview_window(&window_label) {
-                                let _ = window.emit(
-                                    "ChatLogStatus",
-                                    (
-                                        &task_id,
-                                        "Rate limit reached, switched account. Retrying...",
-                                        "running",
-                                    ),
-                                );
-                            }
-                            continue;
-                        }
-                    }
-                }
-
-                // Check if this is a recoverable exit (SIGTERM/exit code 143)
-                if is_recoverable_exit(&error_str) && attempt < MAX_RECONNECT_ATTEMPTS {
-                    println!(
-                        "[Harness] Detected recoverable exit in chat, attempting reconnection..."
-                    );
-
-                    // Emit reconnection status
-                    if let Some(window) = app.get_webview_window(&window_label) {
-                        let _ = window.emit(
-                            "ChatLogStatus",
-                            (&task_id, "Session terminated, reconnecting...", "running"),
-                        );
-                    }
-
-                    // Look up task from DB to get reconnection info
-                    let task = {
-                        let conn = state.db.lock().map_err(|e| e.to_string())?;
-                        db::list_tasks(&conn)
-                            .map_err(|e| e.to_string())?
-                            .into_iter()
-                            .find(|t| t.id == task_id)
-                    };
-
-                    let task = match task {
-                        Some(t) => t,
-                        None => {
-                            let (formatted_error, _) = format_agent_error(&error_str);
-                            if let Some(window) = app.get_webview_window(&window_label) {
-                                let _ = window
-                                    .emit("ChatLogStatus", (&task_id, &formatted_error, "error"));
-                            }
-                            return Err(format!("Agent error: {}", formatted_error));
-                        }
-                    };
-
-                    // Find agent config
-                    let agent = match find_agent(&state.config, &task.agent_id) {
-                        Some(a) => a,
-                        None => {
-                            let (formatted_error, _) = format_agent_error(&error_str);
-                            if let Some(window) = app.get_webview_window(&window_label) {
-                                let _ = window
-                                    .emit("ChatLogStatus", (&task_id, &formatted_error, "error"));
-                            }
-                            return Err(format!("Agent error: {}", formatted_error));
-                        }
-                    };
-
-                    // Set up working directory
-                    let cwd = resolve_task_cwd(&task)?;
-
-                    // Build environment
-                    let settings = state.settings.lock().await.clone();
-                    let codex_home = if task.agent_id == "codex" {
-                        let conn = state.db.lock().map_err(|e| e.to_string())?;
-                        resolve_codex_account_home(
-                            &conn,
-                            task.codex_account_id
-                                .as_deref()
-                                .or(settings.active_codex_account_id.as_deref()),
-                        )
-                    } else {
-                        None
-                    };
-                    let overrides = auth_env_for(&task.agent_id, &settings, codex_home.as_deref());
-                    let allow_missing = (task.agent_id == "codex"
-                        && settings.codex_auth_method.as_deref() == Some("chatgpt"))
-                        || (task.agent_id == "claude-code"
-                            && matches!(
-                                settings.claude_auth_method.as_deref(),
-                                Some("cli") | Some("oauth")
-                            ));
-
-                    let env = match build_env(&agent.required_env, &overrides, allow_missing) {
-                        Ok(e) => e,
-                        Err(e) => {
-                            let error_msg = format!("Reconnection failed - auth error: {}", e);
-                            if let Some(window) = app.get_webview_window(&window_label) {
-                                let _ =
-                                    window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
-                            }
-                            return Err(error_msg);
-                        }
-                    };
-
-                    // Reconnect with context restoration
-                    let claude_runtime = claude_runtime_from_task(&task, &settings);
-                    match reconnect_session_with_context(
-                        agent,
-                        &task,
-                        &cwd,
-                        &env,
-                        &state.db,
-                        false,
-                        &settings,
-                        claude_runtime,
-                    )
-                    .await
-                    {
-                        Ok((new_client, new_session_id, _used_session_load)) => {
-                            println!(
-                                "[Harness] Chat session reconnected after termination: {}",
-                                new_session_id
-                            );
-
+                            // Reconnect with context restoration
+                            let claude_runtime = claude_runtime_from_task(&task, &settings);
+                            match reconnect_session_with_context(
+                                agent,
+                                &task,
+                                &cwd,
+                                &env,
+                                &state.db,
+                                false,
+                                &settings,
+                                claude_runtime,
+                            )
+                            .await
                             {
-                                let mut handle = handle_ref.lock().await;
-                                handle.client = new_client.clone();
-                                handle.session_id = new_session_id.clone();
+                                Ok((new_client, new_session_id, _used_session_load)) => {
+                                    println!(
+                                        "[Harness] Chat session reconnected after termination: {}",
+                                        new_session_id
+                                    );
 
-                                // Also update Claude watcher if applicable
-                                if task.agent_id == "claude-code" {
-                                    handle.claude_watcher =
-                                        Some(claude_usage_watcher::start_watching(
-                                            &new_session_id,
-                                            &task_id,
-                                            app.clone(),
-                                            state.db.clone(),
-                                        ));
+                                    {
+                                        let mut handle = handle_ref.lock().await;
+                                        handle.backend = SessionBackend::Acp {
+                                            client: new_client.clone(),
+                                            session_id: new_session_id.clone(),
+                                        };
+
+                                        // Also update Claude watcher if applicable
+                                        if task.agent_id == "claude-code" {
+                                            handle.claude_watcher =
+                                                Some(claude_usage_watcher::start_watching(
+                                                    &new_session_id,
+                                                    &task_id,
+                                                    app.clone(),
+                                                    state.db.clone(),
+                                                ));
+                                        }
+                                    }
+
+                                    client = new_client;
+                                    session_id = new_session_id.clone();
+
+                                    // Emit status and retry
+                                    if let Some(window) = app.get_webview_window(&window_label) {
+                                        let _ = window.emit(
+                                            "ChatLogStatus",
+                                            (&task_id, "Reconnected, retrying...", "running"),
+                                        );
+                                    }
+                                    continue; // Retry the prompt
+                                }
+                                Err(reconnect_err) => {
+                                    let (formatted_error, _) = format_agent_error(&error_str);
+                                    let error_msg = format!(
+                                        "Session terminated and reconnection failed: {} (reconnect error: {})",
+                                        formatted_error, reconnect_err
+                                    );
+                                    if let Some(window) = app.get_webview_window(&window_label) {
+                                        let _ = window.emit(
+                                            "ChatLogStatus",
+                                            (&task_id, &error_msg, "error"),
+                                        );
+                                    }
+                                    return Err(error_msg);
                                 }
                             }
-
-                            client = new_client;
-                            session_id = new_session_id.clone();
-
-                            // Emit status and retry
-                            if let Some(window) = app.get_webview_window(&window_label) {
-                                let _ = window.emit(
-                                    "ChatLogStatus",
-                                    (&task_id, "Reconnected, retrying...", "running"),
-                                );
-                            }
-                            continue; // Retry the prompt
-                        }
-                        Err(reconnect_err) => {
+                        } else {
+                            // Not recoverable or max attempts reached
                             let (formatted_error, _) = format_agent_error(&error_str);
-                            let error_msg = format!(
-                                "Session terminated and reconnection failed: {} (reconnect error: {})",
-                                formatted_error, reconnect_err
-                            );
+                            let error_msg = format!("Agent error: {}", formatted_error);
+                            println!("[Harness] send_chat_message error: {}", error_msg);
                             if let Some(window) = app.get_webview_window(&window_label) {
                                 let _ =
                                     window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
@@ -11997,15 +12925,6 @@ pub(crate) async fn send_chat_message_internal(
                             return Err(error_msg);
                         }
                     }
-                } else {
-                    // Not recoverable or max attempts reached
-                    let (formatted_error, _) = format_agent_error(&error_str);
-                    let error_msg = format!("Agent error: {}", formatted_error);
-                    println!("[Harness] send_chat_message error: {}", error_msg);
-                    if let Some(window) = app.get_webview_window(&window_label) {
-                        let _ = window.emit("ChatLogStatus", (&task_id, &error_msg, "error"));
-                    }
-                    return Err(error_msg);
                 }
             }
         }
@@ -12199,7 +13118,13 @@ async fn respond_to_permission(
 
     let (client, session_id) = {
         let handle = handle_ref.lock().await;
-        (handle.client.clone(), handle.session_id.clone())
+        match handle.backend.clone() {
+            SessionBackend::Acp { client, session_id } => (client, session_id),
+            SessionBackend::ClaudeTeams { .. } => {
+                // Teammate-mode uses auto-approval in the controller; UI responses are ignored.
+                return Ok(());
+            }
+        }
     };
 
     // Send permission response to the agent
@@ -12256,7 +13181,13 @@ pub(crate) async fn respond_to_user_input_internal(
 
     let client = {
         let handle = handle_ref.lock().await;
-        handle.client.clone()
+        match handle.backend.clone() {
+            SessionBackend::Acp { client, .. } => client,
+            SessionBackend::ClaudeTeams { .. } => {
+                // Teammate-mode does not currently surface user_input_request to the UI.
+                return Ok(());
+            }
+        }
     };
 
     client
@@ -13101,6 +14032,27 @@ fn main() {
                 }
             }
 
+            // Optional: Claude teammate-mode controller REST API.
+            // Auto-start when teammate mode is enabled or PHANTOM_CLAUDE_CTRL_AUTOSTART=1.
+            {
+                let state = app.state::<AppState>().inner().clone();
+                let settings = state.settings.blocking_lock().clone();
+                let autostart =
+                    std::env::var("PHANTOM_CLAUDE_CTRL_AUTOSTART").ok().as_deref() == Some("1");
+                if autostart || claude_use_teammate_controller(&settings) {
+                    if let Some(token) = settings.claude_controller_token.clone() {
+                        let controller_slot = state.claude_teams_controller.clone();
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(err) =
+                                start_claude_controller_api(controller_slot, token).await
+                            {
+                                eprintln!("[Harness] Claude controller API failed: {err}");
+                            }
+                        });
+                    }
+                }
+            }
+
             tauri::async_runtime::spawn(async move {
                 prewarm_opencode_models().await;
             });
@@ -13193,7 +14145,9 @@ fn main() {
         })
         .manage({
             let mut settings = load_settings_from_disk();
-            let changed = ensure_mcp_settings(&mut settings);
+            let mut changed = false;
+            changed |= ensure_mcp_settings(&mut settings);
+            changed |= ensure_claude_controller_settings(&mut settings);
             if changed {
                 if let Err(err) = persist_settings(&settings) {
                     eprintln!("[Harness] Failed to persist MCP settings: {err}");
@@ -13215,6 +14169,7 @@ fn main() {
                 codex_command_cache: Arc::new(StdMutex::new(HashMap::new())),
                 claude_command_cache: Arc::new(StdMutex::new(HashMap::new())),
                 claude_oauth_state: Arc::new(Mutex::new(ClaudeOauthState::default())),
+                claude_teams_controller: Arc::new(tokio::sync::Mutex::new(None)),
                 terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
                 task_terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
                 meeting_manager: Arc::new(StdMutex::new(

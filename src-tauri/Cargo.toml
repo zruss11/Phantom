@@ -43,6 +43,7 @@ whisper-rs = "0.15"
 rubato = "1.0.1"
 futures-util = "0.3"
 transcribe-rs = { version = "0.2.2", features = ["parakeet"] }
+fs2 = "0.4"
 # transcribe-rs 0.2.2 currently relies on ort pre-rc API behavior; stay on a
 # compatible ort 2.0.0-rc series version without exact-pinning.
 # TODO: revisit once transcribe-rs loosens its constraints / supports ort 2.0 stable.

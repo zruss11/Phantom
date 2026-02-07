@@ -38,6 +38,12 @@ pub struct TaskRecord {
     /// Claude Code runtime ("native" or "docker")
     #[serde(rename = "claudeRuntime")]
     pub claude_runtime: Option<String>,
+    /// Claude teammate-mode team name (when using teammate controller integration)
+    #[serde(rename = "claudeTeamName")]
+    pub claude_team_name: Option<String>,
+    /// Claude teammate-mode agent name (when using teammate controller integration)
+    #[serde(rename = "claudeAgentName")]
+    pub claude_agent_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -179,7 +185,9 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             cost REAL DEFAULT 0.0,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
-            claude_runtime TEXT
+            claude_runtime TEXT,
+            claude_team_name TEXT,
+            claude_agent_name TEXT
         )",
         [],
     )?;
@@ -535,6 +543,11 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         .ok();
     // Add claude_runtime column for Docker runtime support (migration)
     conn.execute("ALTER TABLE tasks ADD COLUMN claude_runtime TEXT", [])
+        .ok();
+    // Add teammate-mode columns (migration)
+    conn.execute("ALTER TABLE tasks ADD COLUMN claude_team_name TEXT", [])
+        .ok();
+    conn.execute("ALTER TABLE tasks ADD COLUMN claude_agent_name TEXT", [])
         .ok();
 
     // Backfill next_run_at for enabled automations that predate the column (migration).
@@ -1034,8 +1047,8 @@ pub fn get_all_cached_modes(conn: &Connection) -> Result<Vec<(String, Vec<Cached
 
 pub fn insert_task(conn: &Connection, task: &TaskRecord) -> Result<()> {
     conn.execute(
-        "INSERT INTO tasks (id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT INTO tasks (id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime, claude_team_name, claude_agent_name)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             task.id,
             task.agent_id,
@@ -1055,6 +1068,8 @@ pub fn insert_task(conn: &Connection, task: &TaskRecord) -> Result<()> {
             task.total_tokens,
             task.context_window,
             task.claude_runtime,
+            task.claude_team_name,
+            task.claude_agent_name,
         ],
     )?;
     Ok(())
@@ -1120,6 +1135,20 @@ pub fn update_task_agent_session_id(
     conn.execute(
         "UPDATE tasks SET agent_session_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![agent_session_id, now, id],
+    )?;
+    Ok(())
+}
+
+pub fn update_task_claude_team_agent(
+    conn: &Connection,
+    id: &str,
+    claude_team_name: Option<&str>,
+    claude_agent_name: Option<&str>,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE tasks SET claude_team_name = ?1, claude_agent_name = ?2, updated_at = ?3 WHERE id = ?4",
+        params![claude_team_name, claude_agent_name, now, id],
     )?;
     Ok(())
 }
@@ -1390,7 +1419,7 @@ pub fn get_messages(conn: &Connection, task_id: &str) -> Result<Vec<serde_json::
 
 pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRecord>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime
+        "SELECT id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime, claude_team_name, claude_agent_name
          FROM tasks ORDER BY created_at DESC"
     )?;
     let tasks = stmt.query_map([], |row| {
@@ -1413,6 +1442,8 @@ pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRecord>> {
             total_tokens: row.get(15)?,
             context_window: row.get(16)?,
             claude_runtime: row.get(17)?,
+            claude_team_name: row.get(18)?,
+            claude_agent_name: row.get(19)?,
         })
     })?;
     tasks.collect()
