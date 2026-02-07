@@ -298,6 +298,20 @@
               });
           }
           break;
+        case 'EnqueueChatMessage':
+          console.log('[Tauri Bridge] EnqueueChatMessage:', args[0], args[1], args[2], args[3]);
+          if (tauriInvoke) {
+            tauriInvoke('enqueue_chat_message', {
+              taskId: args[0],
+              message: args[1],
+              clientMessageId: args[2],
+              disposition: args[3]
+            })
+              .catch(function(err) {
+                console.error('[Tauri Bridge] enqueue_chat_message error:', err);
+              });
+          }
+          break;
         case 'RespondToPermission':
           console.log('[Tauri Bridge] RespondToPermission:', args[0], args[1], args[2]);
           if (tauriInvoke) {

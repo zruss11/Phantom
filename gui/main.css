@@ -9516,6 +9516,25 @@ input:checked + .slider:before {
   border: 1px solid rgba(212, 165, 116, 0.08);
 }
 
+.notes-chat-msg.user.queued-pill {
+  border-style: dashed;
+  border-color: rgba(212, 165, 116, 0.22);
+  background: linear-gradient(135deg, rgba(212, 165, 116, 0.12), rgba(212, 165, 116, 0.06));
+}
+
+.notes-chat-pill-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.75;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.notes-chat-pill-body {
+  white-space: pre-wrap;
+}
+
 .notes-chat-msg.assistant {
   align-self: flex-start;
   background: rgba(255, 255, 255, 0.04);

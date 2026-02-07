@@ -933,6 +933,7 @@ async fn tool_send_chat_message(
     send_chat_message_internal(
         args.task_id.clone(),
         args.message.clone(),
+        None,
         &server_state.state,
         server_state.app.clone(),
         crate::MessageOrigin::Ui,
