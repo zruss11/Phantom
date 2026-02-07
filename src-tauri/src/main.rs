@@ -13378,6 +13378,8 @@ fn main() {
             meeting_notes::meeting_get_transcript,
             meeting_notes::meeting_delete_session,
             meeting_notes::meeting_export_transcript,
+            // Semantic search commands
+            semantic_search::semantic_index_status,
             calendar::calendar_get_upcoming_events,
             calendar::calendar_list_calendars,
         ])

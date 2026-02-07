@@ -15,7 +15,7 @@
 - [x] Add FTS virtual table `semantic_fts` (best-effort; do not fail app startup if FTS5 unavailable) (best-effort create in `src-tauri/src/db.rs`)
 - [x] Add Rust module for semantic search (types + helpers) (new `src-tauri/src/semantic_search.rs`)
 - [ ] Add Tauri commands:
-  - [ ] `semantic_index_status`
+  - [x] `semantic_index_status` (added `semantic_search::semantic_index_status`)
   - [ ] `semantic_search({ query, types, limit, exact })`
   - [ ] `semantic_reindex_all`
   - [ ] `semantic_delete_for_entity`

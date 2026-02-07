@@ -1,6 +1,7 @@
 use rusqlite::{Connection, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tauri::State;
 
 pub const ENTITY_TYPE_TASK: &str = "task";
 pub const ENTITY_TYPE_NOTE: &str = "note";
@@ -31,6 +32,25 @@ pub struct SemanticSearchResult {
     pub title: Option<String>,
     pub snippet: Option<String>,
     pub score: f64,
+}
+
+#[tauri::command]
+pub fn semantic_index_status(
+    state: State<'_, crate::AppState>,
+) -> Result<SemanticIndexStatus, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+
+    let fts_available = semantic_fts_available(&conn);
+    let chunks_total = semantic_chunks_count(&conn).map_err(|e| e.to_string())?;
+    let chunks_by_type = semantic_chunks_count_by_type(&conn).map_err(|e| e.to_string())?;
+    let last_updated_at = semantic_chunks_last_updated_at(&conn).map_err(|e| e.to_string())?;
+
+    Ok(SemanticIndexStatus {
+        fts_available,
+        chunks_total,
+        chunks_by_type,
+        last_updated_at,
+    })
 }
 
 pub fn sqlite_table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
