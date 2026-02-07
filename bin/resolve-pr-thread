@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${1:-}" == "" ]]; then
+  echo "usage: bin/resolve-pr-thread THREAD_ID" >&2
+  exit 2
+fi
+
+thread_id="$1"
+
+if ! command -v gh >/dev/null 2>&1; then
+  echo "error: gh CLI not found" >&2
+  exit 1
+fi
+
+mutation='
+mutation($threadId: ID!) {
+  resolveReviewThread(input: {threadId: $threadId}) {
+    thread { id isResolved }
+  }
+}
+'
+
+gh api graphql -f query="$mutation" -F threadId="$thread_id" >/dev/null
+echo "resolved: $thread_id"
+

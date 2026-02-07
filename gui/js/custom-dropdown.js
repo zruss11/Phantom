@@ -16,6 +16,10 @@
    * @param {Function} options.onChange - Callback when selection changes
    * @param {boolean} options.searchable - Enable fuzzy search filtering
    * @param {string} options.searchPlaceholder - Placeholder text for search input
+   * @param {boolean} options.portal - When true, render the panel/tooltip into document.body to avoid clipping
+   * @param {HTMLElement} options.portalRoot - Optional root element for portal rendering (defaults to document.body)
+   * @param {string} options.panelClassName - Optional extra class to add to the panel element
+   * @param {string} options.tooltipClassName - Optional extra class to add to the tooltip element
    */
   function CustomDropdown(options) {
     this.container = options.container;
@@ -25,6 +29,10 @@
     this.onChange = options.onChange || function() {};
     this.searchable = options.searchable || false;
     this.searchPlaceholder = options.searchPlaceholder || 'Search...';
+    this.portal = !!options.portal;
+    this.portalRoot = options.portalRoot || document.body;
+    this.panelClassName = options.panelClassName || '';
+    this.tooltipClassName = options.tooltipClassName || '';
     this.isOpen = false;
     this.selectedIndex = -1;
     this.focusedIndex = -1;
@@ -72,8 +80,15 @@
       if (this.searchable) {
         this.panel.classList.add('searchable');
       }
+      if (this.panelClassName) {
+        this.panel.classList.add(this.panelClassName);
+      }
       this.panel.style.display = 'none';
-      this.container.appendChild(this.panel);
+      if (this.portal && this.portalRoot) {
+        this.portalRoot.appendChild(this.panel);
+      } else {
+        this.container.appendChild(this.panel);
+      }
 
       // Create search input if searchable
       if (this.searchable) {
@@ -99,8 +114,15 @@
       // Create tooltip (appears on left side when hovering options)
       this.tooltip = document.createElement('div');
       this.tooltip.className = 'custom-dropdown-tooltip';
+      if (this.tooltipClassName) {
+        this.tooltip.classList.add(this.tooltipClassName);
+      }
       this.tooltip.style.display = 'none';
-      this.container.appendChild(this.tooltip);
+      if (this.portal && this.portalRoot) {
+        this.portalRoot.appendChild(this.tooltip);
+      } else {
+        this.container.appendChild(this.tooltip);
+      }
 
       // Initialize filtered items
       this.filteredItems = this.items.slice();
@@ -115,8 +137,41 @@
     attachEventListeners: function() {
       var self = this;
 
+      // In some embedded webviews, `click` can be swallowed by drag-region handling
+      // or other global listeners. Using `pointerdown` makes the trigger much more
+      // reliable. We then ignore the subsequent `click` to avoid double-toggling.
+      this._ignoreNextClick = false;
+      this._ignoreNextClickTimer = null;
+      this.trigger.addEventListener('pointerdown', function(e) {
+        // Only left click / primary touch.
+        if (e.button !== undefined && e.button !== 0) return;
+        self._ignoreNextClick = true;
+        // Safety: if click never arrives (drag away / suppressed click), don't
+        // let the flag leak into the next interaction.
+        if (self._ignoreNextClickTimer) {
+          clearTimeout(self._ignoreNextClickTimer);
+        }
+        self._ignoreNextClickTimer = setTimeout(function() {
+          self._ignoreNextClick = false;
+          self._ignoreNextClickTimer = null;
+        }, 400);
+        e.preventDefault();
+        e.stopPropagation();
+        self.toggle();
+      });
+
       // Toggle dropdown on trigger click
       this.trigger.addEventListener('click', function(e) {
+        if (self._ignoreNextClick) {
+          self._ignoreNextClick = false;
+          if (self._ignoreNextClickTimer) {
+            clearTimeout(self._ignoreNextClickTimer);
+            self._ignoreNextClickTimer = null;
+          }
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
         e.preventDefault();
         e.stopPropagation();
         self.toggle();
@@ -160,7 +215,11 @@
 
       // Click outside to close
       document.addEventListener('click', function(e) {
-        if (!self.container.contains(e.target)) {
+        var isInside =
+          self.container.contains(e.target) ||
+          (self.panel && self.panel.contains(e.target)) ||
+          (self.tooltip && self.tooltip.contains(e.target));
+        if (!isInside) {
           self.close();
         }
       });
@@ -460,13 +519,33 @@
       }
 
       // Position tooltip relative to the panel for stable alignment
-      var panelRect = this.panel.getBoundingClientRect();
-      var containerRect = this.container.getBoundingClientRect();
-
       this.tooltip.textContent = description;
       this.tooltip.style.display = 'block';
 
       var tooltipRect = this.tooltip.getBoundingClientRect();
+      var panelRect = this.panel.getBoundingClientRect();
+
+      if (this.portal) {
+        this.tooltip.style.position = 'fixed';
+        var itemRect = itemEl.getBoundingClientRect();
+        var topOffset = Math.round(itemRect.top);
+        var leftOffset = Math.round(panelRect.left - tooltipRect.width - 8);
+
+        if (leftOffset < 8) {
+          leftOffset = Math.round(panelRect.right + 8);
+        }
+
+        var viewportHeight = window.innerHeight || document.documentElement.clientHeight;
+        var maxTop = Math.max(8, viewportHeight - 8 - tooltipRect.height);
+        topOffset = Math.min(Math.max(8, topOffset), maxTop);
+
+        this.tooltip.style.left = leftOffset + 'px';
+        this.tooltip.style.right = 'auto';
+        this.tooltip.style.top = topOffset + 'px';
+        return;
+      }
+
+      var containerRect = this.container.getBoundingClientRect();
       var panelOffsetLeft = this.panel.offsetLeft;
       var panelOffsetTop = this.panel.offsetTop;
       var topOffset = panelOffsetTop + itemEl.offsetTop - this.panel.scrollTop;
@@ -729,6 +808,12 @@
     destroy: function() {
       if (this.tooltipTimeout) {
         clearTimeout(this.tooltipTimeout);
+      }
+      if (this.panel && this.panel.parentNode) {
+        this.panel.parentNode.removeChild(this.panel);
+      }
+      if (this.tooltip && this.tooltip.parentNode) {
+        this.tooltip.parentNode.removeChild(this.tooltip);
       }
       this.container.innerHTML = '';
       this.container.classList.remove('custom-dropdown-wrapper');

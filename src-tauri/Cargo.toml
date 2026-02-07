@@ -8,7 +8,7 @@ edition = "2021"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api", "devtools"] }
+tauri = { version = "2", features = ["macos-private-api", "image-png", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -38,7 +38,26 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 libc = "0.2"
+cpal = "0.17.1"
+whisper-rs = "0.15"
+rubato = "1.0.1"
+futures-util = "0.3"
+transcribe-rs = { version = "0.2.2", features = ["parakeet"] }
+# transcribe-rs 0.2.2 currently relies on ort pre-rc API behavior; stay on a
+# compatible ort 2.0.0-rc series version without exact-pinning.
+# TODO: revisit once transcribe-rs loosens its constraints / supports ort 2.0 stable.
+ort = "2.0.0-rc.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = "1.5.0"
+core-foundation = "0.10"
+core-media-rs = "0.3"
+eventkit-rs = { version = "0.1.1", default-features = false, features = ["events"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-updater = "2"
+
+[features]
+# Opt-in only. Avoid shipping devtools capability in production builds.
+devtools = ["tauri/devtools"]
