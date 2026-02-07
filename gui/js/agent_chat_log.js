@@ -3262,7 +3262,7 @@
 
     switch (type) {
       case "user":
-      case "user_message":
+      case "user_message": {
         div.className += " user";
         const clientMessageId = message.clientMessageId || message.client_message_id || null;
         if (clientMessageId) {
@@ -3415,6 +3415,7 @@
           div.appendChild(copyBtn);
         }
         break;
+      }
 
       case "assistant":
       case "assistant_message":
