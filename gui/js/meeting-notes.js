@@ -58,15 +58,15 @@
     transcriptionAvailable: null,
     dictationStatus: null,
 
-	    // Chat sidebar
-	    chatAgentId: 'claude-code',
-	    chatTaskId: null,
-	    chatMessages: [],
-	    chatSessionActive: false,
-	    chatGenerating: false,
-	    chatContextSent: false,
-	    chatStreamingEl: null,
-	    chatStreamingText: '',
+    // Chat sidebar
+    chatAgentId: 'claude-code',
+    chatTaskId: null,
+    chatMessages: [],
+    chatSessionActive: false,
+    chatGenerating: false,
+    chatContextSent: false,
+    chatStreamingEl: null,
+    chatStreamingText: '',
     templates: [],
     selectedTemplateId: null,
     templatesModalOpen: false,
@@ -3610,6 +3610,25 @@
     if (!isChat && !isSummary) return;
     if (!message) return;
 
+    function normalizeQueuedPillAfterAck(el, content) {
+      if (!el) return;
+
+      el.classList.remove('queued-pill');
+      el.removeAttribute('data-disposition');
+      el.removeAttribute('data-client-message-id');
+
+      // Replace pill markup with the same DOM shape as a normal user message.
+      // This avoids leaving behind `.notes-chat-pill-body` wrappers after ack.
+      var nextText = (content !== undefined && content !== null) ? String(content) : '';
+      if (!nextText) {
+        var body = el.querySelector('.notes-chat-pill-body');
+        if (body) nextText = body.textContent || '';
+      }
+
+      // Clearing and re-setting `textContent` ensures we drop any lingering pill nodes.
+      el.textContent = nextText;
+    }
+
     // We already render user messages locally in the sidebar UI.
     // Exception: queued/steer sends emit a correlated user_message so we can flip the queued pill to sent.
     if (message.message_type === 'user_message') {
@@ -3621,10 +3640,7 @@
             var sel = '[data-client-message-id="' + cmid.replace(/"/g, '\\"') + '"]';
             var el = container.querySelector(sel);
             if (el) {
-              el.classList.remove('queued-pill');
-              var label = el.querySelector('.notes-chat-pill-label');
-              if (label) label.remove();
-              el.removeAttribute('data-disposition');
+              normalizeQueuedPillAfterAck(el, message.content);
             }
           }
         }

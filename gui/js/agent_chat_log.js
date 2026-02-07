@@ -675,12 +675,12 @@
 
     // Load settings (used for Codex steer/queue feature gating).
     if (ipcRenderer) {
-      ipcRenderer.invoke("get_settings")
+      ipcRenderer.invoke("getSettings")
         .then(function (settings) {
           fullSettings = settings || null;
         })
         .catch(function (err) {
-          console.warn("[ChatLog] get_settings failed:", err);
+          console.warn("[ChatLog] getSettings failed:", err);
           fullSettings = null;
         });
     }
@@ -2621,7 +2621,7 @@
     // Fetch user's settings to get last preferences for this agent
     var prefs = {};
     try {
-      var settings = await ipcRenderer.invoke("get_settings");
+      var settings = await ipcRenderer.invoke("getSettings");
       var agentModels = (settings && settings.taskAgentModels) || {};
       prefs = agentModels[agentId] || {};
     } catch (e) {

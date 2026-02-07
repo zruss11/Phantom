@@ -5390,10 +5390,6 @@ pub(crate) async fn start_task_internal(
         handle_ref: handle_ref.clone(),
     };
 
-    let _generating_reset_guard = GeneratingResetGuard {
-        handle_ref: handle_ref.clone(),
-    };
-
     let user_timestamp = chrono::Utc::now().to_rfc3339();
     let (agent_id, model, prompt, attachments, client, session_id, cancel_token) = {
         let mut handle = handle_ref.lock().await;
@@ -12344,6 +12340,7 @@ async fn enqueue_chat_message(
     client_message_id: String,
     disposition: String,
     state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<serde_json::Value, String> {
     let msg = message.trim().to_string();
     if msg.is_empty() {
@@ -12365,26 +12362,72 @@ async fn enqueue_chat_message(
     }
     .ok_or_else(|| format!("Session not found: {}", task_id))?;
 
-    let (should_interrupt, client, session_id, queued_count) = {
+    // If we aren't generating, do not leave messages parked in `queued_chat` with no drain path.
+    // Instead, push into the queue then immediately start draining from the front.
+    let (dispatch_item, queued_remaining, should_interrupt, client, session_id, queued_count) = {
         let mut handle = handle_ref.lock().await;
-        let item = QueuedChatItem {
-            client_message_id: client_message_id.clone(),
-            message: msg.clone(),
-        };
-        if is_steer {
-            handle.queued_chat.push_front(item);
+        if !handle.is_generating {
+            let item = QueuedChatItem {
+                client_message_id: client_message_id.clone(),
+                message: msg.clone(),
+            };
+            if is_steer {
+                handle.queued_chat.push_front(item);
+            } else {
+                handle.queued_chat.push_back(item);
+            }
+            let to_send = handle
+                .queued_chat
+                .pop_front()
+                .expect("queued_chat must contain the just-pushed item");
+            (
+                Some(to_send),
+                handle.queued_chat.len(),
+                false,
+                handle.client.clone(),
+                handle.session_id.clone(),
+                0,
+            )
         } else {
-            handle.queued_chat.push_back(item);
-        }
+            let item = QueuedChatItem {
+                client_message_id: client_message_id.clone(),
+                message: msg.clone(),
+            };
+            if is_steer {
+                handle.queued_chat.push_front(item);
+            } else {
+                handle.queued_chat.push_back(item);
+            }
 
-        let should_interrupt = is_steer && handle.agent_id == "codex" && handle.is_generating;
-        (
-            should_interrupt,
-            handle.client.clone(),
-            handle.session_id.clone(),
-            handle.queued_chat.len(),
-        )
+            let should_interrupt = is_steer && handle.agent_id == "codex" && handle.is_generating;
+            (
+                None,
+                0,
+                should_interrupt,
+                handle.client.clone(),
+                handle.session_id.clone(),
+                handle.queued_chat.len(),
+            )
+        }
     };
+
+    if let Some(item) = dispatch_item {
+        // Best-effort: run immediately, and let send_chat_message_internal drain the remaining queue.
+        send_chat_message_internal(
+            task_id,
+            item.message,
+            Some(item.client_message_id),
+            state.inner(),
+            app,
+            MessageOrigin::Ui,
+        )
+        .await?;
+
+        return Ok(serde_json::json!({
+            "queuedCount": queued_remaining,
+            "dispatched": true
+        }));
+    }
 
     if should_interrupt {
         // Best-effort: interrupt the active Codex turn so the steered prompt runs next.

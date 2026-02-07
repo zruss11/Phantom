@@ -309,6 +309,12 @@
             })
               .catch(function(err) {
                 console.error('[Tauri Bridge] enqueue_chat_message error:', err);
+                var errText = (err && err.message) ? err.message : ('' + err);
+                // Ensure the user sees a failure (chat log status + main status, if present).
+                emitEvent('ChatLogStatus', null, args[0], 'Error: ' + errText, 'error');
+                if (typeof sendNotification === 'function') {
+                  sendNotification('Failed to enqueue chat message: ' + errText, 'red');
+                }
               });
           }
           break;
