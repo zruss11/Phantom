@@ -48,7 +48,7 @@
 - [x] content_hash checks to avoid re-embedding unchanged text (per-chunk FNV1a hash in `src-tauri/src/semantic_indexer.rs`)
 
 ### M6 — Hybrid rerank + UX polish
-- [ ] Implement hybrid search: candidates from keyword → rerank with vectors
+- [x] Implement hybrid search: candidates from keyword → rerank with vectors (implemented vector rerank in `src-tauri/src/semantic_search.rs` when local model is available)
 - [ ] Add “Indexing…” indicator and “Exact” toggle
 - [ ] Update Notes search bar to semantic-first (calls `semantic_search`)
 
