@@ -351,6 +351,10 @@ fn with_runtime<T>(
     Ok(f(guard.as_mut().expect("just loaded")))
 }
 
+pub fn embed_text_sync(model_id: &str, max_seq_len: usize, text: &str) -> Result<Vec<f32>, String> {
+    with_runtime(model_id, max_seq_len, |rt| rt.embed(text))?
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmbeddingGenerateRequest {
@@ -381,7 +385,7 @@ pub async fn embedding_generate(
     }
 
     let text = req.text;
-    tokio::task::spawn_blocking(move || with_runtime(&model_id, max_seq_len, |rt| rt.embed(&text))?)
+    tokio::task::spawn_blocking(move || embed_text_sync(&model_id, max_seq_len, &text))
         .await
         .map_err(|e| format!("Embedding worker failed: {e}"))?
 }

@@ -39,13 +39,13 @@
 
 ### M5 — Incremental indexing
 - [ ] Define chunking for:
-  - [ ] tasks: title + `messages` transcript chunks
-  - [ ] notes/meetings: title + transcript/text chunks
+  - [x] tasks: title + `messages` transcript chunks (implemented in `src-tauri/src/semantic_indexer.rs`)
+  - [x] notes/meetings: title + transcript/text chunks (implemented in `src-tauri/src/semantic_indexer.rs`)
 - [ ] Index triggers (debounced):
-  - [ ] task title change
-  - [ ] message append
+  - [x] task title change (schedules `semantic_indexer::schedule_index_entity` after title summary write)
+  - [x] message append (schedules `semantic_indexer::schedule_index_entity` after user + assistant message persistence)
   - [ ] meeting segment append / meeting stop
-- [ ] content_hash checks to avoid re-embedding unchanged text
+- [x] content_hash checks to avoid re-embedding unchanged text (per-chunk FNV1a hash in `src-tauri/src/semantic_indexer.rs`)
 
 ### M6 — Hybrid rerank + UX polish
 - [ ] Implement hybrid search: candidates from keyword → rerank with vectors
