@@ -53,6 +53,8 @@
 - [ ] Update Notes search bar to semantic-first (calls `semantic_search`)
 
 ## Completion
-When everything above is done and working end-to-end, add:
+When everything above is done and working end-to-end, add a line:
 
-STATUS: COMPLETE
+STATUS: <COMPLETE>
+
+(Replace `<COMPLETE>` with `COMPLETE`.)
