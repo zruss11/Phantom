@@ -975,7 +975,13 @@
     el.className = (st.state === 'error' || st.error) ? 'notes-modal-status missing' : 'notes-modal-status ready';
 
     var last = $('notesDictationLastTranscript');
-    if (last) last.value = (st.last_transcript || '').toString();
+    if (last) {
+      var live = (state.dictationLiveTranscript || '').toString();
+      var show = (st.state === 'listening' || st.state === 'transcribing')
+        ? (live || (st.last_transcript || '').toString())
+        : (st.last_transcript || '').toString();
+      last.value = show;
+    }
   }
 
   async function refreshDictationStatus() {
@@ -1002,6 +1008,7 @@
 
   async function startDictationNow() {
     if (!ipcRenderer) return;
+    state.dictationLiveTranscript = '';
     try {
       await ipcRenderer.invoke('dictation_start');
     } catch (e) {
@@ -1044,15 +1051,26 @@
 
   function onDictationStatus(data) {
     state.dictationStatus = data || null;
+    if (data && data.state !== 'listening' && data.state !== 'transcribing') {
+      state.dictationLiveTranscript = '';
+    }
     renderDictationStatus();
   }
 
   function onDictationTranscript(data) {
     // data: { text, outcome, error }
     if (!data) return;
+    state.dictationLiveTranscript = '';
     if (!state.dictationStatus) state.dictationStatus = {};
     state.dictationStatus.last_transcript = data.text;
     if (data.error) state.dictationStatus.error = data.error;
+    renderDictationStatus();
+  }
+
+  function onDictationLiveTranscript(data) {
+    // data: { text }
+    if (!data) return;
+    state.dictationLiveTranscript = (data.text || '').toString();
     renderDictationStatus();
   }
 
@@ -4182,6 +4200,7 @@
       ipcRenderer.on('LocalAsrModelStatus', onWhisperModelStatus);
       ipcRenderer.on('DictationStatus', onDictationStatus);
       ipcRenderer.on('DictationTranscript', onDictationTranscript);
+      ipcRenderer.on('DictationLiveTranscript', onDictationLiveTranscript);
       ipcRenderer.on('DictationOpenSettings', onDictationOpenSettings);
       ipcRenderer.on('AddTask', onAddTask);
       ipcRenderer.on('ChatLogBatch', onChatLogBatch);
