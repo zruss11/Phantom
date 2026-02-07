@@ -31,6 +31,10 @@ dist/
 .playwright-mcp/
 .superdesign/
 
+# Ralph loop
+.ralph/
+PROMPT.md
+
 # Development docs and plans (except screenshots for README)
 docs/*
 !docs/screenshots/

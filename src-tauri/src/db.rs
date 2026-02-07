@@ -497,9 +497,53 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         [],
     )?;
 
+    // Semantic index storage (vector search). Kept in the main app DB so it stays fully local.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS semantic_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            field TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            dims INTEGER NOT NULL,
+            embedding BLOB NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    // Keyword candidate generator for hybrid search (FTS5). Best-effort: on some SQLite builds
+    // FTS5 may be unavailable; this must not break app startup.
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts
+         USING fts5(
+            text,
+            entity_type UNINDEXED,
+            entity_id UNINDEXED,
+            field UNINDEXED,
+            chunk_index UNINDEXED
+         )",
+        [],
+    )
+    .ok();
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_meeting_segments_session
          ON meeting_segments(session_id, start_ms)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_semantic_chunks_entity
+         ON semantic_chunks(entity_type, entity_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_semantic_chunks_model_name
+         ON semantic_chunks(model_name)",
         [],
     )?;
 
@@ -1162,6 +1206,19 @@ pub fn get_task_cost(conn: &Connection, id: &str) -> Result<f64> {
 pub fn delete_task(conn: &Connection, id: &str) -> Result<()> {
     // Messages are auto-deleted via CASCADE
     conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+
+    // Best-effort cleanup of semantic search rows (no FK constraints).
+    conn.execute(
+        "DELETE FROM semantic_chunks WHERE entity_type = 'task' AND entity_id = ?1",
+        params![id],
+    )
+    .ok();
+    conn.execute(
+        "DELETE FROM semantic_fts WHERE entity_type = 'task' AND entity_id = ?1",
+        params![id],
+    )
+    .ok();
+
     Ok(())
 }
 
@@ -1825,6 +1882,20 @@ pub fn save_meeting_segment(
 /// Delete a meeting session (segments auto-deleted via CASCADE)
 pub fn delete_meeting_session(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM meeting_sessions WHERE id = ?1", params![id])?;
+
+    // Best-effort cleanup of semantic search rows (no FK constraints).
+    // Notes/meetings are indexed under entity_type = 'note'.
+    conn.execute(
+        "DELETE FROM semantic_chunks WHERE entity_type = 'note' AND entity_id = ?1",
+        params![id],
+    )
+    .ok();
+    conn.execute(
+        "DELETE FROM semantic_fts WHERE entity_type = 'note' AND entity_id = ?1",
+        params![id],
+    )
+    .ok();
+
     Ok(())
 }
 

@@ -11,11 +11,13 @@ Run from the repository root unless noted.
 - `cd gui && python3 -m http.server 8000` (or `npx serve gui -l 8000`) — serve the GUI locally for dev.
 - `cd src-tauri && cargo tauri dev` — run the desktop app in development mode.
 - `cd src-tauri && cargo build` — build the Tauri binary.
+- `cd src-tauri && cargo fmt` — format Rust code (repo root is not a Cargo workspace).
 - `cargo tauri build` — build production bundles (outputs in `src-tauri/target/release/bundle/`).
 - `cargo build --release -p phantom_harness` — build the release binary via the workspace crate.
 - `scripts/dmg/build-dmg.sh` — build the custom macOS DMG after a release build.
 - `cd src-tauri && cargo test` — run Rust unit tests (see `src-tauri/src/namegen.rs`, `src-tauri/src/worktree.rs`).
 - `CLAUDE_SMOKE=1 cargo test -p phantom_harness_backend --test claude_smoke -- --nocapture` — run the Claude backend smoke test.
+- Rust toolchain is pinned in `src-tauri/rust-toolchain.toml` (currently `1.92.0`).
 
 ## Coding Style & Naming Conventions
 - Rust: edition 2021; use `cargo fmt` (4-space indent, rustfmt defaults).

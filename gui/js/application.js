@@ -5684,7 +5684,8 @@ init();
     // Actions
     "action.createTask": { mod: true, key: "Enter" },
     "action.focusPrompt": { mod: true, key: "l" },
-    "action.pickProject": { mod: true, shift: true, key: "o" }
+    "action.pickProject": { mod: true, shift: true, key: "o" },
+    "action.commandPalette": { mod: true, key: "k" }
   };
 
   // Action handlers
@@ -5705,7 +5706,8 @@ init();
     "agent.factoryDroid": () => window.selectAgentById && window.selectAgentById("factory-droid"),
     "action.createTask": () => $("#createAgentButton").click(),
     "action.focusPrompt": () => $("#initialPrompt").focus(),
-    "action.pickProject": () => $("#pickProjectPath").click()
+    "action.pickProject": () => $("#pickProjectPath").click(),
+    "action.commandPalette": () => window.toggleCommandPalette && window.toggleCommandPalette()
   };
 
   // Current keybinds (loaded from settings or defaults)
@@ -5947,6 +5949,391 @@ init();
     document.addEventListener("DOMContentLoaded", init);
   } else {
     init();
+  }
+})();
+
+// =============================================================================
+// GLOBAL CMD+K COMMAND PALETTE
+// =============================================================================
+(function initCommandPalette() {
+  'use strict';
+
+  var bridge = window.tauriBridge || null;
+  var ipcRenderer = bridge && bridge.ipcRenderer ? bridge.ipcRenderer : null;
+
+  var state = {
+    open: false,
+    query: '',
+    itemsFlat: [],
+    activeIndex: 0,
+    lastFocus: null,
+    debounceTimer: null,
+    requestId: 0,
+    exact: false,
+    indexPollTimer: null,
+  };
+
+  function $(id) {
+    return document.getElementById(id);
+  }
+
+  function isEditableEl(el) {
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    var tag = (el.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select';
+  }
+
+  function openPalette(initialQuery) {
+    var overlay = $('notesSearchPalette');
+    var input = $('notesPaletteInput');
+    if (!overlay || !input) return;
+
+    // Load last-used mode.
+    try {
+      state.exact = localStorage.getItem('phantom-cmdk-exact') === '1';
+    } catch (e) {}
+
+    state.lastFocus = document.activeElement;
+    state.open = true;
+    overlay.hidden = false;
+
+    var q = typeof initialQuery === 'string' ? initialQuery : '';
+    state.query = q;
+    input.value = q;
+    state.activeIndex = 0;
+
+    var exactToggle = $('notesPaletteExactToggle');
+    if (exactToggle) exactToggle.checked = !!state.exact;
+
+    renderResults([]);
+    scheduleSearch();
+    startIndexPolling();
+
+    setTimeout(function () {
+      try { input.focus(); } catch (e) {}
+      try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
+    }, 0);
+  }
+
+  function closePalette() {
+    var overlay = $('notesSearchPalette');
+    if (overlay) overlay.hidden = true;
+
+    state.open = false;
+    state.itemsFlat = [];
+    state.activeIndex = 0;
+    stopIndexPolling();
+
+    var last = state.lastFocus;
+    state.lastFocus = null;
+    if (last && typeof last.focus === 'function') {
+      try { last.focus(); } catch (e) {}
+    }
+  }
+
+  function togglePalette() {
+    if (state.open) {
+      closePalette();
+    } else {
+      openPalette('');
+    }
+  }
+
+  window.toggleCommandPalette = togglePalette;
+
+  function setActive(index) {
+    var results = $('notesPaletteResults');
+    if (!results) return;
+
+    var items = results.querySelectorAll('.notes-palette-item[data-index]');
+    if (!items.length) {
+      state.activeIndex = 0;
+      return;
+    }
+
+    var idx = index;
+    if (idx < 0) idx = items.length - 1;
+    if (idx >= items.length) idx = 0;
+    state.activeIndex = idx;
+
+    items.forEach(function (el) { el.classList.remove('active'); });
+    var active = items[idx];
+    if (active) {
+      active.classList.add('active');
+      try { active.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+    }
+  }
+
+  async function activateSelection() {
+    var item = state.itemsFlat[state.activeIndex];
+    if (!item) return;
+
+    closePalette();
+
+	    if (item.type === 'task') {
+	      if (typeof switchToPage === 'function') {
+	        try { switchToPage('viewTasksPage'); } catch (e) {}
+	      }
+	      if (ipcRenderer && typeof ipcRenderer.invoke === 'function') {
+	        ipcRenderer.invoke('open_chat_window', { taskId: item.id }).catch(function () {});
+	      } else {
+	        window.open(
+	          'agent_chat_log.html?taskId=' + encodeURIComponent(item.id),
+	          'chat-' + item.id,
+	          'width=650,height=750'
+        );
+      }
+      return;
+    }
+
+    if (item.type === 'note') {
+      if (typeof switchToPage === 'function') {
+        try { switchToPage('notesPage'); } catch (e) {}
+      }
+      window.dispatchEvent(new CustomEvent('PhantomOpenNote', { detail: { sessionId: item.id } }));
+      return;
+    }
+  }
+
+  function escapeHtml(text) {
+    var div = document.createElement('div');
+    div.textContent = text || '';
+    return div.innerHTML;
+  }
+
+  function renderEmpty(message) {
+    var results = $('notesPaletteResults');
+    if (!results) return;
+
+    // Prevent stale selection activation (Enter) after clearing/error states.
+    state.itemsFlat = [];
+    state.activeIndex = 0;
+    results.innerHTML = '';
+
+    var empty = document.createElement('div');
+    empty.className = 'notes-palette-empty';
+    empty.innerHTML =
+      '<div class="notes-palette-empty-title">' + escapeHtml(message || 'No results') + '</div>' +
+      '<div class="notes-palette-empty-sub">Try a different search.</div>';
+    results.appendChild(empty);
+  }
+
+  function renderResults(items) {
+    var results = $('notesPaletteResults');
+    if (!results) return;
+
+    state.itemsFlat = [];
+    results.innerHTML = '';
+
+    if (!items || !items.length) {
+      renderEmpty('No results');
+      return;
+    }
+
+    var groups = [
+      { title: 'Tasks', type: 'task' },
+      { title: 'Notes', type: 'note' },
+    ];
+
+    var flatIndex = 0;
+    groups.forEach(function (g) {
+      var groupItems = items.filter(function (it) { return it.entityType === g.type; });
+      if (!groupItems.length) return;
+
+      var groupEl = document.createElement('div');
+      groupEl.className = 'notes-palette-group';
+
+      var heading = document.createElement('div');
+      heading.className = 'notes-palette-group-title';
+      heading.textContent = g.title;
+      groupEl.appendChild(heading);
+
+      groupItems.forEach(function (it) {
+        var row = document.createElement('div');
+        row.className = 'notes-palette-item';
+        row.setAttribute('role', 'option');
+        row.dataset.index = String(flatIndex);
+
+        state.itemsFlat.push({ type: g.type, id: it.entityId });
+
+        var iconHtml = g.type === 'task'
+          ? '<div class="notes-palette-item-icon"><i class="fal fa-bolt"></i></div>'
+          : '<div class="notes-palette-item-icon meeting"><i class="fal fa-microphone-alt"></i></div>';
+
+        var title = it.title || (g.type === 'task' ? 'Untitled task' : 'Untitled note');
+        var sub = it.snippet || '';
+
+        row.innerHTML =
+          iconHtml +
+          '<div class="notes-palette-item-text">' +
+            '<div class="notes-palette-item-title">' + escapeHtml(title) + '</div>' +
+            '<div class="notes-palette-item-sub">' + escapeHtml(sub) + '</div>' +
+          '</div>' +
+          '<div class="notes-palette-item-meta">Open</div>';
+
+        row.addEventListener('mouseenter', function () {
+          setActive(Number(row.dataset.index || 0));
+        });
+        row.addEventListener('click', function () {
+          setActive(Number(row.dataset.index || 0));
+          activateSelection();
+        });
+
+        groupEl.appendChild(row);
+        flatIndex += 1;
+      });
+
+      results.appendChild(groupEl);
+    });
+
+    setActive(state.activeIndex);
+  }
+
+  function scheduleSearch() {
+    if (state.debounceTimer) clearTimeout(state.debounceTimer);
+    state.debounceTimer = setTimeout(runSearch, 120);
+  }
+
+  async function runSearch() {
+    if (!state.open) return;
+    var q = state.query.trim();
+    if (!q) {
+      // Invalidate any in-flight search so we don't render stale results after clearing input.
+      state.requestId += 1;
+      renderEmpty('Type to search');
+      return;
+    }
+    if (!ipcRenderer || typeof ipcRenderer.invoke !== 'function') {
+      renderEmpty('Search is not available in browser mode');
+      return;
+    }
+
+    var reqId = ++state.requestId;
+    try {
+      var items = await ipcRenderer.invoke('semantic_search', {
+        req: { query: q, limit: 20, exact: !!state.exact }
+      });
+      if (reqId !== state.requestId) return;
+      renderResults(Array.isArray(items) ? items : []);
+    } catch (err) {
+      if (reqId !== state.requestId) return;
+      renderEmpty('Search failed');
+      console.error('[CmdK] semantic_search failed:', err);
+    }
+  }
+
+  function setIndexStatusText(text) {
+    var el = $('notesPaletteIndexStatus');
+    if (!el) return;
+    el.textContent = text || '';
+  }
+
+  async function pollIndexStatusOnce() {
+    if (!state.open) return;
+    if (!ipcRenderer || typeof ipcRenderer.invoke !== 'function') return;
+
+    try {
+      var s = await ipcRenderer.invoke('semantic_index_status', {});
+      var pending = (s && typeof s.pendingJobs === 'number') ? s.pendingJobs : null;
+      if (pending && pending > 0) {
+        setIndexStatusText('Indexing...');
+      } else {
+        setIndexStatusText('');
+      }
+    } catch (e) {
+      // Ignore; best-effort only.
+    }
+  }
+
+  function startIndexPolling() {
+    stopIndexPolling();
+    setIndexStatusText('');
+    pollIndexStatusOnce();
+    state.indexPollTimer = setInterval(pollIndexStatusOnce, 1200);
+  }
+
+  function stopIndexPolling() {
+    if (state.indexPollTimer) clearInterval(state.indexPollTimer);
+    state.indexPollTimer = null;
+    setIndexStatusText('');
+  }
+
+  function bindOnce() {
+    var overlay = $('notesSearchPalette');
+    var input = $('notesPaletteInput');
+    if (!overlay || !input) return;
+
+    input.addEventListener('input', function () {
+      state.query = input.value || '';
+      state.activeIndex = 0;
+      scheduleSearch();
+    });
+
+    var exactToggle = $('notesPaletteExactToggle');
+    if (exactToggle) {
+      exactToggle.addEventListener('change', function () {
+        state.exact = !!exactToggle.checked;
+        try { localStorage.setItem('phantom-cmdk-exact', state.exact ? '1' : '0'); } catch (e) {}
+        state.activeIndex = 0;
+        scheduleSearch();
+      });
+    }
+
+    overlay.addEventListener('mousedown', function (e) {
+      // Click the dimmed overlay area to close.
+      if (e.target === overlay) {
+        e.preventDefault();
+        closePalette();
+      }
+    });
+
+    // Palette keyboard owns events while open. Capture phase prevents other page handlers.
+    document.addEventListener('keydown', function (e) {
+      if (!state.open) return;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closePalette();
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        e.stopPropagation();
+        setActive(state.activeIndex + 1);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        e.stopPropagation();
+        setActive(state.activeIndex - 1);
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        activateSelection();
+        return;
+      }
+    }, true);
+
+    // If the user triggers Cmd+K while typing, honor it (keybind module calls toggleCommandPalette).
+    document.addEventListener('keydown', function (e) {
+      if (state.open) return;
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        if (isEditableEl(document.activeElement)) {
+          e.preventDefault();
+          togglePalette();
+        }
+      }
+    });
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bindOnce);
+  } else {
+    bindOnce();
   }
 })();
 

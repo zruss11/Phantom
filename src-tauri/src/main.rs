@@ -9,6 +9,8 @@ mod db;
 mod debug_http;
 mod dictation;
 mod discord_bot;
+mod embedding_inference;
+mod embedding_model;
 mod local_asr_model;
 mod local_usage;
 mod logger;
@@ -17,6 +19,8 @@ mod meeting_notes;
 mod namegen;
 mod opencode_cli;
 mod parakeet_model;
+mod semantic_indexer;
+mod semantic_search;
 mod summarize;
 mod transcription;
 mod utils;
@@ -367,6 +371,9 @@ pub(crate) struct AppState {
     meeting_manager: Arc<StdMutex<meeting_notes::MeetingSessionManager>>,
     whisper_models: Arc<tokio::sync::Mutex<whisper_model::WhisperModelManagerState>>,
     parakeet_models: Arc<tokio::sync::Mutex<parakeet_model::ParakeetModelManagerState>>,
+    embedding_models: Arc<tokio::sync::Mutex<embedding_model::EmbeddingModelManagerState>>,
+    semantic_index_jobs:
+        Arc<tokio::sync::Mutex<HashMap<String, semantic_indexer::SemanticIndexJob>>>,
     pub(crate) dictation: Arc<StdMutex<dictation::DictationService>>,
 }
 
@@ -4785,6 +4792,7 @@ pub(crate) async fn create_agent_session_internal(
         let agent_clone = payload.agent_id.clone();
         let task_id_clone = task_id.clone();
         let db_clone = state.db.clone();
+        let app_handle = app.clone();
         let window_opt = app.get_webview_window("main");
         let summaries_agent = settings.summaries_agent.clone();
 
@@ -4803,6 +4811,14 @@ pub(crate) async fn create_agent_session_internal(
                     eprintln!("[Harness] Failed to save title summary: {}", e);
                 }
             }
+
+            // Best-effort: schedule semantic reindex for title changes.
+            semantic_indexer::schedule_index_entity(
+                &app_handle,
+                semantic_search::ENTITY_TYPE_TASK,
+                &task_id_clone,
+            )
+            .await;
 
             // Emit event to frontend
             if let Some(window) = window_opt {
@@ -5501,6 +5517,10 @@ pub(crate) async fn start_task_internal(
             .map_err(|e| e.to_string())?;
         tx.commit().map_err(|e| e.to_string())?;
     }
+
+    // Debounced semantic reindex for message append (best-effort).
+    semantic_indexer::schedule_index_entity(&app, semantic_search::ENTITY_TYPE_TASK, &task_id)
+        .await;
 
     // Build attachment info with data URLs for chat display
     let chat_attachments: Vec<serde_json::Value> = attachments
@@ -6273,6 +6293,10 @@ pub(crate) async fn start_task_internal(
         };
         emit_status(&status, color, "running")?;
     }
+
+    // Debounced semantic reindex for assistant message append (best-effort).
+    semantic_indexer::schedule_index_entity(&app, semantic_search::ENTITY_TYPE_TASK, &task_id)
+        .await;
 
     // Process token usage and update cost
     if let Some(usage) = &response.token_usage {
@@ -13534,6 +13558,10 @@ fn main() {
                 parakeet_models: Arc::new(tokio::sync::Mutex::new(
                     parakeet_model::ParakeetModelManagerState::default(),
                 )),
+                embedding_models: Arc::new(tokio::sync::Mutex::new(
+                    embedding_model::EmbeddingModelManagerState::default(),
+                )),
+                semantic_index_jobs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
                 dictation: Arc::new(StdMutex::new(dictation)),
             }
         })
@@ -13686,6 +13714,17 @@ fn main() {
             meeting_notes::meeting_get_transcript,
             meeting_notes::meeting_delete_session,
             meeting_notes::meeting_export_transcript,
+            // Semantic search commands
+            semantic_search::semantic_index_status,
+            semantic_search::semantic_search,
+            semantic_search::semantic_reindex_all,
+            semantic_search::semantic_delete_for_entity,
+            // Embedding model download commands
+            embedding_model::embedding_model_status,
+            embedding_model::download_embedding_model,
+            embedding_model::embedding_cancel_download,
+            // Embedding inference (debug / indexing primitive)
+            embedding_inference::embedding_generate,
             calendar::calendar_get_upcoming_events,
             calendar::calendar_list_calendars,
         ])
