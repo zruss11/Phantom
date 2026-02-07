@@ -9,6 +9,7 @@ mod db;
 mod debug_http;
 mod dictation;
 mod discord_bot;
+mod embedding_model;
 mod local_asr_model;
 mod local_usage;
 mod logger;

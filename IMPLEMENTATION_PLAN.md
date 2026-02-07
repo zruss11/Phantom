@@ -32,7 +32,7 @@
 - [x] Ensure global palette works even before embeddings are downloaded (palette uses keyword `semantic_search`)
 
 ### M4 — Local embeddings (ONNX + tokenizer)
-- [ ] Pick an embedding model (small MiniLM/BGE) and define model assets layout
+- [x] Pick an embedding model (small MiniLM/BGE) and define model assets layout (scaffolded in `src-tauri/src/embedding_model.rs`)
 - [ ] Implement download-on-first-use with progress + cancel
 - [ ] Implement embedding generation (tokenizer + ORT session)
 - [ ] Store embeddings as packed f32 BLOBs
