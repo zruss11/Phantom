@@ -8662,6 +8662,14 @@ input:checked + .slider:before {
   font-weight: 500;
 }
 
+.notes-meeting-right {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
 .notes-meeting-time {
   font-size: 12px;
   color: var(--notes-text-dim);
@@ -8669,28 +8677,37 @@ input:checked + .slider:before {
 }
 
 .notes-meeting-delete {
-  position: absolute;
-  right: 10px;
-  top: 50%;
-  transform: translateY(-50%);
-  background: none;
-  border: none;
-  color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.55);
   cursor: pointer;
   font-size: 12px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  opacity: 0;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 10px;
+  opacity: 1;
   transition: all 0.15s;
 }
 
 .notes-meeting-row:hover .notes-meeting-delete {
-  opacity: 1;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(212, 165, 116, 0.18);
+  color: rgba(255, 255, 255, 0.8);
 }
 
 .notes-meeting-delete:hover {
   color: var(--notes-red);
-  background: rgba(232, 93, 111, 0.12);
+  border-color: rgba(232, 93, 111, 0.35);
+  background: rgba(232, 93, 111, 0.10);
+}
+
+.notes-meeting-delete:focus-visible {
+  outline: 2px solid rgba(212, 165, 116, 0.45);
+  outline-offset: 2px;
 }
 
 .notes-empty-sessions {

@@ -1791,6 +1791,11 @@
       deleteSession(session.id);
     });
 
+    var right = document.createElement('div');
+    right.className = 'notes-meeting-right';
+    right.appendChild(time);
+    right.appendChild(deleteBtn);
+
     row.addEventListener('contextmenu', function (e) {
       e.preventDefault();
       openMoveToFolderMenu(session.id, e.clientX, e.clientY);
@@ -1798,8 +1803,7 @@
 
     row.appendChild(icon);
     row.appendChild(info);
-    row.appendChild(time);
-    row.appendChild(deleteBtn);
+    row.appendChild(right);
 
     row.addEventListener('click', function () {
       switchView('transcript', session.id);
