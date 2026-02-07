@@ -3357,7 +3357,7 @@
       var label = disposition === 'steer' ? 'Steer' : 'Queued';
       msg.innerHTML =
         '<div class="notes-chat-pill-label">' + escapeHtml(label) + '</div>' +
-        '<div class="notes-chat-pill-body">' + escapeHtml(content || '').replace(/\\n/g, '<br>') + '</div>';
+        '<div class="notes-chat-pill-body">' + escapeHtml(content || '').replace(/\r?\n/g, '<br>') + '</div>';
     } else {
       msg.textContent = content;
     }

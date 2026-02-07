@@ -809,6 +809,8 @@ struct SessionHandle {
     suppress_notifications: bool,
     queued_chat: VecDeque<QueuedChatItem>,
     is_generating: bool,
+    /// Monotonic generation token to prevent stale cleanups from mutating state for a newer turn.
+    generation_seq: u64,
     /// Real-time cost watcher for Claude Code sessions (None for other agents)
     #[allow(dead_code)] // Kept for future graceful shutdown
     claude_watcher: Option<claude_usage_watcher::WatcherHandle>,
@@ -830,14 +832,20 @@ type SharedSessionHandle = Arc<Mutex<SessionHandle>>;
 /// Best-effort: ensure `SessionHandle.is_generating` doesn't get stuck `true` if a task errors.
 struct GeneratingResetGuard {
     handle_ref: SharedSessionHandle,
+    generation_seq: u64,
 }
 
 impl Drop for GeneratingResetGuard {
     fn drop(&mut self) {
         let handle_ref = self.handle_ref.clone();
+        let generation_seq = self.generation_seq;
         tauri::async_runtime::spawn(async move {
             let mut handle = handle_ref.lock().await;
-            handle.is_generating = false;
+            // Don't let a stale guard from a previous turn clear generating state for a newer one.
+            if handle.generation_seq == generation_seq {
+                handle.is_generating = false;
+                handle.cancel_token.cancel();
+            }
         });
     }
 }
@@ -4716,6 +4724,7 @@ pub(crate) async fn create_agent_session_internal(
         suppress_notifications: payload.suppress_notifications,
         queued_chat: VecDeque::new(),
         is_generating: false,
+        generation_seq: 0,
         claude_watcher,
         cancel_token: CancellationToken::new(),
         needs_history_injection: false,
@@ -5365,6 +5374,7 @@ pub(crate) async fn start_task_internal(
             suppress_notifications: task_id.starts_with("notes-"),
             queued_chat: VecDeque::new(),
             is_generating: false,
+            generation_seq: 0,
             claude_watcher,
             cancel_token: CancellationToken::new(),
             needs_history_injection: false,
@@ -5386,12 +5396,8 @@ pub(crate) async fn start_task_internal(
         handle_ref
     };
 
-    let _generating_reset_guard = GeneratingResetGuard {
-        handle_ref: handle_ref.clone(),
-    };
-
     let user_timestamp = chrono::Utc::now().to_rfc3339();
-    let (agent_id, model, prompt, attachments, client, session_id, cancel_token) = {
+    let (agent_id, model, prompt, attachments, client, session_id, cancel_token, generation_seq) = {
         let mut handle = handle_ref.lock().await;
         let prompt = handle
             .pending_prompt
@@ -5409,6 +5415,8 @@ pub(crate) async fn start_task_internal(
         // Create a fresh cancellation token for this generation
         handle.cancel_token = CancellationToken::new();
         handle.is_generating = true;
+        handle.generation_seq = handle.generation_seq.wrapping_add(1);
+        let generation_seq = handle.generation_seq;
         (
             handle.agent_id.clone(),
             handle.model.clone(),
@@ -5417,7 +5425,12 @@ pub(crate) async fn start_task_internal(
             handle.client.clone(),
             handle.session_id.clone(),
             handle.cancel_token.clone(),
+            generation_seq,
         )
+    };
+    let _generating_reset_guard = GeneratingResetGuard {
+        handle_ref: handle_ref.clone(),
+        generation_seq,
     };
     let mut prompt = prompt;
 
@@ -11408,6 +11421,7 @@ async fn send_chat_message_once_internal(
             suppress_notifications: task_id.starts_with("notes-"),
             queued_chat: VecDeque::new(),
             is_generating: false,
+            generation_seq: 0,
             claude_watcher,
             cancel_token: CancellationToken::new(),
             needs_history_injection: false,
@@ -11438,6 +11452,7 @@ async fn send_chat_message_once_internal(
         effective_message,
         cancel_token,
         needs_history_injection,
+        generation_seq,
     ) = {
         let mut handle = handle_ref.lock().await;
         let needs_history = handle.needs_history_injection;
@@ -11458,6 +11473,8 @@ async fn send_chat_message_once_internal(
         // Create a fresh cancellation token for this generation
         handle.cancel_token = CancellationToken::new();
         handle.is_generating = true;
+        handle.generation_seq = handle.generation_seq.wrapping_add(1);
+        let generation_seq = handle.generation_seq;
         (
             handle.agent_id.clone(),
             handle.model.clone(),
@@ -11466,7 +11483,12 @@ async fn send_chat_message_once_internal(
             effective_message,
             handle.cancel_token.clone(),
             needs_history,
+            generation_seq,
         )
+    };
+    let _generating_reset_guard = GeneratingResetGuard {
+        handle_ref: handle_ref.clone(),
+        generation_seq,
     };
     // If the session was reconnected without session/load (e.g., after account switch),
     // wrap the message with conversation history so the agent has context
@@ -12279,11 +12301,15 @@ async fn send_chat_message_once_internal(
     // Mark generation complete and grab the next queued chat message (if any).
     let next_queued = {
         let mut handle = handle_ref.lock().await;
-        handle.is_generating = false;
-        if was_cancelled {
+        if handle.generation_seq != generation_seq {
             None
         } else {
-            handle.queued_chat.pop_front()
+            handle.is_generating = false;
+            if was_cancelled {
+                None
+            } else {
+                handle.queued_chat.pop_front()
+            }
         }
     };
 
@@ -12364,9 +12390,18 @@ async fn enqueue_chat_message(
 
     // If we aren't generating, do not leave messages parked in `queued_chat` with no drain path.
     // Instead, push into the queue then immediately start draining from the front.
-    let (dispatch_item, queued_remaining, should_interrupt, client, session_id, queued_count) = {
+    let (
+        dispatch_item,
+        queued_remaining,
+        should_interrupt,
+        client,
+        session_id,
+        queued_count,
+        reserved_generation_seq,
+    ) = {
         let mut handle = handle_ref.lock().await;
         if !handle.is_generating {
+            let reserved_generation_seq = handle.generation_seq;
             let item = QueuedChatItem {
                 client_message_id: client_message_id.clone(),
                 message: msg.clone(),
@@ -12380,6 +12415,8 @@ async fn enqueue_chat_message(
                 .queued_chat
                 .pop_front()
                 .expect("queued_chat must contain the just-pushed item");
+            // Reserve generation under the lock so concurrent enqueue calls don't both dispatch.
+            handle.is_generating = true;
             (
                 Some(to_send),
                 handle.queued_chat.len(),
@@ -12387,6 +12424,7 @@ async fn enqueue_chat_message(
                 handle.client.clone(),
                 handle.session_id.clone(),
                 0,
+                reserved_generation_seq,
             )
         } else {
             let item = QueuedChatItem {
@@ -12407,13 +12445,14 @@ async fn enqueue_chat_message(
                 handle.client.clone(),
                 handle.session_id.clone(),
                 handle.queued_chat.len(),
+                0,
             )
         }
     };
 
     if let Some(item) = dispatch_item {
         // Best-effort: run immediately, and let send_chat_message_internal drain the remaining queue.
-        send_chat_message_internal(
+        let send_result = send_chat_message_internal(
             task_id,
             item.message,
             Some(item.client_message_id),
@@ -12421,7 +12460,16 @@ async fn enqueue_chat_message(
             app,
             MessageOrigin::Ui,
         )
-        .await?;
+        .await;
+        if let Err(err) = send_result {
+            // If we reserved generating but failed before a new generation actually started,
+            // release the reservation so the queue doesn't get stuck.
+            let mut handle = handle_ref.lock().await;
+            if handle.generation_seq == reserved_generation_seq {
+                handle.is_generating = false;
+            }
+            return Err(err);
+        }
 
         return Ok(serde_json::json!({
             "queuedCount": queued_remaining,
