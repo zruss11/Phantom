@@ -27,6 +27,13 @@ use tauri_plugin_global_shortcut::Shortcut as GlobalShortcut;
 
 const STATUS_EVENT: &str = "DictationStatus";
 const TRANSCRIPT_EVENT: &str = "DictationTranscript";
+const LIVE_TRANSCRIPT_EVENT: &str = "DictationLiveTranscript";
+
+// Whisper runs on CPU and can be expensive; keep the live preview lightweight by only
+// re-transcribing a short rolling window (rewritten each tick as Whisper gets context).
+const LIVE_PREVIEW_INTERVAL_MS: u64 = 900;
+const LIVE_PREVIEW_WINDOW_SECS: f32 = 10.0;
+const LIVE_PREVIEW_MIN_AUDIO_SECS: f32 = 0.8;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +71,11 @@ pub struct DictationTranscriptPayload {
     pub text: String,
     pub outcome: DictationOutcome,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DictationLiveTranscriptPayload {
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -110,8 +122,10 @@ impl ActivationMode {
 struct RecordingSession {
     stop: Arc<AtomicBool>,
     audio: Arc<StdMutex<Vec<f32>>>,
+    shared_whisper_ctx: Arc<StdMutex<Option<Arc<WhisperContext>>>>,
     capture: Option<audio_capture::AudioCaptureHandle>,
     collector: Option<std::thread::JoinHandle<()>>,
+    live_preview: Option<std::thread::JoinHandle<()>>,
 }
 
 pub struct DictationManager {
@@ -290,6 +304,8 @@ impl DictationManager {
         let (tx, rx) = mpsc::channel::<audio_capture::AudioChunk>();
         let stop = Arc::new(AtomicBool::new(false));
         let audio: Arc<StdMutex<Vec<f32>>> = Arc::new(StdMutex::new(Vec::new()));
+        let shared_whisper_ctx: Arc<StdMutex<Option<Arc<WhisperContext>>>> =
+            Arc::new(StdMutex::new(None));
 
         let capture = audio_capture::start_capture(
             audio_capture::AudioCaptureConfig {
@@ -299,6 +315,121 @@ impl DictationManager {
             },
             tx,
         )?;
+
+        let preview_stop = Arc::clone(&stop);
+        let preview_audio = Arc::clone(&audio);
+        let preview_shared_whisper_ctx = Arc::clone(&shared_whisper_ctx);
+        let preview_app = app.clone();
+        let live_preview = std::thread::Builder::new()
+            .name("dictation-live-preview".into())
+            .spawn(move || {
+                let mut last_sent = String::new();
+                let mut last_seen_len: usize = 0;
+                let mut whisper_ctx: Option<Arc<WhisperContext>> = None;
+
+                while !preview_stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(LIVE_PREVIEW_INTERVAL_MS));
+                    if preview_stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+
+                    // Only run live preview for Local dictation engine. Cloud transcription
+                    // is one-shot (after stop) and we intentionally avoid streaming network calls here.
+                    let state = preview_app.state::<AppState>().inner().clone();
+                    let settings = state.settings.blocking_lock().clone();
+                    if dictation_engine_from_settings(&settings) != DictationEngine::Local {
+                        continue;
+                    }
+
+                    let active = local_asr_model::read_active_local_model();
+                    if !matches!(active.engine, local_asr_model::LocalAsrEngine::Whisper) {
+                        continue;
+                    }
+
+                    // Lazily load whisper context once and share it with the stop/final pass to
+                    // avoid loading the model twice (large models can be hundreds of MB).
+                    if whisper_ctx.is_none() {
+                        if let Ok(g) = preview_shared_whisper_ctx.lock() {
+                            whisper_ctx = g.clone();
+                        }
+                    }
+                    if whisper_ctx.is_none() {
+                        if !whisper_model::is_model_downloaded(&active.model_id) {
+                            continue;
+                        }
+                        let Some(path) = whisper_model::model_path_for_id(&active.model_id) else {
+                            continue;
+                        };
+                        let Some(path_str) = path.to_str() else {
+                            continue;
+                        };
+                        match WhisperContext::new_with_params(
+                            path_str,
+                            WhisperContextParameters::default(),
+                        ) {
+                            Ok(ctx) => {
+                                let arc = Arc::new(ctx);
+                                if let Ok(mut g) = preview_shared_whisper_ctx.lock() {
+                                    *g = Some(arc.clone());
+                                }
+                                whisper_ctx = Some(arc);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to load Whisper model for live preview: {e}"
+                                );
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Snapshot the rolling window of audio.
+                    let audio_snapshot = {
+                        let mut out: Option<Vec<f32>> = None;
+                        match preview_audio.lock() {
+                            Ok(g) => {
+                                let total = g.len();
+                                if total > last_seen_len {
+                                    last_seen_len = total;
+                                    let want = (LIVE_PREVIEW_WINDOW_SECS * 16_000.0) as usize;
+                                    let start = total.saturating_sub(want);
+                                    out = Some(g[start..].to_vec());
+                                }
+                            }
+                            Err(poisoned) => out = Some(poisoned.into_inner().clone()),
+                        }
+                        let Some(out) = out else {
+                            // No new audio since last attempt.
+                            continue;
+                        };
+                        out
+                    };
+
+                    if audio_snapshot.len() < (LIVE_PREVIEW_MIN_AUDIO_SECS * 16_000.0) as usize {
+                        continue;
+                    }
+
+                    let Some(ctx) = whisper_ctx.as_deref() else {
+                        continue;
+                    };
+                    let next = transcribe_whisper(ctx, &audio_snapshot);
+
+                    let Ok(mut next) = next else {
+                        continue;
+                    };
+                    next = next.trim().to_string();
+                    if next.is_empty() || next == last_sent {
+                        continue;
+                    }
+                    last_sent = next.clone();
+
+                    let _ = preview_app.emit(
+                        LIVE_TRANSCRIPT_EVENT,
+                        DictationLiveTranscriptPayload { text: next },
+                    );
+                }
+            })
+            .map_err(|e| format!("Failed to start dictation live preview thread: {e}"))?;
 
         let thread_stop = Arc::clone(&stop);
         let thread_audio = Arc::clone(&audio);
@@ -324,8 +455,10 @@ impl DictationManager {
         self.recording = Some(RecordingSession {
             stop,
             audio,
+            shared_whisper_ctx,
             capture: Some(capture),
             collector: Some(collector),
+            live_preview: Some(live_preview),
         });
 
         self.state = DictationState::Listening;
@@ -691,6 +824,17 @@ impl DictationService {
 
         let engine = dictation_engine_from_settings(settings);
 
+        // If the live preview loaded Whisper already, reuse it for the final pass to avoid
+        // loading the model twice (large + slow).
+        if engine == DictationEngine::Local {
+            if let Ok(g) = rec.shared_whisper_ctx.lock() {
+                if let Some(ctx) = g.clone() {
+                    self.mgr.whisper_ctx = Some(ctx);
+                    self.mgr.whisper_ctx_model_id = Some(whisper_model::active_model_id());
+                }
+            }
+        }
+
         let local_asr = if engine == DictationEngine::Local {
             match self.mgr.ensure_active_local_asr_loaded() {
                 Ok(h) => Some(h),
@@ -718,6 +862,9 @@ impl DictationService {
                     capture.stop();
                 }
                 if let Some(handle) = rec.collector.take() {
+                    let _ = handle.join();
+                }
+                if let Some(handle) = rec.live_preview.take() {
                     let _ = handle.join();
                 }
 
