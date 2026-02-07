@@ -414,6 +414,7 @@ impl EventHandler for DiscordEventHandler {
         if let Err(err) = crate::send_chat_message_internal(
             task_id,
             content.to_string(),
+            None,
             &state,
             app,
             crate::MessageOrigin::Discord,

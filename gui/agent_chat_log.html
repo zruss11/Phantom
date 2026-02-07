@@ -2655,6 +2655,37 @@
         font-weight: 600;
       }
 
+      /* ============================================
+       Queued/Steer Message Styles (Codex steer mode)
+       ============================================ */
+      .chat-message.user.queued,
+      .chat-message.user.steer {
+        border-style: dashed;
+        opacity: 0.9;
+      }
+
+      .chat-message.user.steer {
+        border-color: rgba(74, 222, 128, 0.28);
+        background: linear-gradient(
+          135deg,
+          rgba(74, 222, 128, 0.14),
+          rgba(53, 122, 189, 0.08)
+        );
+      }
+
+      .chat-message.user.queued {
+        border-color: rgba(255, 255, 255, 0.18);
+      }
+
+      .chat-message .queued-label {
+        font-size: 10px;
+        color: rgba(255, 255, 255, 0.55);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 6px;
+        font-weight: 600;
+      }
+
       /* Pending Actions Bar */
       .pending-actions {
         display: flex;

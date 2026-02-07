@@ -277,6 +277,8 @@
   // Pending prompt state
   let pendingPrompt = null;
   let taskStatusState = "idle";
+  let currentAgentId = null;
+  let fullSettings = null;
 
   // Diff line counter (tracks additions and deletions)
   let diffAdditions = 0;
@@ -669,6 +671,18 @@
     // Request task info from main process
     if (ipcRenderer && currentTaskId) {
       ipcRenderer.send("GetTaskInfo", currentTaskId);
+    }
+
+    // Load settings (used for Codex steer/queue feature gating).
+    if (ipcRenderer) {
+      ipcRenderer.invoke("getSettings")
+        .then(function (settings) {
+          fullSettings = settings || null;
+        })
+        .catch(function (err) {
+          console.warn("[ChatLog] getSettings failed:", err);
+          fullSettings = null;
+        });
     }
 
     setupEventListeners();
@@ -1066,8 +1080,43 @@
     });
 
     // Enter key to send (Shift+Enter for newline)
+    // Codex steer-mode: while running, Enter = steer (interrupt then run next), Tab = queue.
     $("#chatInput").on("keydown", function (e) {
-      if (e.key === "Enter" && !e.shiftKey) {
+      const isEnter = e.key === "Enter" && !e.shiftKey;
+      const isTab = e.key === "Tab" && !e.shiftKey;
+      if (!isEnter && !isTab) return;
+
+      const input = $("#chatInput");
+      const text = input.val().trim();
+      const steerEnabled =
+        currentAgentId === "codex" && fullSettings && fullSettings.codexFeatureSteer;
+      const isRunning = taskStatusState === "running" || isGenerating;
+
+      if (steerEnabled && isRunning && text) {
+        if (pendingAttachments && pendingAttachments.length > 0) {
+          e.preventDefault();
+          addSystemMessage("Finish current generation before sending attachments.");
+          return;
+        }
+        e.preventDefault();
+        const disposition = isEnter ? "steer" : "queue";
+        const clientMessageId = generateClientMessageId();
+        addQueuedUserPill(text, disposition, clientMessageId);
+        input.val("");
+        input.css("height", "auto");
+        if (ipcRenderer && currentTaskId) {
+          ipcRenderer.send(
+            "EnqueueChatMessage",
+            currentTaskId,
+            text,
+            clientMessageId,
+            disposition,
+          );
+        }
+        return;
+      }
+
+      if (isEnter) {
         e.preventDefault();
         sendMessage();
       }
@@ -1692,6 +1741,7 @@
     // Handle status updates
     ipcRenderer.on("ChatLogStatus", function (e, taskId, status, statusState) {
       if (taskId === currentTaskId) {
+        if (statusState) taskStatusState = statusState;
         if (statusState === "completed" || statusState === "idle") {
           finalizeStreamingMessage();
           flushAccumulatedReasoning();
@@ -2571,7 +2621,7 @@
     // Fetch user's settings to get last preferences for this agent
     var prefs = {};
     try {
-      var settings = await ipcRenderer.invoke("get_settings");
+      var settings = await ipcRenderer.invoke("getSettings");
       var agentModels = (settings && settings.taskAgentModels) || {};
       prefs = agentModels[agentId] || {};
     } catch (e) {
@@ -2673,6 +2723,7 @@
     const agent = taskInfo.agent || "codex";
     const logo = AGENT_LOGOS[agent] || AGENT_LOGOS["codex"];
     const name = AGENT_NAMES[agent] || "Agent";
+    currentAgentId = agent;
 
     const logoContainer = $("#agentLogo");
     logoContainer.html(logo);
@@ -2832,6 +2883,28 @@
   // Track if generation is in progress
   let isGenerating = false;
   let pendingAttachments = [];
+
+  function generateClientMessageId() {
+    return (
+      "cm_" +
+      Date.now().toString(36) +
+      "_" +
+      Math.random().toString(36).slice(2, 10)
+    );
+  }
+
+  function addQueuedUserPill(text, disposition, clientMessageId) {
+    addMessage(
+      {
+        message_type: "user_message",
+        content: text,
+        timestamp: new Date().toISOString(),
+        queuedDisposition: disposition, // "queue" | "steer"
+        clientMessageId: clientMessageId,
+      },
+      true,
+    );
+  }
 
   // Send a message to the agent
   function sendMessage() {
@@ -3020,6 +3093,22 @@
 
     const type = message.type || message.message_type || "system";
     const content = message.content || message.text || "";
+    const clientMessageId = message.clientMessageId || message.client_message_id || null;
+
+    // Reconcile queued/steer pills: when the backend emits the correlated user_message,
+    // flip the local queued pill to "sent" instead of appending a duplicate bubble.
+    if ((type === "user" || type === "user_message") && clientMessageId) {
+      const selectorId = escapeSelector(clientMessageId);
+      const existing = container.find(
+        `.chat-message.user[data-client-message-id="${selectorId}"]`,
+      );
+      if (existing.length > 0) {
+        existing.removeClass("queued steer");
+        const label = existing.find(".queued-label");
+        if (label.length) label.remove();
+        return;
+      }
+    }
 
     if (type === "plan_update") {
       let payload = message;
@@ -3173,8 +3262,21 @@
 
     switch (type) {
       case "user":
-      case "user_message":
+      case "user_message": {
         div.className += " user";
+        const clientMessageId = message.clientMessageId || message.client_message_id || null;
+        if (clientMessageId) {
+          div.dataset.clientMessageId = clientMessageId;
+        }
+        const queuedDisposition = message.queuedDisposition || null; // "queue" | "steer"
+        const queuedLabelText =
+          queuedDisposition === "steer"
+            ? "Steer"
+            : queuedDisposition === "queue"
+              ? "Queued"
+              : null;
+        if (queuedDisposition === "queue") div.classList.add("queued");
+        if (queuedDisposition === "steer") div.classList.add("steer");
         const attachments = message.attachments || [];
 
         if (attachments.length > 0) {
@@ -3184,6 +3286,13 @@
           // Create wrapper
           const wrapper = document.createElement("div");
           wrapper.className = "user-message-wrapper";
+
+          if (queuedLabelText) {
+            const label = document.createElement("div");
+            label.className = "queued-label";
+            label.textContent = queuedLabelText;
+            div.appendChild(label);
+          }
 
           // Create image strip
           const imageStrip = document.createElement("div");
@@ -3287,7 +3396,10 @@
           });
         } else {
           // Regular user message without images
-          div.innerHTML = escapeHtml(content);
+          const labelHtml = queuedLabelText
+            ? '<div class="queued-label">' + escapeHtml(queuedLabelText) + "</div>"
+            : "";
+          div.innerHTML = labelHtml + escapeHtml(content);
         }
 
         if (content && content.trim()) {
@@ -3303,6 +3415,7 @@
           div.appendChild(copyBtn);
         }
         break;
+      }
 
       case "assistant":
       case "assistant_message":
@@ -4082,6 +4195,15 @@
     const div = document.createElement("div");
     div.textContent = text;
     return div.innerHTML;
+  }
+
+  function escapeSelector(text) {
+    if (!text) return "";
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(text);
+    }
+    // Best-effort fallback; clientMessageIds we generate are simple.
+    return String(text).replace(/["\\\\]/g, "\\\\$&");
   }
 
   // Format tool arguments for display

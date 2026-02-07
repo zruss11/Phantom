@@ -45,7 +45,7 @@ use phantom_harness_backend::{
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -807,6 +807,10 @@ struct SessionHandle {
     pending_attachments: Vec<AttachmentRef>,
     messages: Vec<serde_json::Value>,
     suppress_notifications: bool,
+    queued_chat: VecDeque<QueuedChatItem>,
+    is_generating: bool,
+    /// Monotonic generation token to prevent stale cleanups from mutating state for a newer turn.
+    generation_seq: u64,
     /// Real-time cost watcher for Claude Code sessions (None for other agents)
     #[allow(dead_code)] // Kept for future graceful shutdown
     claude_watcher: Option<claude_usage_watcher::WatcherHandle>,
@@ -817,7 +821,34 @@ struct SessionHandle {
     needs_history_injection: bool,
 }
 
+#[derive(Debug, Clone)]
+struct QueuedChatItem {
+    client_message_id: String,
+    message: String,
+}
+
 type SharedSessionHandle = Arc<Mutex<SessionHandle>>;
+
+/// Best-effort: ensure `SessionHandle.is_generating` doesn't get stuck `true` if a task errors.
+struct GeneratingResetGuard {
+    handle_ref: SharedSessionHandle,
+    generation_seq: u64,
+}
+
+impl Drop for GeneratingResetGuard {
+    fn drop(&mut self) {
+        let handle_ref = self.handle_ref.clone();
+        let generation_seq = self.generation_seq;
+        tauri::async_runtime::spawn(async move {
+            let mut handle = handle_ref.lock().await;
+            // Don't let a stale guard from a previous turn clear generating state for a newer one.
+            if handle.generation_seq == generation_seq {
+                handle.is_generating = false;
+                handle.cancel_token.cancel();
+            }
+        });
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CodexAuthStatus {
@@ -4691,6 +4722,9 @@ pub(crate) async fn create_agent_session_internal(
         pending_attachments: payload.attachments.clone(),
         messages: Vec::new(),
         suppress_notifications: payload.suppress_notifications,
+        queued_chat: VecDeque::new(),
+        is_generating: false,
+        generation_seq: 0,
         claude_watcher,
         cancel_token: CancellationToken::new(),
         needs_history_injection: false,
@@ -5338,6 +5372,9 @@ pub(crate) async fn start_task_internal(
             pending_attachments: Vec::new(),
             messages: Vec::new(),
             suppress_notifications: task_id.starts_with("notes-"),
+            queued_chat: VecDeque::new(),
+            is_generating: false,
+            generation_seq: 0,
             claude_watcher,
             cancel_token: CancellationToken::new(),
             needs_history_injection: false,
@@ -5360,7 +5397,7 @@ pub(crate) async fn start_task_internal(
     };
 
     let user_timestamp = chrono::Utc::now().to_rfc3339();
-    let (agent_id, model, prompt, attachments, client, session_id, cancel_token) = {
+    let (agent_id, model, prompt, attachments, client, session_id, cancel_token, generation_seq) = {
         let mut handle = handle_ref.lock().await;
         let prompt = handle
             .pending_prompt
@@ -5377,6 +5414,9 @@ pub(crate) async fn start_task_internal(
         );
         // Create a fresh cancellation token for this generation
         handle.cancel_token = CancellationToken::new();
+        handle.is_generating = true;
+        handle.generation_seq = handle.generation_seq.wrapping_add(1);
+        let generation_seq = handle.generation_seq;
         (
             handle.agent_id.clone(),
             handle.model.clone(),
@@ -5385,7 +5425,12 @@ pub(crate) async fn start_task_internal(
             handle.client.clone(),
             handle.session_id.clone(),
             handle.cancel_token.clone(),
+            generation_seq,
         )
+    };
+    let _generating_reset_guard = GeneratingResetGuard {
+        handle_ref: handle_ref.clone(),
+        generation_seq,
     };
     let mut prompt = prompt;
 
@@ -6342,6 +6387,29 @@ pub(crate) async fn start_task_internal(
             maybe_show_agent_notification(&app, state, &task_id, &agent_id, &summary_status).await;
     }
 
+    // Mark generation complete and (best-effort) kick any queued chat messages.
+    let next_queued = {
+        let mut handle = handle_ref.lock().await;
+        handle.is_generating = false;
+        if was_cancelled {
+            None
+        } else {
+            handle.queued_chat.pop_front()
+        }
+    };
+    if let Some(item) = next_queued {
+        // Drain queued messages synchronously; this avoids spawning a !Send future.
+        send_chat_message_internal(
+            task_id.clone(),
+            item.message,
+            Some(item.client_message_id),
+            state,
+            app.clone(),
+            MessageOrigin::Ui,
+        )
+        .await?;
+    }
+
     Ok(())
 }
 
@@ -6437,13 +6505,28 @@ pub(crate) async fn soft_stop_task_internal(
 
     if let Some(handle_ref) = handle_ref {
         // Cancel the current generation
-        let handle = handle_ref.lock().await;
-        let was_already_cancelled = handle.cancel_token.is_cancelled();
-        handle.cancel_token.cancel();
+        let (was_already_cancelled, should_interrupt, client, session_id, agent_id) = {
+            let handle = handle_ref.lock().await;
+            (
+                handle.cancel_token.is_cancelled(),
+                handle.agent_id == "codex" && handle.is_generating,
+                handle.client.clone(),
+                handle.session_id.clone(),
+                handle.agent_id.clone(),
+            )
+        };
+        {
+            let handle = handle_ref.lock().await;
+            handle.cancel_token.cancel();
+        }
         println!(
             "[Harness] Cancelled generation for task_id={} (was_already_cancelled={})",
             task_id, was_already_cancelled
         );
+
+        if should_interrupt && agent_id == "codex" {
+            let _ = client.codex_turn_interrupt_active(&session_id).await;
+        }
 
         // Emit a status update immediately so the UI reflects the stop
         // (the streaming code will also emit when it detects cancellation)
@@ -11094,13 +11177,58 @@ async fn open_chat_window(
     Ok(())
 }
 
+struct SendChatOnceResult {
+    was_cancelled: bool,
+    next_queued: Option<QueuedChatItem>,
+}
+
 pub(crate) async fn send_chat_message_internal(
     task_id: String,
     message: String,
+    client_message_id: Option<String>,
     state: &AppState,
     app: tauri::AppHandle,
     origin: MessageOrigin,
 ) -> Result<(), String> {
+    let mut next_message = message;
+    let mut next_client_message_id = client_message_id;
+    let mut next_origin = origin;
+
+    loop {
+        let result = send_chat_message_once_internal(
+            task_id.clone(),
+            next_message,
+            next_client_message_id,
+            state,
+            app.clone(),
+            next_origin,
+        )
+        .await?;
+
+        if result.was_cancelled {
+            return Ok(());
+        }
+
+        match result.next_queued {
+            Some(item) => {
+                next_message = item.message;
+                next_client_message_id = Some(item.client_message_id);
+                next_origin = MessageOrigin::Ui;
+                continue;
+            }
+            None => return Ok(()),
+        }
+    }
+}
+
+async fn send_chat_message_once_internal(
+    task_id: String,
+    message: String,
+    client_message_id: Option<String>,
+    state: &AppState,
+    app: tauri::AppHandle,
+    origin: MessageOrigin,
+) -> Result<SendChatOnceResult, String> {
     println!(
         "[Harness] send_chat_message: task={} message_len={}",
         task_id,
@@ -11291,6 +11419,9 @@ pub(crate) async fn send_chat_message_internal(
             pending_attachments: Vec::new(),
             messages: Vec::new(),
             suppress_notifications: task_id.starts_with("notes-"),
+            queued_chat: VecDeque::new(),
+            is_generating: false,
+            generation_seq: 0,
             claude_watcher,
             cancel_token: CancellationToken::new(),
             needs_history_injection: false,
@@ -11321,6 +11452,7 @@ pub(crate) async fn send_chat_message_internal(
         effective_message,
         cancel_token,
         needs_history_injection,
+        generation_seq,
     ) = {
         let mut handle = handle_ref.lock().await;
         let needs_history = handle.needs_history_injection;
@@ -11340,6 +11472,9 @@ pub(crate) async fn send_chat_message_internal(
         );
         // Create a fresh cancellation token for this generation
         handle.cancel_token = CancellationToken::new();
+        handle.is_generating = true;
+        handle.generation_seq = handle.generation_seq.wrapping_add(1);
+        let generation_seq = handle.generation_seq;
         (
             handle.agent_id.clone(),
             handle.model.clone(),
@@ -11348,7 +11483,12 @@ pub(crate) async fn send_chat_message_internal(
             effective_message,
             handle.cancel_token.clone(),
             needs_history,
+            generation_seq,
         )
+    };
+    let _generating_reset_guard = GeneratingResetGuard {
+        handle_ref: handle_ref.clone(),
+        generation_seq,
     };
     // If the session was reconnected without session/load (e.g., after account switch),
     // wrap the message with conversation history so the agent has context
@@ -11655,9 +11795,25 @@ pub(crate) async fn send_chat_message_internal(
             let user_chat_msg = serde_json::json!({
                 "message_type": "user_message",
                 "content": message.clone(),
+                "clientMessageId": client_message_id.as_deref(),
                 "timestamp": user_timestamp
             });
             let _ = window.emit("ChatLogUpdate", (&task_id, user_chat_msg));
+        }
+    } else if let Some(client_message_id) = client_message_id.as_deref() {
+        // UI normally renders user messages locally; when a queued/steer message is actually
+        // executed, emit it with a correlation id so the UI can flip the "queued pill" to sent.
+        let user_chat_msg = serde_json::json!({
+            "message_type": "user_message",
+            "content": message.clone(),
+            "clientMessageId": client_message_id,
+            "timestamp": user_timestamp
+        });
+        if let Some(window) = app.get_webview_window(&window_label) {
+            let _ = window.emit("ChatLogUpdate", (&task_id, user_chat_msg.clone()));
+        }
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.emit("ChatLogUpdate", (&task_id, user_chat_msg));
         }
     } else {
         post_discord_user_message(state, &task_id, &agent_id, &message).await;
@@ -12142,6 +12298,21 @@ pub(crate) async fn send_chat_message_internal(
             maybe_show_agent_notification(&app, state, &task_id, &agent_id, &summary_status).await;
     }
 
+    // Mark generation complete and grab the next queued chat message (if any).
+    let next_queued = {
+        let mut handle = handle_ref.lock().await;
+        if handle.generation_seq != generation_seq {
+            None
+        } else {
+            handle.is_generating = false;
+            if was_cancelled {
+                None
+            } else {
+                handle.queued_chat.pop_front()
+            }
+        }
+    };
+
     // Process token usage and update cost (always do this, even if cancelled)
     if let Some(usage) = &response.token_usage {
         let cost = calculate_cost_from_usage(&model, usage);
@@ -12164,7 +12335,10 @@ pub(crate) async fn send_chat_message_internal(
         let _ = db::update_task_token_usage(&conn, &task_id, total_tokens, context_window);
     }
 
-    Ok(())
+    Ok(SendChatOnceResult {
+        was_cancelled,
+        next_queued,
+    })
 }
 
 #[tauri::command]
@@ -12174,7 +12348,141 @@ async fn send_chat_message(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    send_chat_message_internal(task_id, message, state.inner(), app, MessageOrigin::Ui).await
+    send_chat_message_internal(
+        task_id,
+        message,
+        None,
+        state.inner(),
+        app,
+        MessageOrigin::Ui,
+    )
+    .await
+}
+
+#[tauri::command]
+async fn enqueue_chat_message(
+    task_id: String,
+    message: String,
+    client_message_id: String,
+    disposition: String,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<serde_json::Value, String> {
+    let msg = message.trim().to_string();
+    if msg.is_empty() {
+        return Ok(serde_json::json!({ "queuedCount": 0 }));
+    }
+    if client_message_id.trim().is_empty() {
+        return Err("clientMessageId is required".to_string());
+    }
+
+    let is_steer = match disposition.as_str() {
+        "queue" => false,
+        "steer" => true,
+        other => return Err(format!("Invalid disposition: {}", other)),
+    };
+
+    let handle_ref = {
+        let sessions = state.sessions.lock().await;
+        sessions.get(&task_id).cloned()
+    }
+    .ok_or_else(|| format!("Session not found: {}", task_id))?;
+
+    // If we aren't generating, do not leave messages parked in `queued_chat` with no drain path.
+    // Instead, push into the queue then immediately start draining from the front.
+    let (
+        dispatch_item,
+        queued_remaining,
+        should_interrupt,
+        client,
+        session_id,
+        queued_count,
+        reserved_generation_seq,
+    ) = {
+        let mut handle = handle_ref.lock().await;
+        if !handle.is_generating {
+            let reserved_generation_seq = handle.generation_seq;
+            let item = QueuedChatItem {
+                client_message_id: client_message_id.clone(),
+                message: msg.clone(),
+            };
+            if is_steer {
+                handle.queued_chat.push_front(item);
+            } else {
+                handle.queued_chat.push_back(item);
+            }
+            let to_send = handle
+                .queued_chat
+                .pop_front()
+                .expect("queued_chat must contain the just-pushed item");
+            // Reserve generation under the lock so concurrent enqueue calls don't both dispatch.
+            handle.is_generating = true;
+            (
+                Some(to_send),
+                handle.queued_chat.len(),
+                false,
+                handle.client.clone(),
+                handle.session_id.clone(),
+                0,
+                reserved_generation_seq,
+            )
+        } else {
+            let item = QueuedChatItem {
+                client_message_id: client_message_id.clone(),
+                message: msg.clone(),
+            };
+            if is_steer {
+                handle.queued_chat.push_front(item);
+            } else {
+                handle.queued_chat.push_back(item);
+            }
+
+            let should_interrupt = is_steer && handle.agent_id == "codex" && handle.is_generating;
+            (
+                None,
+                0,
+                should_interrupt,
+                handle.client.clone(),
+                handle.session_id.clone(),
+                handle.queued_chat.len(),
+                0,
+            )
+        }
+    };
+
+    if let Some(item) = dispatch_item {
+        // Best-effort: run immediately, and let send_chat_message_internal drain the remaining queue.
+        let send_result = send_chat_message_internal(
+            task_id,
+            item.message,
+            Some(item.client_message_id),
+            state.inner(),
+            app,
+            MessageOrigin::Ui,
+        )
+        .await;
+        if let Err(err) = send_result {
+            // If we reserved generating but failed before a new generation actually started,
+            // release the reservation so the queue doesn't get stuck.
+            let mut handle = handle_ref.lock().await;
+            if handle.generation_seq == reserved_generation_seq {
+                handle.is_generating = false;
+            }
+            return Err(err);
+        }
+
+        return Ok(serde_json::json!({
+            "queuedCount": queued_remaining,
+            "dispatched": true
+        }));
+    }
+
+    if should_interrupt {
+        // Best-effort: interrupt the active Codex turn so the steered prompt runs next.
+        let _ = client.codex_turn_interrupt_active(&session_id).await;
+    }
+
+    Ok(serde_json::json!({ "queuedCount": queued_count }))
 }
 
 #[tauri::command]
@@ -13305,6 +13613,7 @@ fn main() {
             terminal_close,
             open_chat_window,
             send_chat_message,
+            enqueue_chat_message,
             respond_to_permission,
             respond_to_user_input,
             dismiss_notifications_for_task,

@@ -63,6 +63,7 @@
     chatTaskId: null,
     chatMessages: [],
     chatSessionActive: false,
+    chatGenerating: false,
     chatContextSent: false,
     chatStreamingEl: null,
     chatStreamingText: '',
@@ -3115,13 +3116,14 @@
       }
 
       // Show a placeholder assistant bubble immediately for responsiveness.
-      ensureStreamingAssistantEl();
+	      ensureStreamingAssistantEl();
 
-      ipcRenderer.send('StartPendingSession', state.chatTaskId);
-    } catch (err) {
-      console.error('[MeetingNotes] template create_agent_session failed:', err);
-      appendChatMessage('assistant', 'Unable to start template. Please try again.');
-    }
+	      ipcRenderer.send('StartPendingSession', state.chatTaskId);
+	      state.chatGenerating = true;
+	    } catch (err) {
+	      console.error('[MeetingNotes] template create_agent_session failed:', err);
+	      appendChatMessage('assistant', 'Unable to start template. Please try again.');
+	    }
   }
 
   async function sendChatMessage(text) {
@@ -3167,8 +3169,8 @@
 
     // If we don't have a task yet, create one using the first message as the
     // initial prompt, then start it (same as the rest of the app's "pending prompt" flow).
-    if (!state.chatTaskId) {
-      try {
+	    if (!state.chatTaskId) {
+	      try {
         var currentThread = (state.chatThreads || []).find(function (x) { return x.id === state.chatThreadId; }) || null;
         var agentIdForThread = currentThread ? currentThread.agentId : (state.chatAgentId || 'claude-code');
         var createdTaskId = await createNotesChatTask(message, agentIdForThread);
@@ -3185,18 +3187,20 @@
             : (text.length > 48 ? (text.slice(0, 48) + '…') : text),
         });
 
-        // Kick off the pending prompt immediately.
-        ipcRenderer.send('StartPendingSession', state.chatTaskId);
-        return;
-      } catch (err) {
+	        // Kick off the pending prompt immediately.
+	        ipcRenderer.send('StartPendingSession', state.chatTaskId);
+	        state.chatGenerating = true;
+	        return;
+	      } catch (err) {
         console.error('[MeetingNotes] create_agent_session for notes chat failed:', err);
         appendChatMessage('assistant', 'Unable to connect to agent. Please try again.');
         return;
       }
-    }
+	    }
 
-    ipcRenderer.send('SendChatMessage', state.chatTaskId, message);
-  }
+	    ipcRenderer.send('SendChatMessage', state.chatTaskId, message);
+	    state.chatGenerating = true;
+	  }
 
   async function saveSessionTitle(sessionId, title) {
     if (!ipcRenderer || !sessionId) return;
@@ -3328,7 +3332,7 @@
     }
   }
 
-  function appendChatMessage(role, content) {
+  function appendChatMessage(role, content, opts) {
     var container = $('notesChatMessages');
     if (!container) return;
 
@@ -3339,8 +3343,21 @@
     var msg = document.createElement('div');
     msg.className = 'notes-chat-msg ' + role;
 
+    var clientMessageId = opts && opts.clientMessageId ? opts.clientMessageId : null;
+    var disposition = opts && opts.disposition ? opts.disposition : null; // 'queue' | 'steer'
+    if (clientMessageId) msg.dataset.clientMessageId = clientMessageId;
+    if (disposition) {
+      msg.dataset.disposition = disposition;
+      msg.classList.add('queued-pill');
+    }
+
     if (role === 'assistant' && window.marked) {
       msg.innerHTML = window.marked.parse(content);
+    } else if (role === 'user' && disposition) {
+      var label = disposition === 'steer' ? 'Steer' : 'Queued';
+      msg.innerHTML =
+        '<div class="notes-chat-pill-label">' + escapeHtml(label) + '</div>' +
+        '<div class="notes-chat-pill-body">' + escapeHtml(content || '').replace(/\r?\n/g, '<br>') + '</div>';
     } else {
       msg.textContent = content;
     }
@@ -3593,8 +3610,43 @@
     if (!isChat && !isSummary) return;
     if (!message) return;
 
+    function normalizeQueuedPillAfterAck(el, content) {
+      if (!el) return;
+
+      el.classList.remove('queued-pill');
+      el.removeAttribute('data-disposition');
+      el.removeAttribute('data-client-message-id');
+
+      // Replace pill markup with the same DOM shape as a normal user message.
+      // This avoids leaving behind `.notes-chat-pill-body` wrappers after ack.
+      var nextText = (content !== undefined && content !== null) ? String(content) : '';
+      if (!nextText) {
+        var body = el.querySelector('.notes-chat-pill-body');
+        if (body) nextText = body.textContent || '';
+      }
+
+      // Clearing and re-setting `textContent` ensures we drop any lingering pill nodes.
+      el.textContent = nextText;
+    }
+
     // We already render user messages locally in the sidebar UI.
-    if (message.message_type === 'user_message') return;
+    // Exception: queued/steer sends emit a correlated user_message so we can flip the queued pill to sent.
+    if (message.message_type === 'user_message') {
+      if (isChat) {
+        var cmid = message.clientMessageId || message.client_message_id || null;
+        if (cmid) {
+          var container = $('notesChatMessages');
+          if (container) {
+            var sel = '[data-client-message-id="' + cmid.replace(/"/g, '\\"') + '"]';
+            var el = container.querySelector(sel);
+            if (el) {
+              normalizeQueuedPillAfterAck(el, message.content);
+            }
+          }
+        }
+      }
+      return;
+    }
 
     // Replace any in-progress streaming bubble with the final message.
     if (message.message_type === 'assistant_message') {
@@ -3649,6 +3701,13 @@
     var isChat = taskId === state.chatTaskId;
     var isSummary = taskId === state.summaryTaskId;
     if (!isChat && !isSummary) return;
+
+    if (isChat) {
+      if (statusState === 'running') state.chatGenerating = true;
+      if (statusState === 'idle' || statusState === 'completed' || statusState === 'error') {
+        state.chatGenerating = false;
+      }
+    }
 
     if (statusState === 'idle' || statusState === 'completed' || statusState === 'error') {
       if (isChat) {
@@ -4166,14 +4225,38 @@
     var chatInput = $('notesChatInput');
     var chatSendBtn = $('notesChatSendBtn');
 
-    if (chatInput) {
-      chatInput.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          var text = chatInput.value.trim();
-          if (text) sendChatMessage(text);
-        }
-      });
+	    if (chatInput) {
+	      chatInput.addEventListener('keydown', function (e) {
+	        var isEnter = e.key === 'Enter' && !e.shiftKey;
+	        var isTab = e.key === 'Tab' && !e.shiftKey;
+	        if (!isEnter && !isTab) return;
+
+	        var text = chatInput.value.trim();
+	        var steerEnabled = !!(state.fullSettings && state.fullSettings.codexFeatureSteer);
+	        var currentThread = (state.chatThreads || []).find(function (x) { return x.id === state.chatThreadId; }) || null;
+	        var agentIdForThread = currentThread ? currentThread.agentId : (state.chatAgentId || 'claude-code');
+	        var canSteerOrQueue =
+	          steerEnabled &&
+	          agentIdForThread === 'codex' &&
+	          state.chatGenerating &&
+	          !!state.chatTaskId;
+
+	        if (canSteerOrQueue && text) {
+	          // Enter = steer, Tab = queue (Codex steer mode)
+	          e.preventDefault();
+	          var disposition = isEnter ? 'steer' : 'queue';
+	          var clientMessageId = uuid();
+	          appendChatMessage('user', text, { clientMessageId: clientMessageId, disposition: disposition });
+	          clearChatInput();
+	          ipcRenderer.send('EnqueueChatMessage', state.chatTaskId, text, clientMessageId, disposition);
+	          return;
+	        }
+
+	        if (isEnter) {
+	          e.preventDefault();
+	          if (text) sendChatMessage(text);
+	        }
+	      });
 
       // Auto-resize textarea
       chatInput.addEventListener('input', function () {
