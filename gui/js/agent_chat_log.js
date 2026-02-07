@@ -4923,6 +4923,20 @@
           fileWrap.appendChild(fileContainer);
           body.appendChild(fileWrap);
 
+          // @pierre/diffs renders into fileContainer.shadowRoot (via optional chaining).
+          // If we pass a plain <div>, shadowRoot is null and nothing appears.
+          // So we create a dedicated host element with an attached shadow root.
+          const diffsHost = document.createElement("diffs-container");
+          diffsHost.className = "diffs-host";
+          try {
+            if (!diffsHost.shadowRoot) {
+              diffsHost.attachShadow({ mode: "open" });
+            }
+          } catch (err) {
+            // If shadow DOM is unavailable for any reason, we can still fall back below.
+          }
+          fileContainer.appendChild(diffsHost);
+
           const instance = new FileDiff({
             diffStyle: currentStyle,
             lineDiffType: "word",
@@ -4934,7 +4948,7 @@
             unsafeCSS: PHANTOM_DIFFS_CSS,
           });
 
-          instance.render({ fileDiff, fileContainer });
+          instance.render({ fileDiff, fileContainer: diffsHost });
           card._diffInstances.push(instance);
         });
       })
