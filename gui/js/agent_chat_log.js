@@ -624,19 +624,26 @@
   // Update PR button/link based on current PR info
   function updatePrButton() {
     const createBtn = $("#createPrButton");
+    const prDropdownContainer = $("#prDropdownContainer");
+    const prDropdownToggle = $("#prDropdownToggle");
     const existingLink = $("#existingPrLink");
     const existingText = $("#existingPrText");
 
-    // Show PR link if we have an open PR
-    if (currentPrInfo && currentPrInfo.state === "OPEN") {
+    // If a PR exists on this branch, show the PR link and hide PR creation controls.
+    // UX: once a PR is created, the dropdown should not remain visible.
+    if (currentPrInfo && currentPrInfo.number && currentPrInfo.url) {
       existingLink.attr("href", currentPrInfo.url);
       existingText.text(`PR #${currentPrInfo.number}`);
       existingLink.attr("title", currentPrInfo.title);
       existingLink.show();
       createBtn.hide();
+      prDropdownContainer.removeClass("open");
+      prDropdownToggle.attr("aria-expanded", "false");
+      prDropdownContainer.hide();
     } else {
       // Show Create PR button
       existingLink.hide();
+      prDropdownContainer.show();
       createBtn.show();
     }
   }
