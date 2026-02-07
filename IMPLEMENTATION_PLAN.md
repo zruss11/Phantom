@@ -34,7 +34,7 @@
 ### M4 — Local embeddings (ONNX + tokenizer)
 - [x] Pick an embedding model (small MiniLM/BGE) and define model assets layout (scaffolded in `src-tauri/src/embedding_model.rs`)
 - [x] Implement download-on-first-use with progress + cancel (Tauri commands + `EmbeddingModelStatus`/`EmbeddingModelProgress` events in `src-tauri/src/embedding_model.rs`)
-- [ ] Implement embedding generation (tokenizer + ORT session)
+- [x] Implement embedding generation (tokenizer + ORT session) (added `src-tauri/src/embedding_inference.rs` with WordPiece tokenizer + ORT mean-pooling; exposed via `embedding_generate`)
 - [ ] Store embeddings as packed f32 BLOBs
 
 ### M5 — Incremental indexing

@@ -9,6 +9,7 @@ mod db;
 mod debug_http;
 mod dictation;
 mod discord_bot;
+mod embedding_inference;
 mod embedding_model;
 mod local_asr_model;
 mod local_usage;
@@ -13392,6 +13393,8 @@ fn main() {
             embedding_model::embedding_model_status,
             embedding_model::download_embedding_model,
             embedding_model::embedding_cancel_download,
+            // Embedding inference (debug / indexing primitive)
+            embedding_inference::embedding_generate,
             calendar::calendar_get_upcoming_events,
             calendar::calendar_list_calendars,
         ])

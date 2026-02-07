@@ -137,7 +137,7 @@ pub struct EmbeddingModelProgress {
 
 #[derive(Default)]
 pub struct EmbeddingModelManagerState {
-    status: EmbeddingModelStatus,
+    pub(crate) status: EmbeddingModelStatus,
     download_cancel: Option<Arc<AtomicBool>>,
     download_task: Option<tokio::task::JoinHandle<()>>,
 }
