@@ -59,6 +59,10 @@ fn model_catalog() -> Vec<EmbeddingModelSpec> {
     vec![default_model_spec()]
 }
 
+pub fn model_spec(model_id: &str) -> Option<EmbeddingModelSpec> {
+    model_catalog().into_iter().find(|m| m.id == model_id)
+}
+
 fn resolve_model_id(model_id: Option<String>) -> String {
     let candidate = model_id.unwrap_or_else(|| DEFAULT_EMBEDDING_MODEL_ID.to_string());
     if model_catalog().iter().any(|m| m.id == candidate) {
@@ -292,7 +296,9 @@ async fn download_model_files(
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30 * 60))
+        // Total request timeout (including body). Keep high to avoid aborting slow links,
+        // but still bounded so we don't hang forever on a stalled transfer.
+        .timeout(Duration::from_secs(6 * 60 * 60))
         .build()
         .map_err(|e| format!("Failed to configure download client: {e}"))?;
 

@@ -180,7 +180,8 @@ struct EmbeddingRuntime {
 
 impl EmbeddingRuntime {
     fn load(model_id: &str, max_seq_len: usize) -> Result<Self, String> {
-        let spec = embedding_model::default_model_spec();
+        let spec = embedding_model::model_spec(model_id)
+            .ok_or_else(|| format!("Unknown embedding model id: {model_id}"))?;
         let dims = spec.dims as usize;
 
         let dir = embedding_model::model_dir(model_id);

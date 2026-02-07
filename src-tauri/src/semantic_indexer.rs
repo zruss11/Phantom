@@ -284,6 +284,30 @@ fn upsert_chunks(
                     error = %e,
                     "Embedding generation failed; skipping chunk"
                 );
+                // If we're updating an existing chunk and embedding fails, drop the stale row so
+                // search doesn't keep returning outdated text.
+                if existing.contains_key(&key) {
+                    if let Err(del_err) = conn.execute(
+                        "DELETE FROM semantic_chunks
+                         WHERE entity_type = ?1 AND entity_id = ?2 AND model_name = ?3 AND field = ?4 AND chunk_index = ?5",
+                        params![
+                            entity_type,
+                            entity_id,
+                            DEFAULT_MODEL_ID,
+                            &chunk.field,
+                            chunk.chunk_index
+                        ],
+                    ) {
+                        tracing::warn!(
+                            entity_type = %entity_type,
+                            entity_id = %entity_id,
+                            field = %chunk.field,
+                            chunk_index = chunk.chunk_index,
+                            error = %del_err,
+                            "Failed to delete stale semantic chunk after embed failure"
+                        );
+                    }
+                }
                 continue;
             }
         };

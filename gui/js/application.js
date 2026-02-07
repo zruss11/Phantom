@@ -6196,6 +6196,8 @@ init();
     if (!state.open) return;
     var q = state.query.trim();
     if (!q) {
+      // Invalidate any in-flight search so we don't render stale results after clearing input.
+      state.requestId += 1;
       renderEmpty('Type to search');
       return;
     }

@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::State;
 
-use crate::{embedding_inference, embedding_model};
 use crate::utils::truncate_str;
+use crate::{embedding_inference, embedding_model};
 
 pub const ENTITY_TYPE_TASK: &str = "task";
 pub const ENTITY_TYPE_NOTE: &str = "note";
@@ -119,7 +119,9 @@ fn semantic_search_sync(
     let mut candidates: Vec<SemanticSearchResult> = {
         let conn = db.lock().map_err(|e| e.to_string())?;
         if semantic_fts_available(&conn) {
-            if semantic_fts_count(&conn).unwrap_or(0) == 0 {
+            if semantic_fts_count(&conn).unwrap_or(0) == 0
+                || semantic_fts_is_stale(&conn).unwrap_or(false)
+            {
                 let _ = rebuild_semantic_fts(&conn);
             }
             semantic_search_via_fts(&conn, &query, include_tasks, include_notes, limit)
@@ -144,21 +146,21 @@ fn semantic_search_sync(
                             FROM messages m
                             WHERE m.task_id = t.id
                               AND m.content IS NOT NULL
-                              AND m.content LIKE ?1 ESCAPE '\\\\'
+                              AND m.content LIKE ?1 ESCAPE '\\'
                             ORDER BY m.id DESC
                             LIMIT 1
                         ) AS msg_snippet,
                         t.updated_at
                      FROM tasks t
                      WHERE (
-                        t.title_summary LIKE ?1 ESCAPE '\\\\'
-                        OR t.prompt LIKE ?1 ESCAPE '\\\\'
+                        t.title_summary LIKE ?1 ESCAPE '\\'
+                        OR t.prompt LIKE ?1 ESCAPE '\\'
                         OR EXISTS(
                             SELECT 1
                             FROM messages m2
                             WHERE m2.task_id = t.id
                               AND m2.content IS NOT NULL
-                              AND m2.content LIKE ?1 ESCAPE '\\\\'
+                              AND m2.content LIKE ?1 ESCAPE '\\'
                         )
                      )
                      ORDER BY t.updated_at DESC
@@ -172,8 +174,7 @@ fn semantic_search_sync(
                 let prompt: Option<String> = row.get(2).map_err(|e| e.to_string())?;
                 let msg_snippet: Option<String> = row.get(3).map_err(|e| e.to_string())?;
 
-                let title =
-                    title_summary.or_else(|| prompt.as_ref().map(|p| truncate_str(p, 80)));
+                let title = title_summary.or_else(|| prompt.as_ref().map(|p| truncate_str(p, 80)));
                 let snippet = msg_snippet.map(|s| truncate_str(&s, 200));
 
                 candidates.push(SemanticSearchResult {
@@ -196,19 +197,19 @@ fn semantic_search_sync(
                             SELECT seg.text
                             FROM meeting_segments seg
                             WHERE seg.session_id = s.id
-                              AND seg.text LIKE ?1 ESCAPE '\\\\'
+                              AND seg.text LIKE ?1 ESCAPE '\\'
                             ORDER BY seg.start_ms DESC
                             LIMIT 1
                         ) AS seg_snippet,
                         s.updated_at
                      FROM meeting_sessions s
                      WHERE (
-                        s.title LIKE ?1 ESCAPE '\\\\'
+                        s.title LIKE ?1 ESCAPE '\\'
                         OR EXISTS(
                             SELECT 1
                             FROM meeting_segments seg2
                             WHERE seg2.session_id = s.id
-                              AND seg2.text LIKE ?1 ESCAPE '\\\\'
+                              AND seg2.text LIKE ?1 ESCAPE '\\'
                         )
                      )
                      ORDER BY s.updated_at DESC
@@ -359,6 +360,86 @@ fn semantic_fts_count(conn: &Connection) -> Result<i64> {
     conn.query_row("SELECT COUNT(1) FROM semantic_fts", [], |row| row.get(0))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SemanticFtsFingerprint {
+    tasks_count: i64,
+    tasks_max_updated_at: i64,
+    messages_count: i64,
+    messages_max_id: i64,
+    meeting_sessions_count: i64,
+    meeting_sessions_max_updated_at: i64,
+    meeting_segments_count: i64,
+    meeting_segments_max_id: i64,
+}
+
+fn semantic_fts_fingerprint(conn: &Connection) -> Result<SemanticFtsFingerprint> {
+    conn.query_row(
+        "SELECT
+            (SELECT COUNT(1) FROM tasks),
+            COALESCE((SELECT MAX(updated_at) FROM tasks), 0),
+            (SELECT COUNT(1) FROM messages),
+            COALESCE((SELECT MAX(id) FROM messages), 0),
+            (SELECT COUNT(1) FROM meeting_sessions),
+            COALESCE((SELECT MAX(updated_at) FROM meeting_sessions), 0),
+            (SELECT COUNT(1) FROM meeting_segments),
+            COALESCE((SELECT MAX(id) FROM meeting_segments), 0)",
+        [],
+        |row| {
+            Ok(SemanticFtsFingerprint {
+                tasks_count: row.get(0)?,
+                tasks_max_updated_at: row.get(1)?,
+                messages_count: row.get(2)?,
+                messages_max_id: row.get(3)?,
+                meeting_sessions_count: row.get(4)?,
+                meeting_sessions_max_updated_at: row.get(5)?,
+                meeting_segments_count: row.get(6)?,
+                meeting_segments_max_id: row.get(7)?,
+            })
+        },
+    )
+}
+
+fn semantic_fts_is_stale(conn: &Connection) -> Result<bool> {
+    if !sqlite_table_exists(conn, "semantic_fts_meta")? {
+        return Ok(true);
+    }
+
+    let stored: Option<SemanticFtsFingerprint> = conn
+        .query_row(
+            "SELECT
+                tasks_count,
+                tasks_max_updated_at,
+                messages_count,
+                messages_max_id,
+                meeting_sessions_count,
+                meeting_sessions_max_updated_at,
+                meeting_segments_count,
+                meeting_segments_max_id
+             FROM semantic_fts_meta
+             WHERE id = 1",
+            [],
+            |row| {
+                Ok(SemanticFtsFingerprint {
+                    tasks_count: row.get(0)?,
+                    tasks_max_updated_at: row.get(1)?,
+                    messages_count: row.get(2)?,
+                    messages_max_id: row.get(3)?,
+                    meeting_sessions_count: row.get(4)?,
+                    meeting_sessions_max_updated_at: row.get(5)?,
+                    meeting_segments_count: row.get(6)?,
+                    meeting_segments_max_id: row.get(7)?,
+                })
+            },
+        )
+        .optional()?;
+
+    let Some(stored) = stored else {
+        return Ok(true);
+    };
+
+    Ok(stored != semantic_fts_fingerprint(conn)?)
+}
+
 pub fn semantic_chunks_count(conn: &Connection) -> Result<i64> {
     conn.query_row("SELECT COUNT(1) FROM semantic_chunks", [], |row| row.get(0))
 }
@@ -480,6 +561,49 @@ fn rebuild_semantic_fts(conn: &Connection) -> Result<()> {
          INSERT INTO semantic_fts(semantic_fts) VALUES('optimize');",
     )?;
 
+    // Track a fingerprint of the source tables so we can cheaply detect staleness.
+    // Best-effort: if this fails, we'll just rebuild more often.
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS semantic_fts_meta (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            tasks_count INTEGER NOT NULL,
+            tasks_max_updated_at INTEGER NOT NULL,
+            messages_count INTEGER NOT NULL,
+            messages_max_id INTEGER NOT NULL,
+            meeting_sessions_count INTEGER NOT NULL,
+            meeting_sessions_max_updated_at INTEGER NOT NULL,
+            meeting_segments_count INTEGER NOT NULL,
+            meeting_segments_max_id INTEGER NOT NULL,
+            rebuilt_at INTEGER NOT NULL
+         );
+
+         DELETE FROM semantic_fts_meta;
+
+         INSERT INTO semantic_fts_meta(
+            id,
+            tasks_count,
+            tasks_max_updated_at,
+            messages_count,
+            messages_max_id,
+            meeting_sessions_count,
+            meeting_sessions_max_updated_at,
+            meeting_segments_count,
+            meeting_segments_max_id,
+            rebuilt_at
+         ) VALUES (
+            1,
+            (SELECT COUNT(1) FROM tasks),
+            COALESCE((SELECT MAX(updated_at) FROM tasks), 0),
+            (SELECT COUNT(1) FROM messages),
+            COALESCE((SELECT MAX(id) FROM messages), 0),
+            (SELECT COUNT(1) FROM meeting_sessions),
+            COALESCE((SELECT MAX(updated_at) FROM meeting_sessions), 0),
+            (SELECT COUNT(1) FROM meeting_segments),
+            COALESCE((SELECT MAX(id) FROM meeting_segments), 0),
+            CAST(strftime('%s','now') AS INTEGER)
+         );",
+    );
+
     Ok(())
 }
 
@@ -491,6 +615,7 @@ fn semantic_search_via_fts(
     limit: i64,
 ) -> Result<Vec<SemanticSearchResult>> {
     let mut out = Vec::new();
+    let fts_query = fts5_literal_query(query).unwrap_or_else(|| query.to_string());
 
     if include_tasks {
         let mut stmt = conn.prepare_cached(
@@ -500,7 +625,7 @@ fn semantic_search_via_fts(
              ORDER BY bm25(semantic_fts)
              LIMIT ?2",
         )?;
-        let mut rows = stmt.query((query, limit * 5))?;
+        let mut rows = stmt.query((&fts_query, limit * 5))?;
         let mut seen = HashSet::new();
         while let Some(row) = rows.next()? {
             let entity_id: String = row.get(0)?;
@@ -546,7 +671,7 @@ fn semantic_search_via_fts(
              ORDER BY bm25(semantic_fts)
              LIMIT ?2",
         )?;
-        let mut rows = stmt.query((query, limit * 5))?;
+        let mut rows = stmt.query((&fts_query, limit * 5))?;
         let mut seen = HashSet::new();
         while let Some(row) = rows.next()? {
             let entity_id: String = row.get(0)?;
@@ -592,4 +717,21 @@ fn like_pattern(query: &str) -> String {
     }
     out.push('%');
     out
+}
+
+fn fts5_literal_query(query: &str) -> Option<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for raw in query.split_whitespace() {
+        let t = raw.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Escape internal quotes by doubling them, then wrap so tokens are treated literally.
+        terms.push(format!("\"{}\"", t.replace('\"', "\"\"")));
+    }
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" AND "))
+    }
 }
