@@ -5958,9 +5958,8 @@ init();
 (function initCommandPalette() {
   'use strict';
 
-  var tauri = window.__TAURI__ || null;
-  var tauriCore = tauri && tauri.core ? tauri.core : null;
-  var tauriInvoke = tauriCore && tauriCore.invoke ? tauriCore.invoke : null;
+  var bridge = window.tauriBridge || null;
+  var ipcRenderer = bridge && bridge.ipcRenderer ? bridge.ipcRenderer : null;
 
   var state = {
     open: false,
@@ -6072,17 +6071,17 @@ init();
 
     closePalette();
 
-    if (item.type === 'task') {
-      if (typeof switchToPage === 'function') {
-        try { switchToPage('viewTasksPage'); } catch (e) {}
-      }
-      if (tauriInvoke) {
-        tauriInvoke('open_chat_window', { taskId: item.id }).catch(function () {});
-      } else {
-        window.open(
-          'agent_chat_log.html?taskId=' + encodeURIComponent(item.id),
-          'chat-' + item.id,
-          'width=650,height=750'
+	    if (item.type === 'task') {
+	      if (typeof switchToPage === 'function') {
+	        try { switchToPage('viewTasksPage'); } catch (e) {}
+	      }
+	      if (ipcRenderer && typeof ipcRenderer.invoke === 'function') {
+	        ipcRenderer.invoke('open_chat_window', { taskId: item.id }).catch(function () {});
+	      } else {
+	        window.open(
+	          'agent_chat_log.html?taskId=' + encodeURIComponent(item.id),
+	          'chat-' + item.id,
+	          'width=650,height=750'
         );
       }
       return;
@@ -6201,14 +6200,14 @@ init();
       renderEmpty('Type to search');
       return;
     }
-    if (!tauriInvoke) {
+    if (!ipcRenderer || typeof ipcRenderer.invoke !== 'function') {
       renderEmpty('Search is not available in browser mode');
       return;
     }
 
     var reqId = ++state.requestId;
     try {
-      var items = await tauriInvoke('semantic_search', {
+      var items = await ipcRenderer.invoke('semantic_search', {
         req: { query: q, limit: 20, exact: !!state.exact }
       });
       if (reqId !== state.requestId) return;
@@ -6228,10 +6227,10 @@ init();
 
   async function pollIndexStatusOnce() {
     if (!state.open) return;
-    if (!tauriInvoke) return;
+    if (!ipcRenderer || typeof ipcRenderer.invoke !== 'function') return;
 
     try {
-      var s = await tauriInvoke('semantic_index_status', {});
+      var s = await ipcRenderer.invoke('semantic_index_status', {});
       var pending = (s && typeof s.pendingJobs === 'number') ? s.pendingJobs : null;
       if (pending && pending > 0) {
         setIndexStatusText('Indexing...');

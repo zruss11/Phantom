@@ -1206,6 +1206,19 @@ pub fn get_task_cost(conn: &Connection, id: &str) -> Result<f64> {
 pub fn delete_task(conn: &Connection, id: &str) -> Result<()> {
     // Messages are auto-deleted via CASCADE
     conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+
+    // Best-effort cleanup of semantic search rows (no FK constraints).
+    conn.execute(
+        "DELETE FROM semantic_chunks WHERE entity_type = 'task' AND entity_id = ?1",
+        params![id],
+    )
+    .ok();
+    conn.execute(
+        "DELETE FROM semantic_fts WHERE entity_type = 'task' AND entity_id = ?1",
+        params![id],
+    )
+    .ok();
+
     Ok(())
 }
 
@@ -1869,6 +1882,20 @@ pub fn save_meeting_segment(
 /// Delete a meeting session (segments auto-deleted via CASCADE)
 pub fn delete_meeting_session(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM meeting_sessions WHERE id = ?1", params![id])?;
+
+    // Best-effort cleanup of semantic search rows (no FK constraints).
+    // Notes/meetings are indexed under entity_type = 'note'.
+    conn.execute(
+        "DELETE FROM semantic_chunks WHERE entity_type = 'note' AND entity_id = ?1",
+        params![id],
+    )
+    .ok();
+    conn.execute(
+        "DELETE FROM semantic_fts WHERE entity_type = 'note' AND entity_id = ?1",
+        params![id],
+    )
+    .ok();
+
     Ok(())
 }
 
