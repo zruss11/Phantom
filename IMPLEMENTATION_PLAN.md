@@ -33,7 +33,7 @@
 
 ### M4 — Local embeddings (ONNX + tokenizer)
 - [x] Pick an embedding model (small MiniLM/BGE) and define model assets layout (scaffolded in `src-tauri/src/embedding_model.rs`)
-- [ ] Implement download-on-first-use with progress + cancel
+- [x] Implement download-on-first-use with progress + cancel (Tauri commands + `EmbeddingModelStatus`/`EmbeddingModelProgress` events in `src-tauri/src/embedding_model.rs`)
 - [ ] Implement embedding generation (tokenizer + ORT session)
 - [ ] Store embeddings as packed f32 BLOBs
 

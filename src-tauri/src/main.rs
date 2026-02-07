@@ -369,6 +369,7 @@ pub(crate) struct AppState {
     meeting_manager: Arc<StdMutex<meeting_notes::MeetingSessionManager>>,
     whisper_models: Arc<tokio::sync::Mutex<whisper_model::WhisperModelManagerState>>,
     parakeet_models: Arc<tokio::sync::Mutex<parakeet_model::ParakeetModelManagerState>>,
+    embedding_models: Arc<tokio::sync::Mutex<embedding_model::EmbeddingModelManagerState>>,
     pub(crate) dictation: Arc<StdMutex<dictation::DictationService>>,
 }
 
@@ -13228,6 +13229,9 @@ fn main() {
                 parakeet_models: Arc::new(tokio::sync::Mutex::new(
                     parakeet_model::ParakeetModelManagerState::default(),
                 )),
+                embedding_models: Arc::new(tokio::sync::Mutex::new(
+                    embedding_model::EmbeddingModelManagerState::default(),
+                )),
                 dictation: Arc::new(StdMutex::new(dictation)),
             }
         })
@@ -13384,6 +13388,10 @@ fn main() {
             semantic_search::semantic_search,
             semantic_search::semantic_reindex_all,
             semantic_search::semantic_delete_for_entity,
+            // Embedding model download commands
+            embedding_model::embedding_model_status,
+            embedding_model::download_embedding_model,
+            embedding_model::embedding_cancel_download,
             calendar::calendar_get_upcoming_events,
             calendar::calendar_list_calendars,
         ])
