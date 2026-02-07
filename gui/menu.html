@@ -14,13 +14,13 @@
       }
     </script>
 
-    <script src="js/vendor/jquery.js"></script>
-    <script src="js/vendor/jquery_ui.js"></script>
-    <link rel="stylesheet" href="fonts/fonts.css" />
+    <script src="js/vendor/jquery.js?v=1.0.3.9"></script>
+    <script src="js/vendor/jquery_ui.js?v=1.0.3.9"></script>
+    <link rel="stylesheet" href="fonts/fonts.css?v=1.0.3.9" />
 
-    <link rel="stylesheet" type="text/css" href="main.css?v=1.0.3.5" />
-    <link rel="stylesheet" href="vendor/bootstrap.min.css" />
-    <link rel="stylesheet" href="fontawesome/fontawesome-all.css" />
+    <link rel="stylesheet" type="text/css" href="main.css?v=1.0.3.9" />
+    <link rel="stylesheet" href="vendor/bootstrap.min.css?v=1.0.3.9" />
+    <link rel="stylesheet" href="fontawesome/fontawesome-all.css?v=1.0.3.9" />
     <script>
       if (window.module) module = window.module;
     </script>
@@ -1489,8 +1489,9 @@
                 </div>
               </div>
               <div class="notes-toolbar-center">
-                <button class="notes-record-btn" id="notesStartBtn" title="Start Recording">
-                  <span class="notes-record-icon" aria-hidden="true"></span>
+                <button class="notes-record-btn" id="notesStartBtn" title="Start Recording" type="button">
+                  <span class="notes-record-btn-dot" aria-hidden="true"></span>
+                  <span class="notes-record-btn-label">Record</span>
                 </button>
                 <button class="notes-control-btn hidden" id="notesPauseBtn" title="Pause">
                   <i class="fal fa-pause"></i>
@@ -1559,22 +1560,24 @@
                 </button>
               </div>
               <div class="notes-transcript-meta" id="notesTranscriptMeta"></div>
-              <div class="notes-transcript-summary" id="notesTranscriptSummary" style="display:none;">
-                <div class="notes-summary-top">
-                  <div class="notes-summary-title">
-                    <svg class="notes-sparkle-svg" viewBox="0 0 24 24" aria-hidden="true">
-                      <path fill="currentColor" d="M12 2l1.15 4.3L17.5 7.5l-4.35 1.2L12 13l-1.15-4.3L6.5 7.5l4.35-1.2L12 2zm7.1 6.9l.7 2.6L22 12l-2.2.5-.7 2.6-.7-2.6L16 12l2.2-.5.7-2.6zM4.9 13.9l.9 3.4L9 18l-3.2.7-.9 3.4-.9-3.4L1 18l3-.7.9-3.4z"/>
-                    </svg>
-                    Summary
+              <div class="notes-transcript-scroll-area">
+                <div class="notes-transcript-summary" id="notesTranscriptSummary" style="display:none;">
+                  <div class="notes-summary-top">
+                    <div class="notes-summary-title">
+                      <svg class="notes-sparkle-svg" viewBox="0 0 24 24" aria-hidden="true">
+                        <path fill="currentColor" d="M12 2l1.15 4.3L17.5 7.5l-4.35 1.2L12 13l-1.15-4.3L6.5 7.5l4.35-1.2L12 2zm7.1 6.9l.7 2.6L22 12l-2.2.5-.7 2.6-.7-2.6L16 12l2.2-.5.7-2.6zM4.9 13.9l.9 3.4L9 18l-3.2.7-.9 3.4-.9-3.4L1 18l3-.7.9-3.4z"/>
+                      </svg>
+                      Summary
+                    </div>
+                    <div class="notes-summary-status" id="notesSummaryStatus">Ready</div>
                   </div>
-                  <div class="notes-summary-status" id="notesSummaryStatus">Ready</div>
+                  <div class="notes-summary-body" id="notesSummaryContent"></div>
                 </div>
-                <div class="notes-summary-body" id="notesSummaryContent"></div>
-              </div>
-              <div id="notesTranscript" class="notes-transcript-body">
-                <div class="notes-transcript-empty">
-                  <i class="fal fa-microphone-alt"></i>
-                  <p>Start recording to see the live transcript</p>
+                <div id="notesTranscript" class="notes-transcript-body">
+                  <div class="notes-transcript-empty">
+                    <i class="fal fa-microphone-alt"></i>
+                    <p>Start recording to see the live transcript</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -1794,7 +1797,7 @@
 	                    </div>
 
                     <div class="notes-dictation-help">
-                      Tip: Fn detection requires Input Monitoring permission. Custom shortcuts use Phantom's global shortcut plugin.
+                      Tip: Fn detection may require Input Monitoring permission. Pasting into other apps requires Accessibility (we'll only ask when you enable it).
                     </div>
                   </div>
 
@@ -1816,7 +1819,7 @@
                     <div class="notes-dictation-card-title">Insertion</div>
                     <label class="notes-dictation-check">
                       <input type="checkbox" id="notesDictationPasteToggle">
-                      <span>Paste into focused inputs (requires Accessibility)</span>
+                      <span>Paste into focused inputs (macOS will ask for Accessibility when enabled)</span>
                     </label>
                     <label class="notes-dictation-check">
                       <input type="checkbox" id="notesDictationClipboardFallbackToggle">
@@ -1854,6 +1857,31 @@
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Accessibility Permission Modal (shown only when user opts into paste) -->
+        <div class="notes-model-modal-overlay" id="notesPermissionModal" style="display:none;" role="dialog" aria-modal="true" aria-label="Permission Required">
+          <div class="notes-model-modal" style="max-width: 560px;">
+            <div class="notes-modal-header">
+              <div class="notes-modal-header-left">
+                <h6 class="notes-modal-title" id="notesPermissionTitle">Permission Required</h6>
+              </div>
+              <button class="notes-modal-close" id="notesPermissionCloseBtn" aria-label="Close">
+                <i class="fal fa-times"></i>
+              </button>
+            </div>
+            <div class="notes-modal-body" style="padding: 14px 16px;">
+              <p class="muted-text" id="notesPermissionBody" style="margin-bottom: 12px;">
+                To paste transcripts directly into other apps, macOS will ask for Accessibility permission.
+              </p>
+              <div class="notes-modal-actions" style="padding: 0; gap: 10px; justify-content: flex-end;">
+                <button class="notes-btn notes-btn-sm" id="notesPermissionCancelBtn" type="button">Not now</button>
+                <button class="notes-btn notes-btn-sm notes-btn-brand" id="notesPermissionContinueBtn" type="button">
+                  Continue
+                </button>
               </div>
             </div>
           </div>
@@ -3004,25 +3032,25 @@
       </div>
     </div>
 
-    <script src="js/gui.js"></script>
+    <script src="js/gui.js?v=1.0.3.9"></script>
     <!-- Mock Electron layer for browser compatibility -->
-    <script src="js/tauri-bridge.js?v=1.0.3.2"></script>
+    <script src="js/tauri-bridge.js?v=1.0.3.9"></script>
     <!-- Slash command autocomplete -->
-    <script src="js/slash-commands-data.js"></script>
-    <script src="js/slash-commands.js"></script>
-    <script src="js/custom-dropdown.js?v=1.0.3.1"></script>
-    <script src="js/review.js"></script>
-    <script src="js/command-center.js"></script>
-    <script src="js/command-center-config.js"></script>
-    <script src="js/vendor/marked-17.0.1.min.js"></script>
-    <script src="js/meeting-notes.js?v=1.0.3.6"></script>
-    <script src="js/application.js"></script>
-    <script src="js/task-scheduler.js"></script>
+    <script src="js/slash-commands-data.js?v=1.0.3.9"></script>
+    <script src="js/slash-commands.js?v=1.0.3.9"></script>
+    <script src="js/custom-dropdown.js?v=1.0.3.9"></script>
+    <script src="js/review.js?v=1.0.3.9"></script>
+    <script src="js/command-center.js?v=1.0.3.9"></script>
+    <script src="js/command-center-config.js?v=1.0.3.9"></script>
+    <script src="js/vendor/marked-17.0.1.min.js?v=1.0.3.9"></script>
+    <script src="js/meeting-notes.js?v=1.0.3.9"></script>
+    <script src="js/application.js?v=1.0.3.9"></script>
+    <script src="js/task-scheduler.js?v=1.0.3.9"></script>
 
-    <script src="js/vendor/jquery.color-2.1.2.min.js"></script>
+    <script src="js/vendor/jquery.color-2.1.2.min.js?v=1.0.3.9"></script>
 
-    <script src="js/vendor/popper.min.js"></script>
-    <script src="js/vendor/bootstrap.min.js"></script>
+    <script src="js/vendor/popper.min.js?v=1.0.3.9"></script>
+    <script src="js/vendor/bootstrap.min.js?v=1.0.3.9"></script>
     <script>
       // Window controls via tauri-bridge
       $("#close-icon").click(() => {
