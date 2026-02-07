@@ -497,9 +497,38 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         [],
     )?;
 
+    // Semantic index storage (vector search). Kept in the main app DB so it stays fully local.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS semantic_chunks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL,
+            entity_id TEXT NOT NULL,
+            field TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            text TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            model_name TEXT NOT NULL,
+            dims INTEGER NOT NULL,
+            embedding BLOB NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_meeting_segments_session
          ON meeting_segments(session_id, start_ms)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_semantic_chunks_entity
+         ON semantic_chunks(entity_type, entity_id)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_semantic_chunks_model_name
+         ON semantic_chunks(model_name)",
         [],
     )?;
 
