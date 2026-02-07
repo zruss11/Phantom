@@ -8340,31 +8340,29 @@ input:checked + .slider:before {
 }
 
 .notes-record-btn {
-  height: 32px;
-  padding: 0 12px 0 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(224, 107, 122, 0.34);
-  background: linear-gradient(180deg, rgba(224, 107, 122, 0.16), rgba(224, 107, 122, 0.06));
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 10px;
+  border: 1px solid rgba(224, 107, 122, 0.30);
+  background: rgba(224, 107, 122, 0.08);
   color: rgba(255, 255, 255, 0.92);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
-  letter-spacing: 0.2px;
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   transition: all 0.25s;
   position: relative;
-  gap: 7px;
-  white-space: nowrap;
 }
 
 .notes-record-btn-dot {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: var(--notes-red);
-  box-shadow: 0 0 0 2px rgba(224, 107, 122, 0.10), 0 0 8px rgba(224, 107, 122, 0.22);
+  box-shadow: 0 0 0 3px rgba(224, 107, 122, 0.10), 0 0 10px rgba(224, 107, 122, 0.25);
   flex: 0 0 auto;
 }
 
@@ -8375,13 +8373,13 @@ input:checked + .slider:before {
 }
 
 .notes-record-btn-aux-icon {
-  font-size: 11px;
-  opacity: 0.9;
+  font-size: 13px;
+  opacity: 0.95;
 }
 
 .notes-record-btn.needs-model {
   border-color: rgba(212, 165, 116, 0.35);
-  background: linear-gradient(180deg, rgba(212, 165, 116, 0.18), rgba(212, 165, 116, 0.06));
+  background: rgba(212, 165, 116, 0.10);
   color: rgba(255, 255, 255, 0.92);
 }
 
@@ -8391,15 +8389,15 @@ input:checked + .slider:before {
 }
 
 .notes-record-btn:hover:not(:disabled) {
-  background: linear-gradient(180deg, rgba(224, 107, 122, 0.22), rgba(224, 107, 122, 0.08));
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.33), 0 0 0 2px rgba(224, 107, 122, 0.08);
-  border-color: rgba(232, 138, 150, 0.70);
+  background: rgba(224, 107, 122, 0.14);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35), 0 0 0 2px rgba(224, 107, 122, 0.08);
+  border-color: rgba(232, 138, 150, 0.55);
 }
 
 .notes-record-btn.needs-model:hover:not(:disabled) {
-  background: linear-gradient(180deg, rgba(212, 165, 116, 0.22), rgba(212, 165, 116, 0.08));
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35), 0 0 0 2px rgba(212, 165, 116, 0.10);
-  border-color: rgba(212, 165, 116, 0.60);
+  background: rgba(212, 165, 116, 0.16);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35), 0 0 0 2px rgba(212, 165, 116, 0.10);
+  border-color: rgba(212, 165, 116, 0.55);
 }
 
 .notes-record-btn:disabled {

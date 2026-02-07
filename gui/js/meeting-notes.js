@@ -1541,11 +1541,13 @@
       if (!state.recording) {
         if (state.modelDownloaded) {
           startBtn.title = 'Start Recording';
-          startBtn.innerHTML = '<span class="notes-record-btn-dot" aria-hidden="true"></span><span class="notes-record-btn-label">Record</span>';
+          startBtn.setAttribute('aria-label', 'Start recording');
+          startBtn.innerHTML = '<span class="notes-record-btn-dot" aria-hidden="true"></span>';
           startBtn.classList.remove('needs-model');
         } else {
           startBtn.title = 'Download a local model to start';
-          startBtn.innerHTML = '<span class="notes-record-btn-dot" aria-hidden="true"></span><span class="notes-record-btn-label"><i class="fal fa-download notes-record-btn-aux-icon"></i> Get model</span>';
+          startBtn.setAttribute('aria-label', 'Download model to enable recording');
+          startBtn.innerHTML = '<i class="fal fa-download notes-record-btn-aux-icon" aria-hidden="true"></i>';
           startBtn.classList.add('needs-model');
         }
       }
