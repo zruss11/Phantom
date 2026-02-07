@@ -326,6 +326,8 @@ impl DictationManager {
                 let mut last_sent = String::new();
                 let mut last_seen_len: usize = 0;
                 let mut whisper_ctx: Option<Arc<WhisperContext>> = None;
+                let mut parakeet_engine: Option<Arc<StdMutex<ParakeetEngine>>> = None;
+                let mut parakeet_model_id: Option<String> = None;
 
                 while !preview_stop.load(Ordering::Relaxed) {
                     std::thread::sleep(Duration::from_millis(LIVE_PREVIEW_INTERVAL_MS));
@@ -342,44 +344,72 @@ impl DictationManager {
                     }
 
                     let active = local_asr_model::read_active_local_model();
-                    if !matches!(active.engine, local_asr_model::LocalAsrEngine::Whisper) {
+                    let is_whisper = matches!(active.engine, local_asr_model::LocalAsrEngine::Whisper);
+                    let is_parakeet =
+                        matches!(active.engine, local_asr_model::LocalAsrEngine::Parakeet);
+                    if !is_whisper && !is_parakeet {
                         continue;
                     }
 
-                    // Lazily load whisper context once and share it with the stop/final pass to
+                    // Lazily load local ASR once. For Whisper, share it with the stop/final pass to
                     // avoid loading the model twice (large models can be hundreds of MB).
-                    if whisper_ctx.is_none() {
-                        if let Ok(g) = preview_shared_whisper_ctx.lock() {
-                            whisper_ctx = g.clone();
-                        }
-                    }
-                    if whisper_ctx.is_none() {
-                        if !whisper_model::is_model_downloaded(&active.model_id) {
-                            continue;
-                        }
-                        let Some(path) = whisper_model::model_path_for_id(&active.model_id) else {
-                            continue;
-                        };
-                        let Some(path_str) = path.to_str() else {
-                            continue;
-                        };
-                        match WhisperContext::new_with_params(
-                            path_str,
-                            WhisperContextParameters::default(),
-                        ) {
-                            Ok(ctx) => {
-                                let arc = Arc::new(ctx);
-                                if let Ok(mut g) = preview_shared_whisper_ctx.lock() {
-                                    *g = Some(arc.clone());
-                                }
-                                whisper_ctx = Some(arc);
+                    if is_whisper {
+                        if whisper_ctx.is_none() {
+                            if let Ok(g) = preview_shared_whisper_ctx.lock() {
+                                whisper_ctx = g.clone();
                             }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to load Whisper model for live preview: {e}"
-                                );
+                        }
+                        if whisper_ctx.is_none() {
+                            if !whisper_model::is_model_downloaded(&active.model_id) {
                                 continue;
                             }
+                            let Some(path) = whisper_model::model_path_for_id(&active.model_id)
+                            else {
+                                continue;
+                            };
+                            let Some(path_str) = path.to_str() else {
+                                continue;
+                            };
+                            match WhisperContext::new_with_params(
+                                path_str,
+                                WhisperContextParameters::default(),
+                            ) {
+                                Ok(ctx) => {
+                                    let arc = Arc::new(ctx);
+                                    if let Ok(mut g) = preview_shared_whisper_ctx.lock() {
+                                        *g = Some(arc.clone());
+                                    }
+                                    whisper_ctx = Some(arc);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to load Whisper model for live preview: {e}"
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                    } else if is_parakeet {
+                        // Load Parakeet engine once per session (not shared yet).
+                        let needs_reload =
+                            parakeet_engine.is_none() || parakeet_model_id.as_deref() != Some(&active.model_id);
+                        if needs_reload {
+                            if !parakeet_model::is_model_downloaded(&active.model_id) {
+                                continue;
+                            }
+                            let Some(dir) = parakeet_model::model_dir_for_id(&active.model_id)
+                            else {
+                                continue;
+                            };
+                            let mut engine = ParakeetEngine::new();
+                            if let Err(e) =
+                                engine.load_model_with_params(&dir, ParakeetModelParams::int8())
+                            {
+                                tracing::warn!("Failed to load Parakeet model for live preview: {e}");
+                                continue;
+                            }
+                            parakeet_engine = Some(Arc::new(StdMutex::new(engine)));
+                            parakeet_model_id = Some(active.model_id.clone());
                         }
                     }
 
@@ -409,10 +439,17 @@ impl DictationManager {
                         continue;
                     }
 
-                    let Some(ctx) = whisper_ctx.as_deref() else {
-                        continue;
+                    let next = if is_whisper {
+                        let Some(ctx) = whisper_ctx.as_deref() else {
+                            continue;
+                        };
+                        transcribe_whisper(ctx, &audio_snapshot)
+                    } else {
+                        let Some(eng) = parakeet_engine.as_ref() else {
+                            continue;
+                        };
+                        transcribe_parakeet(eng, &audio_snapshot)
                     };
-                    let next = transcribe_whisper(ctx, &audio_snapshot);
 
                     let Ok(mut next) = next else {
                         continue;
