@@ -6105,6 +6105,10 @@ init();
   function renderEmpty(message) {
     var results = $('notesPaletteResults');
     if (!results) return;
+
+    // Prevent stale selection activation (Enter) after clearing/error states.
+    state.itemsFlat = [];
+    state.activeIndex = 0;
     results.innerHTML = '';
 
     var empty = document.createElement('div');

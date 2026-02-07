@@ -1,10 +1,13 @@
-use rusqlite::{Connection, OptionalExtension, Result};
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use tauri::State;
 
 use crate::utils::truncate_str;
 use crate::{embedding_inference, embedding_model};
+
+type AppResult<T> = std::result::Result<T, String>;
+type SqlResult<T> = rusqlite::Result<T>;
 
 pub const ENTITY_TYPE_TASK: &str = "task";
 pub const ENTITY_TYPE_NOTE: &str = "note";
@@ -17,7 +20,7 @@ pub fn pack_f32_embedding(embedding: &[f32]) -> Vec<u8> {
     out
 }
 
-pub fn unpack_f32_embedding(blob: &[u8]) -> Result<Vec<f32>, String> {
+pub fn unpack_f32_embedding(blob: &[u8]) -> AppResult<Vec<f32>> {
     if blob.len() % 4 != 0 {
         return Err("Invalid embedding blob length (must be multiple of 4)".to_string());
     }
@@ -67,9 +70,7 @@ pub struct SemanticDeleteForEntityRequest {
 }
 
 #[tauri::command]
-pub fn semantic_index_status(
-    state: State<'_, crate::AppState>,
-) -> Result<SemanticIndexStatus, String> {
+pub fn semantic_index_status(state: State<'_, crate::AppState>) -> AppResult<SemanticIndexStatus> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     let fts_available = semantic_fts_available(&conn);
@@ -94,7 +95,7 @@ pub fn semantic_index_status(
 pub async fn semantic_search(
     state: State<'_, crate::AppState>,
     req: SemanticSearchRequest,
-) -> Result<Vec<SemanticSearchResult>, String> {
+) -> AppResult<Vec<SemanticSearchResult>> {
     let db = state.db.clone();
     tokio::task::spawn_blocking(move || semantic_search_sync(&db, req))
         .await
@@ -104,7 +105,7 @@ pub async fn semantic_search(
 fn semantic_search_sync(
     db: &std::sync::Arc<std::sync::Mutex<Connection>>,
     req: SemanticSearchRequest,
-) -> Result<Vec<SemanticSearchResult>, String> {
+) -> AppResult<Vec<SemanticSearchResult>> {
     let query = req.query.trim().to_string();
     if query.is_empty() {
         return Ok(Vec::new());
@@ -274,7 +275,7 @@ fn best_similarity_for_entity(
     model_id: &str,
     r: &SemanticSearchResult,
     query_emb: &[f32],
-) -> Result<Option<f32>, String> {
+) -> AppResult<Option<f32>> {
     let mut stmt = conn
         .prepare_cached(
             "SELECT embedding
@@ -296,7 +297,7 @@ fn best_similarity_for_entity(
     Ok(best)
 }
 
-fn dot_product_f32_le(blob: &[u8], v: &[f32]) -> Result<f32, String> {
+fn dot_product_f32_le(blob: &[u8], v: &[f32]) -> AppResult<f32> {
     if blob.len() != v.len() * 4 {
         return Err("Embedding dims mismatch".to_string());
     }
@@ -309,7 +310,7 @@ fn dot_product_f32_le(blob: &[u8], v: &[f32]) -> Result<f32, String> {
 }
 
 #[tauri::command]
-pub fn semantic_reindex_all(state: State<'_, crate::AppState>) -> Result<(), String> {
+pub fn semantic_reindex_all(state: State<'_, crate::AppState>) -> AppResult<()> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     if !semantic_fts_available(&conn) {
         return Ok(());
@@ -322,7 +323,7 @@ pub fn semantic_reindex_all(state: State<'_, crate::AppState>) -> Result<(), Str
 pub fn semantic_delete_for_entity(
     state: State<'_, crate::AppState>,
     req: SemanticDeleteForEntityRequest,
-) -> Result<(), String> {
+) -> AppResult<()> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
 
     conn.execute(
@@ -341,7 +342,7 @@ pub fn semantic_delete_for_entity(
     Ok(())
 }
 
-pub fn sqlite_table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
+pub fn sqlite_table_exists(conn: &Connection, table_name: &str) -> SqlResult<bool> {
     let mut stmt = conn.prepare_cached(
         "SELECT 1
          FROM sqlite_master
@@ -356,7 +357,7 @@ pub fn semantic_fts_available(conn: &Connection) -> bool {
     sqlite_table_exists(conn, "semantic_fts").unwrap_or(false)
 }
 
-fn semantic_fts_count(conn: &Connection) -> Result<i64> {
+fn semantic_fts_count(conn: &Connection) -> SqlResult<i64> {
     conn.query_row("SELECT COUNT(1) FROM semantic_fts", [], |row| row.get(0))
 }
 
@@ -372,7 +373,7 @@ struct SemanticFtsFingerprint {
     meeting_segments_max_id: i64,
 }
 
-fn semantic_fts_fingerprint(conn: &Connection) -> Result<SemanticFtsFingerprint> {
+fn semantic_fts_fingerprint(conn: &Connection) -> SqlResult<SemanticFtsFingerprint> {
     conn.query_row(
         "SELECT
             (SELECT COUNT(1) FROM tasks),
@@ -399,7 +400,7 @@ fn semantic_fts_fingerprint(conn: &Connection) -> Result<SemanticFtsFingerprint>
     )
 }
 
-fn semantic_fts_is_stale(conn: &Connection) -> Result<bool> {
+fn semantic_fts_is_stale(conn: &Connection) -> SqlResult<bool> {
     if !sqlite_table_exists(conn, "semantic_fts_meta")? {
         return Ok(true);
     }
@@ -440,11 +441,11 @@ fn semantic_fts_is_stale(conn: &Connection) -> Result<bool> {
     Ok(stored != semantic_fts_fingerprint(conn)?)
 }
 
-pub fn semantic_chunks_count(conn: &Connection) -> Result<i64> {
+pub fn semantic_chunks_count(conn: &Connection) -> SqlResult<i64> {
     conn.query_row("SELECT COUNT(1) FROM semantic_chunks", [], |row| row.get(0))
 }
 
-pub fn semantic_chunks_count_by_type(conn: &Connection) -> Result<HashMap<String, i64>> {
+pub fn semantic_chunks_count_by_type(conn: &Connection) -> SqlResult<HashMap<String, i64>> {
     let mut stmt = conn.prepare_cached(
         "SELECT entity_type, COUNT(1)
          FROM semantic_chunks
@@ -508,13 +509,13 @@ mod tests {
     }
 }
 
-pub fn semantic_chunks_last_updated_at(conn: &Connection) -> Result<Option<i64>> {
+pub fn semantic_chunks_last_updated_at(conn: &Connection) -> SqlResult<Option<i64>> {
     conn.query_row("SELECT MAX(updated_at) FROM semantic_chunks", [], |row| {
         row.get(0)
     })
 }
 
-fn rebuild_semantic_fts(conn: &Connection) -> Result<()> {
+fn rebuild_semantic_fts(conn: &Connection) -> SqlResult<()> {
     conn.execute_batch(
         "DELETE FROM semantic_fts;
 
@@ -613,7 +614,7 @@ fn semantic_search_via_fts(
     include_tasks: bool,
     include_notes: bool,
     limit: i64,
-) -> Result<Vec<SemanticSearchResult>> {
+) -> SqlResult<Vec<SemanticSearchResult>> {
     let mut out = Vec::new();
     let fts_query = fts5_literal_query(query).unwrap_or_else(|| query.to_string());
 
