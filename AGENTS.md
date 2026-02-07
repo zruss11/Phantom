@@ -16,6 +16,7 @@ Run from the repository root unless noted.
 - `scripts/dmg/build-dmg.sh` — build the custom macOS DMG after a release build.
 - `cd src-tauri && cargo test` — run Rust unit tests (see `src-tauri/src/namegen.rs`, `src-tauri/src/worktree.rs`).
 - `CLAUDE_SMOKE=1 cargo test -p phantom_harness_backend --test claude_smoke -- --nocapture` — run the Claude backend smoke test.
+- Rust toolchain is pinned in `src-tauri/rust-toolchain.toml` (currently `1.92.0`).
 
 ## Coding Style & Naming Conventions
 - Rust: edition 2021; use `cargo fmt` (4-space indent, rustfmt defaults).
