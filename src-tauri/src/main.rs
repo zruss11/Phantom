@@ -17,6 +17,7 @@ mod meeting_notes;
 mod namegen;
 mod opencode_cli;
 mod parakeet_model;
+mod semantic_search;
 mod summarize;
 mod transcription;
 mod utils;

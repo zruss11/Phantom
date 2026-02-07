@@ -13,7 +13,7 @@
 ### M1 — DB + plumbing (safe scaffolding)
 - [x] Add SQLite schema for `semantic_chunks` (vector storage) (added table + indexes in `src-tauri/src/db.rs`)
 - [x] Add FTS virtual table `semantic_fts` (best-effort; do not fail app startup if FTS5 unavailable) (best-effort create in `src-tauri/src/db.rs`)
-- [ ] Add Rust module for semantic search (types + helpers)
+- [x] Add Rust module for semantic search (types + helpers) (new `src-tauri/src/semantic_search.rs`)
 - [ ] Add Tauri commands:
   - [ ] `semantic_index_status`
   - [ ] `semantic_search({ query, types, limit, exact })`
