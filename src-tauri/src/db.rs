@@ -516,6 +516,21 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
         [],
     )?;
 
+    // Keyword candidate generator for hybrid search (FTS5). Best-effort: on some SQLite builds
+    // FTS5 may be unavailable; this must not break app startup.
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS semantic_fts
+         USING fts5(
+            text,
+            entity_type UNINDEXED,
+            entity_id UNINDEXED,
+            field UNINDEXED,
+            chunk_index UNINDEXED
+         )",
+        [],
+    )
+    .ok();
+
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_meeting_segments_session
          ON meeting_segments(session_id, start_ms)",
