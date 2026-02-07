@@ -1,9 +1,9 @@
 {
   "build": {
-    "beforeBuildCommand": "",
-    "beforeDevCommand": "",
-    "frontendDist": "../gui",
-    "devUrl": "http://127.0.0.1:8000/menu.html"
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420"
   },
   "bundle": {
     "active": true,
@@ -55,17 +55,19 @@
     "macOSPrivateApi": true,
     "security": {
       "freezePrototype": true,
-      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' https://code.iconify.design https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost 'self' https://api.openai.com https://api.anthropic.com https://api.iconify.design https://api.simplesvg.com https://api.unisvg.com; img-src 'self' data: blob: https:; font-src 'self' data:"
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' https://code.iconify.design https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost 'self' https://api.openai.com https://api.anthropic.com https://api.iconify.design https://api.simplesvg.com https://api.unisvg.com http://localhost:1420 ws://localhost:1420; img-src 'self' data: blob: https:; font-src 'self' data:"
     },
     "windows": [
       {
         "title": "Phantom",
         "width": 1220,
         "height": 860,
-        "resizable": false,
+        "minWidth": 1000,
+        "minHeight": 600,
+        "resizable": true,
         "decorations": false,
         "transparent": true,
-        "url": "menu.html",
+        "url": "index.html",
         "devtools": true,
         "useHttpsScheme": true
       }
