@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskRecord {
@@ -19,6 +20,8 @@ pub struct TaskRecord {
     pub worktree_path: Option<String>,
     /// Git branch name (may differ from folder name after async rename)
     pub branch: Option<String>,
+    #[serde(rename = "contextId")]
+    pub context_id: Option<String>,
     pub status: String,
     pub status_state: String,
     pub cost: f64,
@@ -38,6 +41,16 @@ pub struct TaskRecord {
     /// Claude Code runtime ("native" or "docker")
     #[serde(rename = "claudeRuntime")]
     pub claude_runtime: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextRecord {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,12 +187,24 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             prompt TEXT,
             project_path TEXT,
             worktree_path TEXT,
+            context_id TEXT,
             status TEXT DEFAULT 'Ready',
             status_state TEXT DEFAULT 'idle',
             cost REAL DEFAULT 0.0,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             claude_runtime TEXT
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS contexts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
         )",
         [],
     )?;
@@ -580,6 +605,14 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     // Add claude_runtime column for Docker runtime support (migration)
     conn.execute("ALTER TABLE tasks ADD COLUMN claude_runtime TEXT", [])
         .ok();
+    // Add context_id column for shared context grouping (migration)
+    conn.execute("ALTER TABLE tasks ADD COLUMN context_id TEXT", [])
+        .ok();
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_context_id ON tasks(context_id)",
+        [],
+    )
+    .ok();
 
     // Backfill next_run_at for enabled automations that predate the column (migration).
     // Older schemas added next_run_at without populating it, which would cause enabled
@@ -1078,8 +1111,8 @@ pub fn get_all_cached_modes(conn: &Connection) -> Result<Vec<(String, Vec<Cached
 
 pub fn insert_task(conn: &Connection, task: &TaskRecord) -> Result<()> {
     conn.execute(
-        "INSERT INTO tasks (id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT INTO tasks (id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, context_id, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
         params![
             task.id,
             task.agent_id,
@@ -1089,6 +1122,7 @@ pub fn insert_task(conn: &Connection, task: &TaskRecord) -> Result<()> {
             task.project_path,
             task.worktree_path,
             task.branch,
+            task.context_id,
             task.status,
             task.status_state,
             task.cost,
@@ -1194,6 +1228,137 @@ pub fn get_task_agent_session_id(conn: &Connection, id: &str) -> Result<Option<S
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e),
     }
+}
+
+pub fn get_task_context_id(conn: &Connection, id: &str) -> Result<Option<String>> {
+    let result = conn.query_row(
+        "SELECT context_id FROM tasks WHERE id = ?1",
+        params![id],
+        |row| row.get::<_, Option<String>>(0),
+    );
+    match result {
+        Ok(context_id) => Ok(context_id),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+pub fn build_shared_context_brief(
+    conn: &Connection,
+    context_id: &str,
+    exclude_task_id: Option<&str>,
+    max_chars: usize,
+) -> Result<String> {
+    let mut out = String::new();
+
+    // Best-effort: include context name/description if it exists.
+    if let Ok((name, description)) = conn.query_row(
+        "SELECT name, description FROM contexts WHERE id = ?1",
+        params![context_id],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+    ) {
+        out.push_str("Context: ");
+        out.push_str(&name);
+        out.push('\n');
+        if let Some(desc) = description
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            out.push_str("Description: ");
+            out.push_str(desc);
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
+    #[derive(Debug)]
+    struct ContextTaskRow {
+        id: String,
+        title_summary: Option<String>,
+        prompt: Option<String>,
+        updated_at: i64,
+    }
+
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, title_summary, prompt, updated_at
+         FROM tasks
+         WHERE context_id = ?1
+           AND (?2 IS NULL OR id != ?2)
+         ORDER BY updated_at DESC, created_at DESC
+         LIMIT 8",
+    )?;
+    let rows = stmt.query_map(params![context_id, exclude_task_id], |row| {
+        Ok(ContextTaskRow {
+            id: row.get(0)?,
+            title_summary: row.get(1)?,
+            prompt: row.get(2)?,
+            updated_at: row.get(3)?,
+        })
+    })?;
+    let tasks: Vec<ContextTaskRow> = rows.filter_map(|r| r.ok()).collect();
+
+    if tasks.is_empty() {
+        if out.is_empty() {
+            out.push_str("No prior tasks in this context.");
+        } else {
+            out.push_str("No prior tasks in this context.");
+        }
+        if out.len() > max_chars {
+            return Ok(safe_prefix(&out, max_chars).to_string());
+        }
+        return Ok(out);
+    }
+
+    for task in tasks {
+        if out.len() >= max_chars.saturating_sub(64) {
+            break;
+        }
+
+        out.push_str("[Context Task]\n");
+        out.push_str("id: ");
+        out.push_str(&task.id);
+        out.push('\n');
+        if let Some(title) = task
+            .title_summary
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            out.push_str("title: ");
+            out.push_str(title);
+            out.push('\n');
+        }
+        out.push_str("updated_at: ");
+        out.push_str(&task.updated_at.to_string());
+        out.push_str("\n\n");
+
+        let mut messages = get_message_records(conn, &task.id)?;
+        if messages.len() > 40 {
+            let start = messages.len().saturating_sub(40);
+            messages = messages[start..].to_vec();
+        }
+
+        let remaining = max_chars.saturating_sub(out.len());
+        if remaining < 256 {
+            break;
+        }
+        let per_task_cap = std::cmp::min(40_000, remaining);
+        let (history, _) = compact_history(&messages, task.prompt.as_deref(), per_task_cap);
+        out.push_str(&history);
+        out.push('\n');
+    }
+
+    if out.len() > max_chars {
+        let prefix = safe_prefix(&out, max_chars);
+        let mut clipped = prefix.to_string();
+        if clipped.len() < out.len() {
+            clipped.push_str("...");
+        }
+        return Ok(clipped);
+    }
+
+    Ok(out)
 }
 
 pub fn get_task_cost(conn: &Connection, id: &str) -> Result<f64> {
@@ -1447,7 +1612,7 @@ pub fn get_messages(conn: &Connection, task_id: &str) -> Result<Vec<serde_json::
 
 pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRecord>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime
+        "SELECT id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, context_id, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime
          FROM tasks ORDER BY created_at DESC"
     )?;
     let tasks = stmt.query_map([], |row| {
@@ -1460,19 +1625,59 @@ pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRecord>> {
             project_path: row.get(5)?,
             worktree_path: row.get(6)?,
             branch: row.get(7)?,
-            status: row.get(8)?,
-            status_state: row.get(9)?,
-            cost: row.get(10)?,
-            created_at: row.get(11)?,
-            updated_at: row.get(12)?,
-            title_summary: row.get(13)?,
-            agent_session_id: row.get(14)?,
-            total_tokens: row.get(15)?,
-            context_window: row.get(16)?,
-            claude_runtime: row.get(17)?,
+            context_id: row.get(8)?,
+            status: row.get(9)?,
+            status_state: row.get(10)?,
+            cost: row.get(11)?,
+            created_at: row.get(12)?,
+            updated_at: row.get(13)?,
+            title_summary: row.get(14)?,
+            agent_session_id: row.get(15)?,
+            total_tokens: row.get(16)?,
+            context_window: row.get(17)?,
+            claude_runtime: row.get(18)?,
         })
     })?;
     tasks.collect()
+}
+
+pub fn list_contexts(conn: &Connection) -> Result<Vec<ContextRecord>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, name, description, created_at, updated_at
+         FROM contexts
+         ORDER BY updated_at DESC, created_at DESC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ContextRecord {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            description: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn create_context(
+    conn: &Connection,
+    name: &str,
+    description: Option<&str>,
+) -> Result<ContextRecord> {
+    let id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "INSERT INTO contexts (id, name, description, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, name, description, now, now],
+    )?;
+    Ok(ContextRecord {
+        id,
+        name: name.to_string(),
+        description: description.map(|s| s.to_string()),
+        created_at: now,
+        updated_at: now,
+    })
 }
 
 pub fn list_codex_accounts(conn: &Connection) -> Result<Vec<CodexAccountRecord>> {

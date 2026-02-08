@@ -473,6 +473,8 @@ pub(crate) struct CreateAgentPayload {
     #[serde(rename = "agentId")]
     pub(crate) agent_id: String,
     pub(crate) prompt: String,
+    #[serde(rename = "contextId", default)]
+    pub(crate) context_id: Option<String>,
     #[serde(rename = "projectPath")]
     pub(crate) project_path: Option<String>,
     /// Base branch for worktree creation (optional)
@@ -680,6 +682,8 @@ struct Settings {
     pub(crate) task_use_worktree: Option<bool>,
     #[serde(rename = "taskBaseBranch")]
     pub(crate) task_base_branch: Option<String>,
+    #[serde(rename = "taskContextId")]
+    pub(crate) task_context_id: Option<String>,
     #[serde(rename = "taskClaudeRuntime")]
     pub(crate) task_claude_runtime: Option<String>,
     #[serde(rename = "taskLastAgent")]
@@ -4768,6 +4772,7 @@ pub(crate) async fn create_agent_session_internal(
                 .as_ref()
                 .map(|path| path.to_string_lossy().to_string()),
             branch: initial_branch,
+            context_id: payload.context_id.clone(),
             status: "Ready".to_string(),
             status_state: "idle".to_string(),
             cost: 0.0,
@@ -5085,6 +5090,7 @@ pub(crate) async fn create_task_from_discord(
     let payload = CreateAgentPayload {
         agent_id: agent_id.clone(),
         prompt,
+        context_id: None,
         project_path,
         base_branch,
         plan_mode,
@@ -5449,6 +5455,24 @@ pub(crate) async fn start_task_internal(
         generation_seq,
     };
     let mut prompt = prompt;
+
+    if !prompt.contains("[Shared Context]") {
+        let brief_opt = {
+            let conn = state.db.lock().map_err(|e| e.to_string())?;
+            match db::get_task_context_id(&conn, &task_id).map_err(|e| e.to_string())? {
+                Some(context_id) if !context_id.trim().is_empty() => {
+                    db::build_shared_context_brief(&conn, &context_id, Some(&task_id), 40_000)
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                }
+                _ => None,
+            }
+        };
+
+        if let Some(brief) = brief_opt {
+            prompt = format!("[Shared Context]\n{brief}\n\n[New Task]\n{prompt}");
+        }
+    }
 
     // Load images from attachments
     let images: Vec<ImageContent> = {
@@ -9024,6 +9048,32 @@ fn load_tasks(state: State<'_, AppState>) -> Result<Vec<db::TaskRecord>, String>
     db::list_tasks(&conn).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn list_contexts(state: State<'_, AppState>) -> Result<Vec<db::ContextRecord>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_contexts(&conn).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateContextPayload {
+    name: String,
+    description: Option<String>,
+}
+
+#[tauri::command]
+fn create_context(
+    payload: CreateContextPayload,
+    state: State<'_, AppState>,
+) -> Result<db::ContextRecord, String> {
+    let name = payload.name.trim();
+    if name.is_empty() {
+        return Err("Context name is required.".to_string());
+    }
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::create_context(&conn, name, payload.description.as_deref()).map_err(|e| e.to_string())
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
@@ -9080,6 +9130,7 @@ async fn run_automation_and_start_task(
     let create_payload = CreateAgentPayload {
         agent_id: automation.agent_id.clone(),
         prompt: automation.prompt.clone(),
+        context_id: None,
         project_path: automation.project_path.clone(),
         base_branch: automation.base_branch.clone(),
         plan_mode: automation.plan_mode,
@@ -13618,6 +13669,8 @@ fn main() {
             check_claude_auth,
             claude_rate_limits,
             load_tasks,
+            list_contexts,
+            create_context,
             // Automations
             load_automations,
             load_automation_runs,

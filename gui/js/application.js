@@ -53,6 +53,7 @@ let execModelDropdown = null;
 let reasoningEffortDropdown = null;
 let agentModeDropdown = null;
 let baseBranchDropdown = null;
+let contextDropdown = null;
 let agentNotificationTimeoutDropdown = null;
 let summariesAgentDropdown = null;
 let codexAccessModeDropdown = null;
@@ -60,6 +61,8 @@ let codexAccessModeDropdown = null;
 // Flag to prevent saving during restoration (avoids overwriting saved preferences)
 let isRestoringSettings = false;
 let pendingBaseBranchValue = null;
+let pendingContextValue = null;
+let lastContextValue = 'none';
 
 // Cache for enriched models with reasoning effort data (for Codex)
 let enrichedModelCache = {};
@@ -92,6 +95,7 @@ function initCustomDropdowns() {
   const reasoningContainer = document.getElementById('reasoningEffortDropdown');
   const modeContainer = document.getElementById('agentModeDropdown');
   const baseBranchContainer = document.getElementById('baseBranchDropdown');
+  const contextContainer = document.getElementById('contextDropdown');
   const agentNotificationTimeoutContainer = document.getElementById('agentNotificationTimeoutDropdown');
 
   if (permContainer && window.CustomDropdown) {
@@ -173,6 +177,74 @@ function initCustomDropdowns() {
       }
     });
     window.baseBranchDropdown = baseBranchDropdown;
+  }
+
+  if (contextContainer && window.CustomDropdown) {
+    contextDropdown = new window.CustomDropdown({
+      container: contextContainer,
+      items: [
+        { value: 'none', name: 'No context', description: '' },
+        { value: '__new__', name: '+ New Context...', description: '' }
+      ],
+      placeholder: 'Context',
+      defaultValue: 'none',
+      searchable: true,
+      searchPlaceholder: 'Search contexts...',
+      onChange: function(value) {
+        console.log('[Harness] Context changed:', value);
+        if (value === '__new__') {
+          // Defer async flow; CustomDropdown onChange is sync.
+          (async function() {
+            const name = window.prompt('New context name');
+            const trimmed = (name || '').trim();
+            if (!trimmed) {
+              const prevRestoring = isRestoringSettings;
+              isRestoringSettings = true;
+              try {
+                contextDropdown.setValue(lastContextValue || 'none');
+              } finally {
+                isRestoringSettings = prevRestoring;
+              }
+              return;
+            }
+            try {
+              const created = await ipcRenderer.invoke('createContext', { name: trimmed, description: null });
+              await refreshContextOptions();
+              const nextValue = created && created.id ? created.id : 'none';
+              const prevRestoring = isRestoringSettings;
+              isRestoringSettings = true;
+              try {
+                contextDropdown.setValue(nextValue);
+                lastContextValue = nextValue;
+              } finally {
+                isRestoringSettings = prevRestoring;
+              }
+              if (!isRestoringSettings) {
+                saveTaskSettings();
+              } else {
+                // Settings restoration; still persist selection after restore completes.
+                saveTaskSettings();
+              }
+            } catch (err) {
+              console.warn('[Harness] Failed to create context:', err);
+              const prevRestoring = isRestoringSettings;
+              isRestoringSettings = true;
+              try {
+                contextDropdown.setValue(lastContextValue || 'none');
+              } finally {
+                isRestoringSettings = prevRestoring;
+              }
+            }
+          })();
+          return;
+        }
+        lastContextValue = value || 'none';
+        if (!isRestoringSettings) {
+          saveTaskSettings();
+        }
+      }
+    });
+    window.contextDropdown = contextDropdown;
   }
 
   if (agentNotificationTimeoutContainer && window.CustomDropdown) {
@@ -303,6 +375,59 @@ async function refreshBaseBranchOptions() {
     baseBranchDropdown.setValue('default');
   } finally {
     pendingBaseBranchValue = null;
+  }
+}
+
+async function refreshContextOptions() {
+  if (!contextDropdown) return;
+
+  // Keep "No context" + "+ New..." available even while loading.
+  contextDropdown.setOptions([
+    { value: 'none', name: 'No context', description: '' },
+    { value: '__new__', name: '+ New Context...', description: '' }
+  ]);
+
+  try {
+    const contexts = await ipcRenderer.invoke('listContexts');
+    const list = Array.isArray(contexts) ? contexts : [];
+    const items = [
+      { value: 'none', name: 'No context', description: '' },
+      ...list.map((c) => ({
+        value: c.id,
+        name: c.name || c.id,
+        description: c.description || ''
+      })),
+      { value: '__new__', name: '+ New Context...', description: '' }
+    ];
+
+    const prevRestoring = isRestoringSettings;
+    isRestoringSettings = true;
+    try {
+      contextDropdown.setOptions(items);
+
+      const preferred =
+        (pendingContextValue && items.some((i) => i.value === pendingContextValue) && pendingContextValue) ||
+        (currentSettings?.taskContextId && items.some((i) => i.value === currentSettings.taskContextId) && currentSettings.taskContextId) ||
+        'none';
+
+      contextDropdown.setValue(preferred);
+      lastContextValue = preferred;
+    } finally {
+      isRestoringSettings = prevRestoring;
+    }
+  } catch (err) {
+    console.warn('[Harness] Failed to load contexts:', err);
+    // Keep fallback options; default to none.
+    const prevRestoring = isRestoringSettings;
+    isRestoringSettings = true;
+    try {
+      contextDropdown.setValue('none');
+      lastContextValue = 'none';
+    } finally {
+      isRestoringSettings = prevRestoring;
+    }
+  } finally {
+    pendingContextValue = null;
   }
 }
 // webFrame.setVisualZoomLevelLimits(1, 1)
@@ -2573,6 +2698,9 @@ function restoreTaskSettings(settings) {
   if (settings.taskBaseBranch !== undefined) {
     pendingBaseBranchValue = settings.taskBaseBranch;
   }
+  if (settings.taskContextId !== undefined) {
+    pendingContextValue = settings.taskContextId;
+  }
   if (settings.taskClaudeRuntime !== undefined) {
     const runtimeToggle = document.getElementById("claudeDockerToggle");
     if (runtimeToggle) {
@@ -2591,6 +2719,7 @@ function restoreTaskSettings(settings) {
   }
 
   refreshBaseBranchOptions();
+  refreshContextOptions();
 }
 
 // Save task creation settings - core logic
@@ -2627,11 +2756,18 @@ async function saveTaskSettingsCore(agentIdOverride) {
   const baseBranch =
     baseBranchValue && baseBranchValue !== "default" ? baseBranchValue : null;
 
+  const contextValue = contextDropdown ? contextDropdown.getValue() : "none";
+  const contextId =
+    contextValue && contextValue !== "none" && contextValue !== "__new__"
+      ? contextValue
+      : null;
+
   const taskSettings = {
     taskProjectPath: getProjectPath(),
     taskPlanMode: $("#planModeToggle").is(":checked"),
     taskUseWorktree: $("#useWorktreeToggle").is(":checked"),
     taskBaseBranch: baseBranch,
+    taskContextId: contextId,
     taskLastAgent: agentId,
     taskAgentModels: agentModels,
     taskClaudeRuntime: (() => {
@@ -3951,6 +4087,9 @@ init();
     const baseBranch = baseBranchDropdown && baseBranchDropdown.getValue() !== "default"
       ? baseBranchDropdown.getValue()
       : null;
+    const contextId = contextDropdown && !["none", "__new__"].includes(contextDropdown.getValue())
+      ? contextDropdown.getValue()
+      : null;
     const forceWorktree = multiCreate ? true : $("#useWorktreeToggle").is(":checked");
 
     // Agents with their own permission mechanisms always use bypass:
@@ -3985,6 +4124,7 @@ init();
       const payload = {
         agentId: agentId,
         prompt: promptText,
+        contextId: contextId,
         projectPath: getProjectPath(),
         baseBranch: baseBranch,
         planMode: planMode,
