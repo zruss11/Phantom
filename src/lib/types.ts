@@ -127,3 +127,126 @@ export interface Settings {
   theme: ThemeMode;
   sidebarCollapsed: boolean;
 }
+
+// --- Chat & Task Creation Types ---
+
+export type ChatMessageType =
+  | 'user'
+  | 'assistant'
+  | 'reasoning'
+  | 'tool_call'
+  | 'tool_return'
+  | 'permission_request'
+  | 'user_input_request'
+  | 'plan_update'
+  | 'plan_content'
+  | 'file_edit'
+  | 'diff'
+  | 'error'
+  | 'system';
+
+export interface ChatMessageData {
+  type: ChatMessageType;
+  message_type?: string;
+  content?: string;
+  text?: string;
+  timestamp?: string;
+  clientMessageId?: string;
+  client_message_id?: string;
+  queuedDisposition?: 'queue' | 'steer' | null;
+
+  // Tool call
+  tool_call?: { name: string; arguments: string | object };
+  name?: string;
+  arguments?: string | object;
+
+  // Tool return
+  tool_return?: string;
+  result?: string;
+  output?: string;
+
+  // Permission request
+  request_id?: string;
+  tool_name?: string;
+  description?: string;
+  raw_input?: string | object;
+  options?: Array<{ id: string; label: string; description?: string }>;
+
+  // User input request
+  questions?: Array<{
+    id: string;
+    header: string;
+    question: string;
+    options?: Array<{ label: string; description?: string; value: string }>;
+    multiSelect?: boolean;
+  }>;
+
+  // Attachments
+  attachments?: Array<{
+    id: string;
+    relativePath: string;
+    fileName?: string;
+    mimeType?: string;
+    dataUrl?: string;
+  }>;
+
+  // Reasoning
+  reasoning?: string;
+
+  // File edit / diff
+  file_path?: string;
+  path?: string;
+  edit_content?: string;
+  diff?: string;
+  title?: string;
+
+  // Plan
+  explanation?: string;
+  plan?: Array<{ step: string; status: 'pending' | 'inProgress' | 'completed' }>;
+}
+
+export interface CreateAgentPayload {
+  agentId: string;
+  prompt: string;
+  projectPath?: string;
+  baseBranch?: string;
+  planMode: boolean;
+  thinking: boolean;
+  useWorktree: boolean;
+  permissionMode: string;
+  execModel: string;
+  reasoningEffort?: string;
+  agentMode?: string;
+  codexMode?: string;
+  claudeRuntime?: string;
+  attachments?: Array<{ id: string; relativePath: string; mimeType: string }>;
+  multiCreate: boolean;
+  suppressNotifications: boolean;
+}
+
+export interface CreateAgentResult {
+  task_id: string;
+  session_id: string;
+  worktreePath?: string;
+}
+
+export interface EnrichedModel {
+  value: string;
+  name?: string;
+  description?: string;
+  supportedReasoningEfforts: Array<{ value: string; name?: string }>;
+  defaultReasoningEffort?: string;
+  isDefault: boolean;
+}
+
+export interface TaskHistory {
+  task_id: string;
+  agent_id: string;
+  pending_prompt?: string;
+  status_state: string;
+  title_summary?: string;
+  worktree_path?: string;
+  project_path?: string;
+  branch?: string;
+  messages: ChatMessageData[];
+}

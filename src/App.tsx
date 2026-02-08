@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppShell } from './components/layout/AppShell';
 import { PlaceholderPage } from './pages/placeholder';
+import { TasksPage } from './pages/tasks';
 
 export default function App() {
   return (
@@ -8,7 +9,7 @@ export default function App() {
       <Routes>
         <Route element={<AppShell />}>
           <Route path="/" element={<Navigate to="/tasks" replace />} />
-          <Route path="/tasks" element={<PlaceholderPage title="Tasks" />} />
+          <Route path="/tasks" element={<TasksPage />} />
           <Route path="/analytics" element={<PlaceholderPage title="Analytics" />} />
           <Route path="/review" element={<PlaceholderPage title="Review" />} />
           <Route path="/integrations/github" element={<PlaceholderPage title="GitHub" />} />
