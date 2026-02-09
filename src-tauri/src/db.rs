@@ -1183,6 +1183,9 @@ pub fn update_task_agent_session_id(
     Ok(())
 }
 
+// Not currently used by the UI flow, but kept for associating tasks with a Claude
+// teammate controller identity (team + agent) without requiring a schema change.
+#[allow(dead_code)]
 pub fn update_task_claude_team_agent(
     conn: &Connection,
     id: &str,

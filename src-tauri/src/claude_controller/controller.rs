@@ -1,13 +1,38 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
+use tokio::sync::Notify;
 use tokio::sync::{broadcast, Mutex};
+use tokio::task::JoinHandle;
 
 use super::inbox;
 use super::process::{ProcessManager, SpawnAgentOptions};
 use super::team::{self, TeamMember};
 use super::types::{InboxMessage, ParsedMessage, StructuredMessage};
+
+fn valid_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+fn normalize_from(team_name: &str, from: &str) -> Option<String> {
+    let from = from.trim();
+    if valid_name(from) {
+        return Some(from.to_string());
+    }
+    // Some teammate payloads may use agentId format `name@team`.
+    if let Some((name, team)) = from.split_once('@') {
+        if team == team_name && valid_name(name) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
 
 #[derive(Clone)]
 pub struct ClaudeTeamsController {
@@ -20,6 +45,9 @@ pub struct ClaudeTeamsController {
     processes: ProcessManager,
     channels: Arc<Mutex<HashMap<String, broadcast::Sender<InboxMessage>>>>,
     poller_started: Arc<Mutex<bool>>,
+    poller_stop: Arc<AtomicBool>,
+    poller_notify: Arc<Notify>,
+    poller_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl ClaudeTeamsController {
@@ -48,6 +76,9 @@ impl ClaudeTeamsController {
             processes: ProcessManager::default(),
             channels: Arc::new(Mutex::new(HashMap::new())),
             poller_started: Arc::new(Mutex::new(false)),
+            poller_stop: Arc::new(AtomicBool::new(false)),
+            poller_notify: Arc::new(Notify::new()),
+            poller_handle: Arc::new(Mutex::new(None)),
         };
 
         controller.start_poller().await?;
@@ -64,20 +95,41 @@ impl ClaudeTeamsController {
         let team_name = self.team_name.clone();
         let controller_name = self.controller_name.clone();
         let channels = self.channels.clone();
-        tokio::spawn(async move {
+        let stop = self.poller_stop.clone();
+        let notify = self.poller_notify.clone();
+        let handle = tokio::spawn(async move {
             loop {
-                let events = tokio::task::spawn_blocking({
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                let events_res = tokio::task::spawn_blocking({
                     let team_name = team_name.clone();
                     let controller_name = controller_name.clone();
                     move || inbox::read_unread_and_mark_read(&team_name, &controller_name)
                 })
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or_default();
+                .await;
+                let events = match events_res {
+                    Ok(Ok(events)) => events,
+                    Ok(Err(err)) => {
+                        eprintln!("[Harness] teammate controller poller read failed: {err}");
+                        Vec::new()
+                    }
+                    Err(err) => {
+                        eprintln!("[Harness] teammate controller poller task failed: {err}");
+                        Vec::new()
+                    }
+                };
 
                 for ev in events {
-                    let from = ev.raw.from.clone();
+                    let from_raw = ev.raw.from.clone();
+                    let Some(from) = normalize_from(&team_name, &from_raw) else {
+                        eprintln!(
+                            "[Harness] Ignoring teammate inbox event with invalid from={:?}",
+                            from_raw
+                        );
+                        continue;
+                    };
 
                     // Auto-approve plan/permission requests for v1.
                     match &ev.parsed {
@@ -149,7 +201,8 @@ impl ClaudeTeamsController {
                             .await;
                             continue;
                         }
-                        _ => {}
+                        ParsedMessage::Structured(_) => {}
+                        ParsedMessage::PlainText(_text) => {}
                     }
 
                     // Forward message to per-agent channel.
@@ -166,9 +219,13 @@ impl ClaudeTeamsController {
                     }
                 }
 
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                tokio::select! {
+                    _ = notify.notified() => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {}
+                }
             }
         });
+        *self.poller_handle.lock().await = Some(handle);
 
         Ok(())
     }
@@ -207,7 +264,9 @@ impl ClaudeTeamsController {
         let member = TeamMember {
             agent_id: agent_id.clone(),
             name: agent_name.clone(),
-            agent_type: agent_type.clone().unwrap_or_else(|| "general-purpose".to_string()),
+            agent_type: agent_type
+                .clone()
+                .unwrap_or_else(|| "general-purpose".to_string()),
             model: model.clone(),
             joined_at: chrono::Utc::now().timestamp_millis(),
             tmux_pane_id: Some(String::new()),
@@ -273,7 +332,11 @@ impl ClaudeTeamsController {
     }
 
     pub async fn shutdown_agent(&self, agent_name: &str, reason: &str) -> Result<(), String> {
-        let request_id = format!("shutdown-{}@{}", chrono::Utc::now().timestamp_millis(), agent_name);
+        let request_id = format!(
+            "shutdown-{}@{}",
+            chrono::Utc::now().timestamp_millis(),
+            agent_name
+        );
         let msg = serde_json::json!({
             "type": "shutdown_request",
             "requestId": request_id,
@@ -299,6 +362,39 @@ impl ClaudeTeamsController {
         })
         .await
         .ok();
+        Ok(())
+    }
+
+    pub async fn shutdown_all(&self) -> Result<(), String> {
+        self.poller_stop.store(true, Ordering::SeqCst);
+        self.poller_notify.notify_waiters();
+        if let Some(handle) = self.poller_handle.lock().await.take() {
+            handle.abort();
+        }
+
+        // Kill all spawned processes.
+        let pm = self.processes.clone();
+        tokio::task::spawn_blocking(move || pm.kill_all())
+            .await
+            .map_err(|e| format!("kill_all: {e}"))?;
+
+        // Best-effort cleanup: remove all non-controller members from config.json.
+        tokio::task::spawn_blocking({
+            let team_name = self.team_name.clone();
+            let controller_name = self.controller_name.clone();
+            move || {
+                if let Ok(config) = team::read_config(&team_name) {
+                    for m in config.members {
+                        if m.name != controller_name {
+                            let _ = team::remove_member(&team_name, &m.name);
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .ok();
+
         Ok(())
     }
 

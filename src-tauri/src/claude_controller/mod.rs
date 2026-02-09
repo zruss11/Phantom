@@ -6,4 +6,3 @@ pub mod team;
 pub mod types;
 
 pub use controller::ClaudeTeamsController;
-

@@ -105,4 +105,3 @@ pub enum ParsedMessage {
     Structured(StructuredMessage),
     PlainText(String),
 }
-

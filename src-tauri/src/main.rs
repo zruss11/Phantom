@@ -2,10 +2,10 @@ mod amp_cli;
 mod audio_capture;
 mod automations;
 mod calendar;
-mod claude_local_usage;
-mod claude_usage_watcher;
 mod claude_controller;
 mod claude_controller_api;
+mod claude_local_usage;
+mod claude_usage_watcher;
 mod command_center;
 mod db;
 mod debug_http;
@@ -72,9 +72,9 @@ use tokio::time::{timeout, Duration};
 #[cfg(unix)]
 use libc::{getegid, geteuid};
 
-use debug_http::start_debug_http;
 use claude_controller::ClaudeTeamsController;
 use claude_controller_api::start_claude_controller_api;
+use debug_http::start_debug_http;
 use mcp_server::{start_mcp_server, McpConfig};
 
 /// Model pricing (per million tokens): (model_pattern, input_rate, output_rate)
@@ -4857,11 +4857,11 @@ pub(crate) async fn create_agent_session_internal(
                     } else {
                         metadata.branch_name.clone()
                     };
-                    let new_branch = match worktree::unique_branch_name(&repo_root, &branch_seed).await
-                    {
-                        Ok(name) => name,
-                        Err(_) => return,
-                    };
+                    let new_branch =
+                        match worktree::unique_branch_name(&repo_root, &branch_seed).await {
+                            Ok(name) => name,
+                            Err(_) => return,
+                        };
                     if new_branch == animal_name {
                         return;
                     }
@@ -5620,8 +5620,14 @@ pub(crate) async fn start_task_internal(
             && task.claude_team_name.is_some()
             && task.claude_agent_name.is_some()
         {
-            let team_name = task.claude_team_name.clone().unwrap_or_else(|| "phantom-harness".to_string());
-            let agent_name = task.claude_agent_name.clone().unwrap_or_else(|| "controller".to_string());
+            let team_name = task
+                .claude_team_name
+                .clone()
+                .unwrap_or_else(|| "phantom-harness".to_string());
+            let agent_name = task
+                .claude_agent_name
+                .clone()
+                .unwrap_or_else(|| "controller".to_string());
 
             // In teammate mode we don't have session/load context restoration, so always inject
             // history into "Continue"/prompt to preserve context after restarts.
@@ -5773,55 +5779,56 @@ pub(crate) async fn start_task_internal(
             } else {
                 // session/load restored context, use original prompt
                 resume_prompt.clone()
-            }
-        };
-
-        println!(
-            "[Harness] Session reconnected for start_task: task_id={} session_id={} (used_session_load={})",
-            task_id, session_id, used_session_load
-        );
-
-        // Spawn Claude usage watcher for reconnected sessions
-        let claude_watcher = if task.agent_id == "claude-code" {
-            Some(claude_usage_watcher::start_watching(
-                &session_id,
-                &task_id,
-                app.clone(),
-                state.db.clone(),
-            ))
-        } else {
-            None
-        };
-
-        let handle = SessionHandle {
-            agent_id: task.agent_id.clone(),
-            model: model.clone(),
-            backend: SessionBackend::Acp { client, session_id },
-            pending_prompt: prompt_with_context,
-            pending_attachments: Vec::new(),
-            messages: Vec::new(),
-            suppress_notifications: task_id.starts_with("notes-"),
-            queued_chat: VecDeque::new(),
-            is_generating: false,
-            generation_seq: 0,
-            claude_watcher,
-            cancel_token: CancellationToken::new(),
-            needs_history_injection: false,
-        };
-
-        let handle_ref = Arc::new(Mutex::new(handle));
-        let mut sessions = state.sessions.lock().await;
-        sessions.insert(task_id.clone(), handle_ref.clone());
-
-        if task.agent_id == "codex" || task.agent_id == "claude-code" {
-            let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
-            let commands = if task.agent_id == "codex" {
-                collect_codex_commands(state, &command_root)
-            } else {
-                collect_claude_commands(state, &command_root)
             };
-            emit_available_commands(&app, &task_id, &task.agent_id, &commands);
-        }
+
+            println!(
+                "[Harness] Session reconnected for start_task: task_id={} session_id={} (used_session_load={})",
+                task_id, session_id, used_session_load
+            );
+
+            // Spawn Claude usage watcher for reconnected sessions
+            let claude_watcher = if task.agent_id == "claude-code" {
+                Some(claude_usage_watcher::start_watching(
+                    &session_id,
+                    &task_id,
+                    app.clone(),
+                    state.db.clone(),
+                ))
+            } else {
+                None
+            };
+
+            let handle = SessionHandle {
+                agent_id: task.agent_id.clone(),
+                model: model.clone(),
+                backend: SessionBackend::Acp { client, session_id },
+                pending_prompt: prompt_with_context,
+                pending_attachments: Vec::new(),
+                messages: Vec::new(),
+                suppress_notifications: task_id.starts_with("notes-"),
+                queued_chat: VecDeque::new(),
+                is_generating: false,
+                generation_seq: 0,
+                claude_watcher,
+                cancel_token: CancellationToken::new(),
+                needs_history_injection: false,
+            };
+
+            let handle_ref = Arc::new(Mutex::new(handle));
+            let mut sessions = state.sessions.lock().await;
+            sessions.insert(task_id.clone(), handle_ref.clone());
+
+            if task.agent_id == "codex" || task.agent_id == "claude-code" {
+                let command_root = resolve_repo_root(&cwd).await.unwrap_or_else(|| cwd.clone());
+                let commands = if task.agent_id == "codex" {
+                    collect_codex_commands(state, &command_root)
+                } else {
+                    collect_claude_commands(state, &command_root)
+                };
+                emit_available_commands(&app, &task_id, &task.agent_id, &commands);
+            }
+            handle_ref
+        };
         handle_ref
     };
 
@@ -6353,11 +6360,9 @@ pub(crate) async fn start_task_internal(
                         .find(|t| t.id == task_id)
                 };
                 let cwd_for_spawn = if let Some(task) = task.as_ref() {
-                    resolve_task_cwd(task)
-                        .ok()
-                        .unwrap_or_else(|| {
-                            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                        })
+                    resolve_task_cwd(task).ok().unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    })
                 } else {
                     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
                 };
@@ -6405,12 +6410,12 @@ pub(crate) async fn start_task_internal(
                     if v.get("type").and_then(|x| x.as_str()).is_some() {
                         // If this looks structured but we don't recognize it, drop it on the floor.
                         if let Ok(s) =
-                            serde_json::from_value::<claude_controller::types::StructuredMessage>(
-                                v,
-                            )
+                            serde_json::from_value::<claude_controller::types::StructuredMessage>(v)
                         {
                             match s {
-                                claude_controller::types::StructuredMessage::IdleNotification { .. } => {
+                                claude_controller::types::StructuredMessage::IdleNotification {
+                                    ..
+                                } => {
                                     break;
                                 }
                                 claude_controller::types::StructuredMessage::PlainText { text } => {
@@ -6664,7 +6669,10 @@ pub(crate) async fn start_task_internal(
                                 Some(t) => t,
                                 None => {
                                     let (formatted_error, _) = format_agent_error(&error_str);
-                                    return Err(format!("session/prompt failed: {}", formatted_error));
+                                    return Err(format!(
+                                        "session/prompt failed: {}",
+                                        formatted_error
+                                    ));
                                 }
                             };
 
@@ -6673,7 +6681,10 @@ pub(crate) async fn start_task_internal(
                                 Some(a) => a,
                                 None => {
                                     let (formatted_error, _) = format_agent_error(&error_str);
-                                    return Err(format!("session/prompt failed: {}", formatted_error));
+                                    return Err(format!(
+                                        "session/prompt failed: {}",
+                                        formatted_error
+                                    ));
                                 }
                             };
 
@@ -6703,16 +6714,16 @@ pub(crate) async fn start_task_internal(
                                         Some("cli") | Some("oauth")
                                     ));
 
-                            let env = match build_env(&agent.required_env, &overrides, allow_missing)
-                            {
-                                Ok(e) => e,
-                                Err(e) => {
-                                    return Err(format!(
-                                        "Reconnection failed - auth error: {}",
-                                        e
-                                    ));
-                                }
-                            };
+                            let env =
+                                match build_env(&agent.required_env, &overrides, allow_missing) {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        return Err(format!(
+                                            "Reconnection failed - auth error: {}",
+                                            e
+                                        ));
+                                    }
+                                };
 
                             // Reconnect with context restoration
                             let claude_runtime = claude_runtime_from_task(&task, &settings);
@@ -7039,7 +7050,15 @@ pub(crate) async fn stop_task_internal(
             SessionBackend::Acp { client, .. } => {
                 let _ = client.shutdown().await;
             }
-            SessionBackend::ClaudeTeams { agent_name, .. } => {
+            SessionBackend::ClaudeTeams {
+                team_name,
+                agent_name,
+                pid,
+            } => {
+                println!(
+                    "[Harness] stop_task (claude teams): team={} agent={} pid={}",
+                    team_name, agent_name, pid
+                );
                 let controller = {
                     let slot = state.claude_teams_controller.lock().await;
                     slot.as_ref().cloned()
@@ -7875,7 +7894,15 @@ async fn restart_all_agents(
             SessionBackend::Acp { client, .. } => {
                 let _ = client.shutdown().await;
             }
-            SessionBackend::ClaudeTeams { agent_name, .. } => {
+            SessionBackend::ClaudeTeams {
+                team_name,
+                agent_name,
+                pid,
+            } => {
+                println!(
+                    "[Harness] restart_all_agents (claude teams): team={} agent={} pid={}",
+                    team_name, agent_name, pid
+                );
                 let controller = {
                     let slot = state.claude_teams_controller.lock().await;
                     slot.as_ref().cloned()
@@ -10648,7 +10675,15 @@ pub(crate) async fn delete_task_internal(
             SessionBackend::Acp { client, .. } => {
                 let _ = client.shutdown().await;
             }
-            SessionBackend::ClaudeTeams { agent_name, .. } => {
+            SessionBackend::ClaudeTeams {
+                team_name,
+                agent_name,
+                pid,
+            } => {
+                println!(
+                    "[Harness] cleanup_session (claude teams): team={} agent={} pid={}",
+                    team_name, agent_name, pid
+                );
                 let controller = {
                     let slot = state.claude_teams_controller.lock().await;
                     slot.as_ref().cloned()
@@ -11162,7 +11197,9 @@ mod claude_agent_name_tests {
         );
         assert!(name.starts_with("refactor-foobar-baz-qux-v2-"));
         assert!(!name.contains("--"));
-        assert!(name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'));
+        assert!(name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'));
     }
 
     #[test]
@@ -12667,7 +12704,15 @@ async fn send_chat_message_once_internal(
     }
 
     let response: SessionPromptResult = match backend.clone() {
-        SessionBackend::ClaudeTeams { agent_name, .. } => {
+        SessionBackend::ClaudeTeams {
+            team_name,
+            agent_name,
+            pid,
+        } => {
+            println!(
+                "[Harness] session_prompt (claude teams): team={} agent={} pid={}",
+                team_name, agent_name, pid
+            );
             if !images.is_empty() {
                 let _ = stream_tx.send(StreamingUpdate::Status {
                     message:
@@ -12815,12 +12860,8 @@ async fn send_chat_message_once_internal(
                             };
 
                             if let Some(task) = task {
-                                let active_account_id = state
-                                    .settings
-                                    .lock()
-                                    .await
-                                    .active_codex_account_id
-                                    .clone();
+                                let active_account_id =
+                                    state.settings.lock().await.active_codex_account_id.clone();
                                 let current_account_id = task
                                     .codex_account_id
                                     .as_deref()
@@ -12858,7 +12899,10 @@ async fn send_chat_message_once_internal(
                                                     (&task_id, &formatted_error, "error"),
                                                 );
                                             }
-                                            return Err(format!("Agent error: {}", formatted_error));
+                                            return Err(format!(
+                                                "Agent error: {}",
+                                                formatted_error
+                                            ));
                                         }
                                     };
                                     let cwd = resolve_task_cwd(&task)?;
@@ -12874,10 +12918,8 @@ async fn send_chat_message_once_internal(
                                     ) {
                                         Ok(e) => e,
                                         Err(e) => {
-                                            let error_msg = format!(
-                                                "Reconnection failed - auth error: {}",
-                                                e
-                                            );
+                                            let error_msg =
+                                                format!("Reconnection failed - auth error: {}", e);
                                             if let Some(window) =
                                                 app.get_webview_window(&window_label)
                                             {
@@ -12890,8 +12932,7 @@ async fn send_chat_message_once_internal(
                                         }
                                     };
 
-                                    let claude_runtime =
-                                        claude_runtime_from_task(&task, &settings);
+                                    let claude_runtime = claude_runtime_from_task(&task, &settings);
                                     let (new_client, new_session_id, _used_session_load) =
                                         reconnect_session_with_context(
                                             agent,
@@ -12919,8 +12960,7 @@ async fn send_chat_message_once_internal(
                                             .map_err(|e| e.to_string())?;
                                         if let Some(last) = messages.last() {
                                             if last.message_type == "user_message"
-                                                && last.content.as_deref()
-                                                    == Some(message.as_str())
+                                                && last.content.as_deref() == Some(message.as_str())
                                             {
                                                 messages.pop();
                                             }
@@ -13038,21 +13078,22 @@ async fn send_chat_message_once_internal(
                                         Some("cli") | Some("oauth")
                                     ));
 
-                            let env = match build_env(&agent.required_env, &overrides, allow_missing)
-                            {
-                                Ok(e) => e,
-                                Err(e) => {
-                                    let error_msg =
-                                        format!("Reconnection failed - auth error: {}", e);
-                                    if let Some(window) = app.get_webview_window(&window_label) {
-                                        let _ = window.emit(
-                                            "ChatLogStatus",
-                                            (&task_id, &error_msg, "error"),
-                                        );
+                            let env =
+                                match build_env(&agent.required_env, &overrides, allow_missing) {
+                                    Ok(e) => e,
+                                    Err(e) => {
+                                        let error_msg =
+                                            format!("Reconnection failed - auth error: {}", e);
+                                        if let Some(window) = app.get_webview_window(&window_label)
+                                        {
+                                            let _ = window.emit(
+                                                "ChatLogStatus",
+                                                (&task_id, &error_msg, "error"),
+                                            );
+                                        }
+                                        return Err(error_msg);
                                     }
-                                    return Err(error_msg);
-                                }
-                            };
+                                };
 
                             // Reconnect with context restoration
                             let claude_runtime = claude_runtime_from_task(&task, &settings);
@@ -13112,10 +13153,8 @@ async fn send_chat_message_once_internal(
                                         formatted_error, reconnect_err
                                     );
                                     if let Some(window) = app.get_webview_window(&window_label) {
-                                        let _ = window.emit(
-                                            "ChatLogStatus",
-                                            (&task_id, &error_msg, "error"),
-                                        );
+                                        let _ = window
+                                            .emit("ChatLogStatus", (&task_id, &error_msg, "error"));
                                     }
                                     return Err(error_msg);
                                 }
@@ -14404,8 +14443,10 @@ fn main() {
             {
                 let state = app.state::<AppState>().inner().clone();
                 let settings = state.settings.blocking_lock().clone();
-                let autostart =
-                    std::env::var("PHANTOM_CLAUDE_CTRL_AUTOSTART").ok().as_deref() == Some("1");
+                let autostart = std::env::var("PHANTOM_CLAUDE_CTRL_AUTOSTART")
+                    .ok()
+                    .as_deref()
+                    == Some("1");
                 if autostart || claude_use_teammate_controller(&settings) {
                     if let Some(token) = settings.claude_controller_token.clone() {
                         let controller_slot = state.claude_teams_controller.clone();

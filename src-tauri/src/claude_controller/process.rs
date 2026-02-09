@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use std::io::Read;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use std::io::Read;
 
 #[derive(Debug, Clone)]
 pub struct SpawnAgentOptions {
@@ -24,7 +24,6 @@ struct AgentProc {
     #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send>,
-    pid: i32,
 }
 
 #[derive(Clone, Default)]
@@ -36,11 +35,6 @@ impl ProcessManager {
     pub fn is_running(&self, agent_name: &str) -> bool {
         let map = self.inner.lock().unwrap();
         map.contains_key(agent_name)
-    }
-
-    pub fn pid(&self, agent_name: &str) -> Option<i32> {
-        let map = self.inner.lock().unwrap();
-        map.get(agent_name).map(|p| p.pid)
     }
 
     pub fn spawn(&self, opts: SpawnAgentOptions) -> Result<i32, String> {
@@ -138,7 +132,6 @@ impl ProcessManager {
         let proc = AgentProc {
             master: pair.master,
             child,
-            pid,
         };
 
         let mut map = self.inner.lock().unwrap();

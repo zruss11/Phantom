@@ -1,6 +1,10 @@
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 use super::paths;
 
@@ -42,6 +46,46 @@ fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
     fs::write(&tmp, bytes).map_err(|e| format!("write tmp: {e}"))?;
     fs::rename(&tmp, path).map_err(|e| format!("rename tmp: {e}"))?;
     Ok(())
+}
+
+const LOCK_RETRIES: usize = 5;
+
+fn lock_with_backoff(file: &std::fs::File) -> std::io::Result<()> {
+    let mut delay_ms = 50u64;
+    for i in 0..LOCK_RETRIES {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if i == LOCK_RETRIES - 1 {
+                    return Err(e);
+                }
+                thread::sleep(Duration::from_millis(delay_ms));
+                delay_ms = (delay_ms * 2).min(500);
+            }
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        "lock retry loop exhausted",
+    ))
+}
+
+fn lock_team_config(team_name: &str) -> Result<std::fs::File, String> {
+    let lock_path = paths::team_config_lock_path(team_name)
+        .ok_or_else(|| "home dir not found (or invalid name)".to_string())?;
+    if let Some(parent) = lock_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir lock dir: {e}"))?;
+    }
+    if !lock_path.exists() {
+        fs::write(&lock_path, b"").map_err(|e| format!("init lock file: {e}"))?;
+    }
+    let f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("open lock: {e}"))?;
+    lock_with_backoff(&f).map_err(|e| format!("lock config: {e}"))?;
+    Ok(f)
 }
 
 pub fn ensure_team(team_name: &str, cwd: &str, lead_session_id: &str) -> Result<(), String> {
@@ -91,16 +135,23 @@ pub fn ensure_team(team_name: &str, cwd: &str, lead_session_id: &str) -> Result<
 }
 
 pub fn read_config(team_name: &str) -> Result<TeamConfig, String> {
-    let path = paths::team_config_path(team_name).ok_or_else(|| "home dir not found".to_string())?;
+    let lock = lock_team_config(team_name)?;
+    let path =
+        paths::team_config_path(team_name).ok_or_else(|| "home dir not found".to_string())?;
     let raw = fs::read_to_string(&path).map_err(|e| format!("read config: {e}"))?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse config: {e}"))
+    let out = serde_json::from_str(&raw).map_err(|e| format!("parse config: {e}"));
+    lock.unlock().ok();
+    out
 }
 
 pub fn write_config(team_name: &str, config: &TeamConfig) -> Result<(), String> {
-    let path = paths::team_config_path(team_name).ok_or_else(|| "home dir not found".to_string())?;
+    let lock = lock_team_config(team_name)?;
+    let path =
+        paths::team_config_path(team_name).ok_or_else(|| "home dir not found".to_string())?;
     let bytes = serde_json::to_vec_pretty(config).map_err(|e| format!("serialize: {e}"))?;
-    write_json_atomic(&path, &bytes)?;
-    Ok(())
+    let out = write_json_atomic(&path, &bytes);
+    lock.unlock().ok();
+    out
 }
 
 pub fn add_member(team_name: &str, member: TeamMember) -> Result<(), String> {
@@ -115,4 +166,3 @@ pub fn remove_member(team_name: &str, name: &str) -> Result<(), String> {
     config.members.retain(|m| m.name != name);
     write_config(team_name, &config)
 }
-
