@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex};
+use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, RwLock as TokioRwLock};
 use tokio_util::sync::CancellationToken;
 
 /// Token usage data from a Claude CLI session
@@ -86,6 +86,8 @@ struct CodexAppServerClient {
     next_id: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Ring buffer of recent stderr lines for error diagnostics
     stderr_buffer: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Track the latest active turn id per thread so we can best-effort interrupt.
+    active_turn_ids: std::sync::Arc<TokioRwLock<HashMap<String, String>>>,
 }
 
 /// Minimal JSON-RPC transport for ACP-based agents (e.g. Claude Code ACP).
@@ -316,6 +318,7 @@ impl CodexAppServerClient {
             pending,
             next_id,
             stderr_buffer,
+            active_turn_ids: std::sync::Arc::new(TokioRwLock::new(HashMap::new())),
         })
     }
 
@@ -457,6 +460,19 @@ impl CodexAppServerClient {
         Ok(thread_id.to_string())
     }
 
+    async fn turn_interrupt_active(&self, thread_id: &str) -> Result<bool> {
+        let turn_id_opt = { self.active_turn_ids.read().await.get(thread_id).cloned() };
+        let Some(turn_id) = turn_id_opt else {
+            return Ok(false);
+        };
+        let params = json!({
+            "threadId": thread_id,
+            "turnId": turn_id,
+        });
+        let _ = self.request("turn/interrupt", params).await?;
+        Ok(true)
+    }
+
     async fn turn_start_streaming<F>(
         &self,
         thread_id: &str,
@@ -518,7 +534,18 @@ impl CodexAppServerClient {
             "[Codex] turn/start params: {}",
             serde_json::to_string_pretty(&params).unwrap_or_default()
         );
-        let _ = self.request("turn/start", params).await?;
+        let resp = self.request("turn/start", params).await?;
+        if let Some(turn_id) = resp
+            .get("result")
+            .and_then(|r| r.get("turn"))
+            .and_then(|t| t.get("id"))
+            .and_then(|x| x.as_str())
+        {
+            self.active_turn_ids
+                .write()
+                .await
+                .insert(thread_id.to_string(), turn_id.to_string());
+        }
 
         let mut full = String::new();
         let mut captured_usage: Option<TokenUsageInfo> = None;
@@ -753,6 +780,24 @@ impl CodexAppServerClient {
                 | "codex/event/task_started"
                 | "codex/event/user_message"
                 | "account/rateLimits/updated" => {
+                    if method == "turn/started" {
+                        if let Some(payload) = next.get("params") {
+                            let th = payload
+                                .get("threadId")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(thread_id);
+                            if let Some(turn_id) = payload
+                                .get("turn")
+                                .and_then(|t| t.get("id"))
+                                .and_then(|v| v.as_str())
+                            {
+                                self.active_turn_ids
+                                    .write()
+                                    .await
+                                    .insert(th.to_string(), turn_id.to_string());
+                            }
+                        }
+                    }
                     // No UI action needed for these notifications
                 }
                 "codex/event/context_compacted" | "thread/compacted" => {
@@ -849,6 +894,7 @@ impl CodexAppServerClient {
                     }
                 }
                 "turn/completed" => {
+                    self.active_turn_ids.write().await.remove(thread_id);
                     break;
                 }
                 _ => {
@@ -1344,6 +1390,16 @@ impl AgentProcessClient {
     /// Check if this client is connected to a Codex app-server
     pub fn is_codex(&self) -> bool {
         self.codex_app_server.is_some()
+    }
+
+    /// Best-effort interrupt of the currently active Codex turn for this session/thread.
+    ///
+    /// Returns `Ok(false)` if no active turn id is known.
+    pub async fn codex_turn_interrupt_active(&self, session_id: &str) -> Result<bool> {
+        if let Some(codex) = &self.codex_app_server {
+            return codex.turn_interrupt_active(session_id).await;
+        }
+        Ok(false)
     }
 
     /// Fetch available models from Codex app-server (only works for Codex agents)

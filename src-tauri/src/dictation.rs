@@ -344,7 +344,8 @@ impl DictationManager {
                     }
 
                     let active = local_asr_model::read_active_local_model();
-                    let is_whisper = matches!(active.engine, local_asr_model::LocalAsrEngine::Whisper);
+                    let is_whisper =
+                        matches!(active.engine, local_asr_model::LocalAsrEngine::Whisper);
                     let is_parakeet =
                         matches!(active.engine, local_asr_model::LocalAsrEngine::Parakeet);
                     if !is_whisper && !is_parakeet {
@@ -391,8 +392,8 @@ impl DictationManager {
                         }
                     } else if is_parakeet {
                         // Load Parakeet engine once per session (not shared yet).
-                        let needs_reload =
-                            parakeet_engine.is_none() || parakeet_model_id.as_deref() != Some(&active.model_id);
+                        let needs_reload = parakeet_engine.is_none()
+                            || parakeet_model_id.as_deref() != Some(&active.model_id);
                         if needs_reload {
                             if !parakeet_model::is_model_downloaded(&active.model_id) {
                                 continue;
@@ -405,7 +406,9 @@ impl DictationManager {
                             if let Err(e) =
                                 engine.load_model_with_params(&dir, ParakeetModelParams::int8())
                             {
-                                tracing::warn!("Failed to load Parakeet model for live preview: {e}");
+                                tracing::warn!(
+                                    "Failed to load Parakeet model for live preview: {e}"
+                                );
                                 continue;
                             }
                             parakeet_engine = Some(Arc::new(StdMutex::new(engine)));
@@ -564,7 +567,9 @@ fn cleanup_dictation_transcript(settings: &Settings, transcript: String) -> Stri
     if !settings.notes_dictation_cleanup_enabled.unwrap_or(false) {
         return transcript;
     }
-    let remove_like = settings.notes_dictation_cleanup_remove_like.unwrap_or(false);
+    let remove_like = settings
+        .notes_dictation_cleanup_remove_like
+        .unwrap_or(false);
     cleanup_fillers(&transcript, remove_like)
 }
 
@@ -1188,8 +1193,14 @@ mod tests {
 
     #[test]
     fn cleanup_like_is_opt_in() {
-        assert_eq!(cleanup_fillers("It was like really good", false), "It was like really good");
-        assert_eq!(cleanup_fillers("It was like really good", true), "It was really good");
+        assert_eq!(
+            cleanup_fillers("It was like really good", false),
+            "It was like really good"
+        );
+        assert_eq!(
+            cleanup_fillers("It was like really good", true),
+            "It was really good"
+        );
     }
 }
 // =============================================================================

@@ -41,6 +41,7 @@ pub struct MeetingSessionManager {
 }
 
 struct StopTeardown {
+    session_id: String,
     capture_handle: Option<audio_capture::AudioCaptureHandle>,
     inference_thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -319,12 +320,15 @@ impl MeetingSessionManager {
             .take()
             .ok_or("No active meeting session to stop")?;
 
+        let session_id = session.id.clone();
+
         // Signal the inference thread to stop.
         session.stop_flag.store(true, Ordering::Relaxed);
 
         // Extract blocking teardown so we can release the meeting_manager mutex before stopping
         // capture and joining the inference thread.
         let teardown = StopTeardown {
+            session_id,
             capture_handle: session.capture_handle.take(),
             inference_thread: session.inference_thread.take(),
         };
@@ -466,6 +470,7 @@ fn process_audio_chunk_whisper(
         .map_err(|e| format!("Whisper full() failed: {}", e))?;
 
     let num_segments = state.full_n_segments();
+    let mut wrote_segment = false;
 
     for i in 0..num_segments {
         let segment = match state.get_segment(i) {
@@ -518,6 +523,22 @@ fn process_audio_chunk_whisper(
                 "timestamp": (abs_start as f64) / 1000.0,
             }),
         );
+
+        wrote_segment = true;
+    }
+
+    if wrote_segment {
+        let app_handle = app.clone();
+        let sid = session_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            crate::semantic_indexer::schedule_index_entity_with_delay(
+                &app_handle,
+                crate::semantic_search::ENTITY_TYPE_NOTE,
+                &sid,
+                Duration::from_secs(5),
+            )
+            .await;
+        });
     }
 
     Ok(())
@@ -546,6 +567,7 @@ fn process_audio_chunk_parakeet(
         return Ok(());
     };
 
+    let mut wrote_segment = false;
     for seg in segments {
         let text = seg.text.trim().to_string();
         if text.is_empty() {
@@ -582,6 +604,22 @@ fn process_audio_chunk_parakeet(
                 "timestamp": (abs_start as f64) / 1000.0,
             }),
         );
+
+        wrote_segment = true;
+    }
+
+    if wrote_segment {
+        let app_handle = app.clone();
+        let sid = session_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            crate::semantic_indexer::schedule_index_entity_with_delay(
+                &app_handle,
+                crate::semantic_search::ENTITY_TYPE_NOTE,
+                &sid,
+                Duration::from_secs(5),
+            )
+            .await;
+        });
     }
 
     Ok(())
@@ -637,13 +675,14 @@ pub async fn meeting_resume(app: AppHandle, state: State<'_, AppState>) -> Resul
 pub async fn meeting_stop(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let db = state.db.clone();
     let meeting_manager = state.meeting_manager.clone();
+    let app_for_stop = app.clone();
 
-    tauri::async_runtime::spawn_blocking(move || {
+    let session_id = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let teardown = {
             let mut mgr = meeting_manager
                 .lock()
                 .map_err(|e| format!("Lock error: {}", e))?;
-            mgr.stop(db, &app)?
+            mgr.stop(db, &app_for_stop)?
         };
 
         // Blocking teardown outside the meeting_manager mutex.
@@ -654,10 +693,19 @@ pub async fn meeting_stop(app: AppHandle, state: State<'_, AppState>) -> Result<
             let _ = thread.join();
         }
 
-        Ok(())
+        Ok(teardown.session_id)
     })
     .await
-    .map_err(|e| format!("Meeting task join error: {}", e))?
+    .map_err(|e| format!("Meeting task join error: {}", e))??;
+
+    crate::semantic_indexer::schedule_index_entity(
+        &app,
+        crate::semantic_search::ENTITY_TYPE_NOTE,
+        &session_id,
+    )
+    .await;
+
+    Ok(())
 }
 
 #[tauri::command]

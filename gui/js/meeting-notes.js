@@ -18,11 +18,17 @@
     textNoteLastSavedText: '',
     sessions: [],
     selectedSessionId: null,
+    pendingOpenSessionId: null,
     visibilityObserver: null,
 
     // New for 3-panel layout
     currentView: 'default',
     searchQuery: '',
+    // Notes sidebar semantic search (best-effort; falls back to title substring match).
+    semanticSearchQuery: '',
+    semanticSearchOrder: null, // Array of session IDs in rank order
+    semanticSearchReqId: 0,
+    semanticSearchTimer: null,
     activeFilter: 'mine',
     folders: [],
     selectedFolderId: null,
@@ -63,6 +69,7 @@
     chatTaskId: null,
     chatMessages: [],
     chatSessionActive: false,
+    chatGenerating: false,
     chatContextSent: false,
     chatStreamingEl: null,
     chatStreamingText: '',
@@ -1745,11 +1752,16 @@
     container.innerHTML = '';
 
     var filtered = filterSessionsList(sessions);
+    var hasQuery = !!((state.searchQuery || '').toString().trim());
 
     if (!filtered.length) {
       var empty = document.createElement('div');
       empty.className = 'notes-empty-sessions';
-      empty.innerHTML = '<i class="fal fa-sticky-note"></i><p>No notes yet</p><div class="notes-empty-sub">Click + to create a text note, or start recording.</div>';
+      if (hasQuery) {
+        empty.innerHTML = '<i class="fal fa-search"></i><p>No results</p><div class="notes-empty-sub">Try a different search.</div>';
+      } else {
+        empty.innerHTML = '<i class="fal fa-sticky-note"></i><p>No notes yet</p><div class="notes-empty-sub">Click + to create a text note, or start recording.</div>';
+      }
       container.appendChild(empty);
       return;
     }
@@ -2019,28 +2031,102 @@
 
   // ─── Search & Folder Filtering ───
   function filterSessionsList(sessions) {
-    var query = state.searchQuery.toLowerCase();
+    var qRaw = (state.searchQuery || '').toString();
+    var qTrim = qRaw.trim();
+    var query = qTrim.toLowerCase();
     var folderId = state.selectedFolderId;
 
-    return sessions.filter(function (s) {
-      // Search filter
-      if (query) {
+    var list = sessions;
+
+    // Search filter (semantic-first when available)
+    if (query && state.semanticSearchOrder && state.semanticSearchQuery === qTrim) {
+      var byId = {};
+      list.forEach(function (s) { byId[s.id] = s; });
+      var ordered = [];
+      state.semanticSearchOrder.forEach(function (id) {
+        var s = byId[id];
+        if (s) ordered.push(s);
+      });
+      list = ordered;
+    } else if (query) {
+      list = list.filter(function (s) {
         var title = (s.title || '').toLowerCase();
         if (title.indexOf(query) === -1) return false;
-      }
-      // Folder filter
-      if (folderId) {
+        return true;
+      });
+    }
+
+    // Folder filter
+    if (folderId) {
+      list = list.filter(function (s) {
         var mapped = state.sessionFolderMap[s.id];
         if (mapped !== folderId) return false;
+        return true;
+      });
+    }
+
+    return list;
+  }
+
+  function clearSemanticSearch() {
+    state.semanticSearchQuery = '';
+    state.semanticSearchOrder = null;
+  }
+
+  function scheduleSemanticNotesSearch() {
+    if (state.semanticSearchTimer) {
+      clearTimeout(state.semanticSearchTimer);
+      state.semanticSearchTimer = null;
+    }
+
+    var q = (state.searchQuery || '').toString().trim();
+    if (!q) {
+      clearSemanticSearch();
+      return;
+    }
+
+    // Debounce to avoid hammering the backend while the user types.
+    state.semanticSearchTimer = setTimeout(function () {
+      runSemanticNotesSearch(q);
+    }, 180);
+  }
+
+  async function runSemanticNotesSearch(query) {
+    if (!ipcRenderer) return;
+
+    var reqId = ++state.semanticSearchReqId;
+    try {
+      var results = await ipcRenderer.invoke('semantic_search', {
+        req: { query: query, types: ['note'], limit: 80, exact: false }
+      });
+      if (reqId !== state.semanticSearchReqId) return;
+
+      var order = [];
+      if (Array.isArray(results)) {
+        results.forEach(function (r) {
+          if (!r) return;
+          if (r.entityType !== 'note') return;
+          if (!r.entityId) return;
+          order.push(r.entityId);
+        });
       }
-      return true;
-    });
+
+      state.semanticSearchQuery = query;
+      state.semanticSearchOrder = order;
+      renderDateGroupedSessions(state.sessions);
+    } catch (err) {
+      if (reqId !== state.semanticSearchReqId) return;
+      // Fall back to local title filtering when semantic search isn't available.
+      clearSemanticSearch();
+      renderDateGroupedSessions(state.sessions);
+    }
   }
 
   function onSearchInput() {
     var input = $('notesSearchInput');
     state.searchQuery = input ? input.value : '';
     renderDateGroupedSessions(state.sessions);
+    scheduleSemanticNotesSearch();
   }
 
   // ─── Cmd+K Search Palette ───
@@ -3115,13 +3201,14 @@
       }
 
       // Show a placeholder assistant bubble immediately for responsiveness.
-      ensureStreamingAssistantEl();
+	      ensureStreamingAssistantEl();
 
-      ipcRenderer.send('StartPendingSession', state.chatTaskId);
-    } catch (err) {
-      console.error('[MeetingNotes] template create_agent_session failed:', err);
-      appendChatMessage('assistant', 'Unable to start template. Please try again.');
-    }
+	      ipcRenderer.send('StartPendingSession', state.chatTaskId);
+	      state.chatGenerating = true;
+	    } catch (err) {
+	      console.error('[MeetingNotes] template create_agent_session failed:', err);
+	      appendChatMessage('assistant', 'Unable to start template. Please try again.');
+	    }
   }
 
   async function sendChatMessage(text) {
@@ -3167,8 +3254,8 @@
 
     // If we don't have a task yet, create one using the first message as the
     // initial prompt, then start it (same as the rest of the app's "pending prompt" flow).
-    if (!state.chatTaskId) {
-      try {
+	    if (!state.chatTaskId) {
+	      try {
         var currentThread = (state.chatThreads || []).find(function (x) { return x.id === state.chatThreadId; }) || null;
         var agentIdForThread = currentThread ? currentThread.agentId : (state.chatAgentId || 'claude-code');
         var createdTaskId = await createNotesChatTask(message, agentIdForThread);
@@ -3185,18 +3272,20 @@
             : (text.length > 48 ? (text.slice(0, 48) + '…') : text),
         });
 
-        // Kick off the pending prompt immediately.
-        ipcRenderer.send('StartPendingSession', state.chatTaskId);
-        return;
-      } catch (err) {
+	        // Kick off the pending prompt immediately.
+	        ipcRenderer.send('StartPendingSession', state.chatTaskId);
+	        state.chatGenerating = true;
+	        return;
+	      } catch (err) {
         console.error('[MeetingNotes] create_agent_session for notes chat failed:', err);
         appendChatMessage('assistant', 'Unable to connect to agent. Please try again.');
         return;
       }
-    }
+	    }
 
-    ipcRenderer.send('SendChatMessage', state.chatTaskId, message);
-  }
+	    ipcRenderer.send('SendChatMessage', state.chatTaskId, message);
+	    state.chatGenerating = true;
+	  }
 
   async function saveSessionTitle(sessionId, title) {
     if (!ipcRenderer || !sessionId) return;
@@ -3328,7 +3417,7 @@
     }
   }
 
-  function appendChatMessage(role, content) {
+  function appendChatMessage(role, content, opts) {
     var container = $('notesChatMessages');
     if (!container) return;
 
@@ -3339,8 +3428,21 @@
     var msg = document.createElement('div');
     msg.className = 'notes-chat-msg ' + role;
 
+    var clientMessageId = opts && opts.clientMessageId ? opts.clientMessageId : null;
+    var disposition = opts && opts.disposition ? opts.disposition : null; // 'queue' | 'steer'
+    if (clientMessageId) msg.dataset.clientMessageId = clientMessageId;
+    if (disposition) {
+      msg.dataset.disposition = disposition;
+      msg.classList.add('queued-pill');
+    }
+
     if (role === 'assistant' && window.marked) {
       msg.innerHTML = window.marked.parse(content);
+    } else if (role === 'user' && disposition) {
+      var label = disposition === 'steer' ? 'Steer' : 'Queued';
+      msg.innerHTML =
+        '<div class="notes-chat-pill-label">' + escapeHtml(label) + '</div>' +
+        '<div class="notes-chat-pill-body">' + escapeHtml(content || '').replace(/\r?\n/g, '<br>') + '</div>';
     } else {
       msg.textContent = content;
     }
@@ -3593,8 +3695,43 @@
     if (!isChat && !isSummary) return;
     if (!message) return;
 
+    function normalizeQueuedPillAfterAck(el, content) {
+      if (!el) return;
+
+      el.classList.remove('queued-pill');
+      el.removeAttribute('data-disposition');
+      el.removeAttribute('data-client-message-id');
+
+      // Replace pill markup with the same DOM shape as a normal user message.
+      // This avoids leaving behind `.notes-chat-pill-body` wrappers after ack.
+      var nextText = (content !== undefined && content !== null) ? String(content) : '';
+      if (!nextText) {
+        var body = el.querySelector('.notes-chat-pill-body');
+        if (body) nextText = body.textContent || '';
+      }
+
+      // Clearing and re-setting `textContent` ensures we drop any lingering pill nodes.
+      el.textContent = nextText;
+    }
+
     // We already render user messages locally in the sidebar UI.
-    if (message.message_type === 'user_message') return;
+    // Exception: queued/steer sends emit a correlated user_message so we can flip the queued pill to sent.
+    if (message.message_type === 'user_message') {
+      if (isChat) {
+        var cmid = message.clientMessageId || message.client_message_id || null;
+        if (cmid) {
+          var container = $('notesChatMessages');
+          if (container) {
+            var sel = '[data-client-message-id="' + cmid.replace(/"/g, '\\"') + '"]';
+            var el = container.querySelector(sel);
+            if (el) {
+              normalizeQueuedPillAfterAck(el, message.content);
+            }
+          }
+        }
+      }
+      return;
+    }
 
     // Replace any in-progress streaming bubble with the final message.
     if (message.message_type === 'assistant_message') {
@@ -3649,6 +3786,13 @@
     var isChat = taskId === state.chatTaskId;
     var isSummary = taskId === state.summaryTaskId;
     if (!isChat && !isSummary) return;
+
+    if (isChat) {
+      if (statusState === 'running') state.chatGenerating = true;
+      if (statusState === 'idle' || statusState === 'completed' || statusState === 'error') {
+        state.chatGenerating = false;
+      }
+    }
 
     if (statusState === 'idle' || statusState === 'completed' || statusState === 'error') {
       if (isChat) {
@@ -4115,6 +4259,8 @@
     var paletteOverlay = $('notesSearchPalette');
     if (paletteOverlay) {
       paletteOverlay.addEventListener('click', function (e) {
+        // Global Cmd+K palette uses the same DOM ids; only act when the notes-local palette is open.
+        if (!state.paletteOpen) return;
         if (e.target === paletteOverlay) closeSearchPalette();
       });
     }
@@ -4123,6 +4269,8 @@
     var paletteTimeout = null;
     if (paletteInput) {
       paletteInput.addEventListener('input', function () {
+        // Global Cmd+K palette owns this input; ignore unless the notes-local palette is open.
+        if (!state.paletteOpen) return;
         clearTimeout(paletteTimeout);
         paletteTimeout = setTimeout(function () {
           state.paletteQuery = paletteInput.value || '';
@@ -4166,14 +4314,38 @@
     var chatInput = $('notesChatInput');
     var chatSendBtn = $('notesChatSendBtn');
 
-    if (chatInput) {
-      chatInput.addEventListener('keydown', function (e) {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault();
-          var text = chatInput.value.trim();
-          if (text) sendChatMessage(text);
-        }
-      });
+	    if (chatInput) {
+	      chatInput.addEventListener('keydown', function (e) {
+	        var isEnter = e.key === 'Enter' && !e.shiftKey;
+	        var isTab = e.key === 'Tab' && !e.shiftKey;
+	        if (!isEnter && !isTab) return;
+
+	        var text = chatInput.value.trim();
+	        var steerEnabled = !!(state.fullSettings && state.fullSettings.codexFeatureSteer);
+	        var currentThread = (state.chatThreads || []).find(function (x) { return x.id === state.chatThreadId; }) || null;
+	        var agentIdForThread = currentThread ? currentThread.agentId : (state.chatAgentId || 'claude-code');
+	        var canSteerOrQueue =
+	          steerEnabled &&
+	          agentIdForThread === 'codex' &&
+	          state.chatGenerating &&
+	          !!state.chatTaskId;
+
+	        if (canSteerOrQueue && text) {
+	          // Enter = steer, Tab = queue (Codex steer mode)
+	          e.preventDefault();
+	          var disposition = isEnter ? 'steer' : 'queue';
+	          var clientMessageId = uuid();
+	          appendChatMessage('user', text, { clientMessageId: clientMessageId, disposition: disposition });
+	          clearChatInput();
+	          ipcRenderer.send('EnqueueChatMessage', state.chatTaskId, text, clientMessageId, disposition);
+	          return;
+	        }
+
+	        if (isEnter) {
+	          e.preventDefault();
+	          if (text) sendChatMessage(text);
+	        }
+	      });
 
       // Auto-resize textarea
       chatInput.addEventListener('input', function () {
@@ -4216,6 +4388,19 @@
       init();
     });
 
+    // Open a note session from elsewhere in the app (e.g. global Cmd+K palette).
+    window.addEventListener('PhantomOpenNote', function (event) {
+      var sessionId = event && event.detail && event.detail.sessionId;
+      if (!sessionId) return;
+      state.pendingOpenSessionId = sessionId;
+      if (!isNotesVisible()) return;
+      init().then(function () {
+        if (state.pendingOpenSessionId !== sessionId) return;
+        state.pendingOpenSessionId = null;
+        switchView('transcript', sessionId);
+      }).catch(function () {});
+    });
+
     // Keyboard shortcut: Cmd+K for search focus
     document.addEventListener('keydown', function (e) {
       if (!isNotesVisible()) return;
@@ -4256,13 +4441,6 @@
           return;
         }
       }
-
-      // Cmd/Ctrl+K opens palette.
-      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
-        e.preventDefault();
-        openSearchPalette();
-        return;
-      }
     });
 
     watchNotesVisibility();
@@ -4274,7 +4452,12 @@
 
     state.visibilityObserver = new MutationObserver(function () {
       if (!page.hasAttribute('hidden')) {
-        init();
+        init().then(function () {
+          if (!state.pendingOpenSessionId) return;
+          var sessionId = state.pendingOpenSessionId;
+          state.pendingOpenSessionId = null;
+          switchView('transcript', sessionId);
+        }).catch(function () {});
         startUpcomingRefresh();
       } else {
         stopUpcomingRefresh();
@@ -4287,7 +4470,12 @@
     });
 
     if (!page.hasAttribute('hidden')) {
-      init();
+      init().then(function () {
+        if (!state.pendingOpenSessionId) return;
+        var sessionId = state.pendingOpenSessionId;
+        state.pendingOpenSessionId = null;
+        switchView('transcript', sessionId);
+      }).catch(function () {});
       startUpcomingRefresh();
     }
   }

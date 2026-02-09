@@ -9516,6 +9516,25 @@ input:checked + .slider:before {
   border: 1px solid rgba(212, 165, 116, 0.08);
 }
 
+.notes-chat-msg.user.queued-pill {
+  border-style: dashed;
+  border-color: rgba(212, 165, 116, 0.22);
+  background: linear-gradient(135deg, rgba(212, 165, 116, 0.12), rgba(212, 165, 116, 0.06));
+}
+
+.notes-chat-pill-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.75;
+  margin-bottom: 6px;
+  font-weight: 600;
+}
+
+.notes-chat-pill-body {
+  white-space: pre-wrap;
+}
+
 .notes-chat-msg.assistant {
   align-self: flex-start;
   background: rgba(255, 255, 255, 0.04);
@@ -10553,7 +10572,9 @@ input:checked + .slider:before {
   padding: 10px 14px;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
   display: flex;
-  justify-content: flex-end;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
 }
 
 .notes-palette-hint {
@@ -10571,4 +10592,43 @@ input:checked + .slider:before {
   border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: 7px;
   padding: 1px 6px;
+}
+
+.notes-palette-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.notes-palette-status {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  min-height: 14px;
+  white-space: nowrap;
+}
+
+.notes-palette-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+
+.notes-palette-toggle:hover {
+  color: rgba(255, 255, 255, 0.80);
+  border-color: rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.notes-palette-toggle input[type="checkbox"] {
+  accent-color: var(--notes-accent);
+  width: 12px;
+  height: 12px;
 }

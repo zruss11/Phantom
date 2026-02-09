@@ -1903,30 +1903,38 @@
           </div>
         </div>
 
-        <!-- Cmd+K Search Palette -->
-        <div class="notes-palette-overlay" id="notesSearchPalette" hidden>
-          <div class="notes-palette" role="dialog" aria-modal="true" aria-label="Search notes">
-            <div class="notes-palette-top">
-              <i class="fal fa-search notes-palette-icon"></i>
-              <input
-                type="text"
-                id="notesPaletteInput"
-                class="notes-palette-input"
-                placeholder="Search people, folders, companies, or meetings"
-                autocomplete="off"
-                spellcheck="false"
-              >
-              <kbd class="notes-palette-kbd">esc</kbd>
+      </section>
+
+      <!-- Cmd+K Search Palette (global) -->
+      <div class="notes-palette-overlay" id="notesSearchPalette" hidden>
+        <div class="notes-palette" role="dialog" aria-modal="true" aria-label="Search">
+          <div class="notes-palette-top">
+            <i class="fal fa-search notes-palette-icon"></i>
+            <input
+              type="text"
+              id="notesPaletteInput"
+              class="notes-palette-input"
+              placeholder="Search tasks and notes"
+              autocomplete="off"
+              spellcheck="false"
+            >
+            <kbd class="notes-palette-kbd">esc</kbd>
+          </div>
+          <div class="notes-palette-results" id="notesPaletteResults"></div>
+          <div class="notes-palette-footer">
+            <div class="notes-palette-hint">
+              <kbd>↑</kbd><kbd>↓</kbd> Navigate <kbd>↵</kbd> Open
             </div>
-            <div class="notes-palette-results" id="notesPaletteResults"></div>
-            <div class="notes-palette-footer">
-              <div class="notes-palette-hint">
-                <kbd>↑</kbd><kbd>↓</kbd> Navigate <kbd>↵</kbd> Open
-              </div>
+            <div class="notes-palette-controls">
+              <div class="notes-palette-status" id="notesPaletteIndexStatus" aria-live="polite"></div>
+              <label class="notes-palette-toggle" title="Exact (keyword-only, no semantic rerank)">
+                <input type="checkbox" id="notesPaletteExactToggle">
+                <span>Exact</span>
+              </label>
             </div>
           </div>
         </div>
-      </section>
+      </div>
 
       <!--Settings Page-->
       <section

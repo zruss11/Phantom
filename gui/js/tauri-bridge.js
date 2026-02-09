@@ -298,6 +298,26 @@
               });
           }
           break;
+        case 'EnqueueChatMessage':
+          console.log('[Tauri Bridge] EnqueueChatMessage:', args[0], args[1], args[2], args[3]);
+          if (tauriInvoke) {
+            tauriInvoke('enqueue_chat_message', {
+              taskId: args[0],
+              message: args[1],
+              clientMessageId: args[2],
+              disposition: args[3]
+            })
+              .catch(function(err) {
+                console.error('[Tauri Bridge] enqueue_chat_message error:', err);
+                var errText = (err && err.message) ? err.message : ('' + err);
+                // Ensure the user sees a failure (chat log status + main status, if present).
+                emitEvent('ChatLogStatus', null, args[0], 'Error: ' + errText, 'error');
+                if (typeof sendNotification === 'function') {
+                  sendNotification('Failed to enqueue chat message: ' + errText, 'red');
+                }
+              });
+          }
+          break;
         case 'RespondToPermission':
           console.log('[Tauri Bridge] RespondToPermission:', args[0], args[1], args[2]);
           if (tauriInvoke) {

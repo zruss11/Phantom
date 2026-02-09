@@ -86,6 +86,12 @@ fn files_for_model_id(model_id: &str) -> Option<Vec<ParakeetFileSpec>> {
     )
 }
 
+fn estimated_total_bytes_for_model(model_id: &str) -> Option<u64> {
+    let spec = model_catalog().into_iter().find(|m| m.id == model_id)?;
+    // Best-effort: used for UX progress when the server doesn't provide lengths.
+    Some(spec.approx_size_mb as u64 * 1024 * 1024)
+}
+
 pub fn models_dir() -> PathBuf {
     local_asr_model::models_root_dir().join("parakeet")
 }
@@ -275,7 +281,9 @@ async fn download_model_files(
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30 * 60))
+        // Total request timeout (including body). Keep high to avoid aborting slow links,
+        // but still bounded so we don't hang forever on a stalled transfer.
+        .timeout(Duration::from_secs(6 * 60 * 60))
         .build()
         .map_err(|e| format!("Failed to configure download client: {e}"))?;
 
@@ -309,7 +317,20 @@ async fn download_model_files(
         }
     }
 
-    let total_for_pct = total_opt.unwrap_or(0);
+    let estimated_total = estimated_total_bytes_for_model(model_id).unwrap_or(0);
+    let mut total_for_pct = match total_opt {
+        Some(t) if t > 0 => t,
+        _ => estimated_total,
+    };
+    // Ensure denom isn't < numerator (can happen if our estimate is low).
+    if total_for_pct > 0 {
+        total_for_pct = total_for_pct.max(1);
+    }
+    let total_opt_for_status = match total_opt {
+        Some(t) if t > 0 => Some(t),
+        _ if total_for_pct > 0 => Some(total_for_pct),
+        other => other,
+    };
     let mut downloaded_total: u64 = 0;
     let mut last_emit = Instant::now();
 
@@ -354,7 +375,8 @@ async fn download_model_files(
                 last_emit = Instant::now();
 
                 let pct: u8 = if total_for_pct > 0 {
-                    ((downloaded_total as f64 / total_for_pct as f64) * 100.0)
+                    let denom = total_for_pct.max(downloaded_total).max(1);
+                    ((downloaded_total as f64 / denom as f64) * 100.0)
                         .round()
                         .clamp(0.0, 100.0) as u8
                 } else {
@@ -371,7 +393,7 @@ async fn download_model_files(
                     },
                 );
 
-                let st = downloading_status(model_id, downloaded_total, total_opt);
+                let st = downloading_status(model_id, downloaded_total, total_opt_for_status);
                 update_status(app, state, st).await;
             }
         }
@@ -385,6 +407,19 @@ async fn download_model_files(
             .await
             .map_err(|e| format!("Failed to finalize downloaded file: {e}"))?;
     }
+
+    // Best-effort: ensure UI sees completion before we emit the final Ready status.
+    local_asr_model::emit_local_progress(
+        app,
+        &local_asr_model::LocalAsrModelProgress {
+            model_id: model_key(model_id),
+            downloaded: downloaded_total,
+            total: total_for_pct.max(downloaded_total).max(1),
+            progress: 100,
+        },
+    );
+    let st = downloading_status(model_id, downloaded_total, total_opt_for_status);
+    update_status(app, state, st).await;
 
     Ok(dir)
 }
