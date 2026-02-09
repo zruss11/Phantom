@@ -70,7 +70,7 @@
       this.trigger = document.createElement('button');
       this.trigger.type = 'button';
       this.trigger.className = 'custom-dropdown-trigger';
-      this.trigger.innerHTML = '<span class="trigger-text"></span><span class="trigger-chevron">&#x25BC;</span>';
+      this.trigger.innerHTML = '<span class="trigger-text"></span><span class="trigger-badge" aria-hidden="true"></span><span class="trigger-chevron">&#x25BC;</span>';
       this.container.appendChild(this.trigger);
 
       // Create dropdown panel
@@ -324,7 +324,9 @@
 
       this.filteredItems = this.items.filter(function(item) {
         return self.fuzzyMatch(item.name, self.searchQuery) ||
-               (item.description && self.fuzzyMatch(item.description, self.searchQuery));
+               (item.description && self.fuzzyMatch(item.description, self.searchQuery)) ||
+               (item.tooltip && self.fuzzyMatch(item.tooltip, self.searchQuery)) ||
+               (item.badge && self.fuzzyMatch(item.badge, self.searchQuery));
       });
 
       // Sort by match quality (exact prefix match first, then contains, then fuzzy)
@@ -430,11 +432,28 @@
         }
         div.appendChild(nameSpan);
 
+        var metaWrap = document.createElement('span');
+        metaWrap.className = 'item-meta';
+
+        if (item.badge) {
+          var badgeSpan = document.createElement('span');
+          badgeSpan.className = 'item-badge';
+          badgeSpan.textContent = item.badge;
+          if (item.badgeTitle) {
+            badgeSpan.title = item.badgeTitle;
+          }
+          metaWrap.appendChild(badgeSpan);
+        }
+
         if (item.description) {
           var descSpan = document.createElement('span');
           descSpan.className = 'item-description';
           descSpan.textContent = item.description;
-          div.appendChild(descSpan);
+          metaWrap.appendChild(descSpan);
+        }
+
+        if (metaWrap.childNodes.length > 0) {
+          div.appendChild(metaWrap);
         }
 
         // Click to select (use original index for non-searchable, filtered index for searchable)
@@ -451,8 +470,9 @@
         div.addEventListener('mouseenter', function() {
           self.focusedIndex = filteredIndex;
           self.updateFocus();
-          if (item.description) {
-            self.showTooltip(item.description, div);
+          var tip = item.tooltip || item.description;
+          if (tip) {
+            self.showTooltip(tip, div);
           }
         });
 
@@ -498,8 +518,9 @@
       if (this.focusedIndex >= 0 && this.focusedIndex < itemsList.length) {
         var focusedItem = itemsList[this.focusedIndex];
         var focusedEl = items[this.focusedIndex];
-        if (focusedItem && focusedItem.description && focusedEl) {
-          this.showTooltip(focusedItem.description, focusedEl);
+        var tip = focusedItem ? (focusedItem.tooltip || focusedItem.description) : null;
+        if (tip && focusedEl) {
+          this.showTooltip(tip, focusedEl);
         } else {
           this.hideTooltip();
         }
@@ -599,6 +620,7 @@
      */
     updateTriggerText: function() {
       var textEl = this.trigger.querySelector('.trigger-text');
+      var badgeEl = this.trigger.querySelector('.trigger-badge');
       var selectedItem = this.items.find(function(item) {
         return item.value === this.value;
       }, this);
@@ -609,6 +631,17 @@
         textEl.textContent = this.value;
       } else {
         textEl.textContent = this.placeholder;
+      }
+
+      var badge = selectedItem && selectedItem.badge ? String(selectedItem.badge) : '';
+      if (badgeEl) {
+        if (badge) {
+          badgeEl.textContent = badge;
+          this.trigger.classList.add('has-badge');
+        } else {
+          badgeEl.textContent = '';
+          this.trigger.classList.remove('has-badge');
+        }
       }
     },
 
