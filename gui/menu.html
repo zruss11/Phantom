@@ -750,6 +750,20 @@
                         data-auth-key="anthropicApiKey"
                         placeholder="sk-ant-..."
                       />
+                      <label class="muted-label auth-env-label"
+                        >Claude Code environment variables</label
+                      >
+                      <textarea
+                        class="form-control auth-input auth-env-input"
+                        data-auth-key="claudeCodeEnv"
+                        data-auth-allow-empty="true"
+                        placeholder="# One KEY=VALUE per line\n# Example: AWS Bedrock\nAWS_REGION=us-east-1\nAWS_PROFILE=default\n# Or explicit credentials:\nAWS_ACCESS_KEY_ID=YOUR_ACCESS_KEY_ID\nAWS_SECRET_ACCESS_KEY=YOUR_SECRET_ACCESS_KEY\nAWS_SESSION_TOKEN=YOUR_SESSION_TOKEN\n# Or Bedrock API key auth:\nAWS_BEARER_TOKEN_BEDROCK=YOUR_BEDROCK_API_KEY"
+                      ></textarea>
+                      <div class="auth-env-hint">
+                        Passed to the Claude Code CLI process. Comments starting with
+                        <code>#</code> are ignored. Keys like
+                        <code>ANTHROPIC_API_KEY</code> are managed above.
+                      </div>
                       <div class="auth-footer">
                         <p class="auth-help">
                           Use CLI login or an API key for Claude Code.
