@@ -34,6 +34,37 @@ fn normalize_from(team_name: &str, from: &str) -> Option<String> {
     None
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_from_accepts_valid_agent_names() {
+        assert_eq!(normalize_from("team", "agent"), Some("agent".to_string()));
+        assert_eq!(normalize_from("team", " agent "), Some("agent".to_string()));
+        assert_eq!(
+            normalize_from("team", "agent_1-2"),
+            Some("agent_1-2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_from_accepts_name_at_team_format() {
+        assert_eq!(
+            normalize_from("team", "agent@team"),
+            Some("agent".to_string())
+        );
+        assert_eq!(normalize_from("team", "agent@other"), None);
+    }
+
+    #[test]
+    fn test_normalize_from_rejects_invalid() {
+        for from in ["", "..", ".", "a/b", "a\\b", "a b", "../evil", "evil/.."] {
+            assert_eq!(normalize_from("team", from), None, "from={from:?}");
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ClaudeTeamsController {
     team_name: String,
