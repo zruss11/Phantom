@@ -53,3 +53,33 @@ pub fn inbox_lock_path(team_name: &str, agent_name: &str) -> Option<PathBuf> {
         lock
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_team_dir_rejects_invalid_team_names() {
+        for team in ["", "..", ".", "a/b", "a\\b", "a b", "a:b", "a..b"] {
+            assert!(team_dir(team).is_none(), "expected None for team={team:?}");
+        }
+
+        let too_long = "a".repeat(65);
+        assert!(team_dir(&too_long).is_none());
+    }
+
+    #[test]
+    fn test_inbox_path_rejects_invalid_agent_names() {
+        for agent in [
+            "", "..", ".", "a/b", "a\\b", "a b", "a:b", "../evil", "evil/..",
+        ] {
+            assert!(
+                inbox_path("team", agent).is_none(),
+                "expected None for agent={agent:?}"
+            );
+        }
+
+        let too_long = "a".repeat(65);
+        assert!(inbox_path("team", &too_long).is_none());
+    }
+}
