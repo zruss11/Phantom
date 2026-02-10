@@ -2448,6 +2448,8 @@ struct GhOpenPr {
     title: String,
     head_ref_name: String,
     updated_at: Option<String>,
+    #[serde(default)]
+    is_cross_repository: bool,
 }
 
 async fn get_open_prs_via_gh(repo_root: &Path) -> Result<Vec<BranchPrInfo>, String> {
@@ -2459,7 +2461,7 @@ async fn get_open_prs_via_gh(repo_root: &Path) -> Result<Vec<BranchPrInfo>, Stri
             "--state",
             "open",
             "--json",
-            "number,url,title,headRefName,updatedAt",
+            "number,url,title,headRefName,updatedAt,isCrossRepository",
             "--limit",
             "200",
         ])
@@ -2479,7 +2481,7 @@ async fn get_open_prs_via_gh(repo_root: &Path) -> Result<Vec<BranchPrInfo>, Stri
 
     Ok(prs
         .into_iter()
-        .filter(|pr| !pr.head_ref_name.trim().is_empty())
+        .filter(|pr| !pr.head_ref_name.trim().is_empty() && !pr.is_cross_repository)
         .map(|pr| BranchPrInfo {
             branch: pr.head_ref_name,
             number: pr.number,

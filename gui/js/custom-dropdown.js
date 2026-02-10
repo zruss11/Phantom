@@ -324,9 +324,9 @@
 
       this.filteredItems = this.items.filter(function(item) {
         return self.fuzzyMatch(item.name, self.searchQuery) ||
-               (item.description && self.fuzzyMatch(item.description, self.searchQuery)) ||
-               (item.tooltip && self.fuzzyMatch(item.tooltip, self.searchQuery)) ||
-               (item.badge && self.fuzzyMatch(item.badge, self.searchQuery));
+               (item.description && self.fuzzyMatch(String(item.description), self.searchQuery)) ||
+               (item.tooltip && self.fuzzyMatch(String(item.tooltip), self.searchQuery)) ||
+               (item.badge && self.fuzzyMatch(String(item.badge), self.searchQuery));
       });
 
       // Sort by match quality (exact prefix match first, then contains, then fuzzy)
