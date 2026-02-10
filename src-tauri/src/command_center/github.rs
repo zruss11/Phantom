@@ -1,4 +1,5 @@
 use super::types::*;
+use crate::utils::resolve_gh_binary;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -6,7 +7,18 @@ use std::process::Command;
 
 /// Check if gh CLI is authenticated and get username
 pub fn check_gh_cli_auth() -> GhCliAuthStatus {
-    let output = Command::new("gh")
+    let gh_path = match resolve_gh_binary() {
+        Ok(p) => p,
+        Err(e) => {
+            return GhCliAuthStatus {
+                available: false,
+                username: None,
+                error: Some(e),
+            }
+        }
+    };
+
+    let output = Command::new(gh_path)
         .args(["auth", "status", "--hostname", "github.com"])
         .output();
 
@@ -46,7 +58,8 @@ pub fn check_gh_cli_auth() -> GhCliAuthStatus {
 
 /// Fetch issues for a repo using gh CLI
 pub async fn fetch_issues_gh_cli(repo: &str) -> Result<Vec<GithubIssue>, String> {
-    let output = tokio::process::Command::new("gh")
+    let gh_path = resolve_gh_binary()?;
+    let output = tokio::process::Command::new(gh_path)
         .args([
             "issue",
             "list",
@@ -203,7 +216,8 @@ pub async fn fetch_issues_rest(
 
 /// Fetch workflow runs using gh CLI
 pub async fn fetch_workflows_gh_cli(repo: &str) -> Result<Vec<GithubWorkflow>, String> {
-    let output = tokio::process::Command::new("gh")
+    let gh_path = resolve_gh_binary()?;
+    let output = tokio::process::Command::new(gh_path)
         .args([
             "run",
             "list",
@@ -324,7 +338,8 @@ pub async fn fetch_workflows_rest(
 
 /// Re-run a failed workflow
 pub async fn rerun_workflow_gh_cli(repo: &str, run_id: u64) -> Result<(), String> {
-    let output = tokio::process::Command::new("gh")
+    let gh_path = resolve_gh_binary()?;
+    let output = tokio::process::Command::new(gh_path)
         .args(["run", "rerun", "--repo", repo, &run_id.to_string()])
         .output()
         .await
