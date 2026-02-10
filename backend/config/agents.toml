@@ -12,8 +12,10 @@ prompt_path = "backend/prompts/namegen.md"
 id = "claude-code"
 display_name = "Claude Code"
 command = "claude"
-# YOLO: bypass permission prompts in CLI
-args = ["--output-format", "stream-json", "--permission-mode", "bypassPermissions"]
+# Use the hidden Companion-style WebSocket SDK protocol (`--sdk-url`) when available.
+# This enables real-time streaming + interactive tool approval.
+use_websocket = true
+args = ["--output-format", "stream-json"]
 # Claude Code supports OAuth/subscription login (via `claude setup-token`), so an API key
 # is not strictly required for local usage.
 required_env = []
