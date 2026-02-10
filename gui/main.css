@@ -1270,6 +1270,51 @@ textarea {
   color: #fff;
 }
 
+.accounts-page .auth-env-label {
+  margin-top: 14px;
+}
+
+.accounts-page .auth-env-input {
+  margin-top: 6px;
+  height: 128px;
+  resize: vertical !important;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  letter-spacing: 0.01em;
+  background: linear-gradient(
+    180deg,
+    rgba(14, 12, 16, 0.92),
+    rgba(10, 10, 12, 0.92)
+  );
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03),
+    0 10px 30px rgba(0, 0, 0, 0.18);
+}
+
+.accounts-page .auth-env-input:focus {
+  border-color: rgba(247, 138, 151, 0.55);
+  box-shadow: 0 0 0 3px rgba(247, 138, 151, 0.12),
+    inset 0 0 0 1px rgba(247, 138, 151, 0.22),
+    0 10px 30px rgba(0, 0, 0, 0.18);
+}
+
+.accounts-page .auth-env-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.accounts-page .auth-env-hint code {
+  font-size: 11px;
+  color: rgba(247, 138, 151, 0.95);
+  background: rgba(247, 138, 151, 0.09);
+  border: 1px solid rgba(247, 138, 151, 0.18);
+  padding: 1px 5px;
+  border-radius: 999px;
+}
+
 .accounts-page .auth-footnote {
   margin-top: 14px;
 }
@@ -2284,6 +2329,87 @@ input:checked + .slider:before {
   background: #495057;
   border-radius: 4px;
   color: #fff;
+}
+
+.view-tasks-page .actions-cell .save-context {
+  color: #6c757d;
+  padding: 3px 4px;
+}
+
+.view-tasks-page .actions-cell .save-context:hover {
+  color: #4a9eff;
+}
+
+.view-tasks-page .actions-cell .save-context.has-context {
+  color: #4a9eff;
+}
+
+.view-tasks-page .actions-cell .save-context.has-context:hover {
+  color: #6bb1ff;
+}
+
+/* Context picker popover */
+.context-picker-popover {
+  position: fixed;
+  z-index: 10000;
+  background: #1e1e2e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  min-width: 180px;
+  max-width: 260px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.context-picker-popover .context-picker-loading {
+  padding: 8px 12px;
+  color: #888;
+  font-size: 12px;
+}
+
+.context-picker-popover .context-picker-item {
+  display: block;
+  padding: 6px 12px;
+  color: #ccc;
+  font-size: 12px;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-picker-popover .context-picker-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.context-picker-popover .context-picker-item.active {
+  color: #4a9eff;
+  font-weight: 600;
+}
+
+.context-picker-popover .context-picker-remove {
+  color: #ff6b6b;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 2px;
+}
+
+.context-picker-popover .context-picker-remove:hover {
+  background: rgba(255, 67, 67, 0.12);
+  color: #ff8a8a;
+}
+
+.context-picker-popover .context-picker-new {
+  color: #888;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 2px;
+}
+
+.context-picker-popover .context-picker-new:hover {
+  color: #4a9eff;
 }
 
 /* ============================================
@@ -3451,6 +3577,27 @@ input:checked + .slider:before {
   white-space: nowrap;
 }
 
+.custom-dropdown-trigger .trigger-badge {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  margin-left: 10px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  font-family: "SF Mono", "Monaco", "Inconsolata", "Roboto Mono", monospace;
+  background: rgba(247, 138, 151, 0.10);
+  border: 1px solid rgba(247, 138, 151, 0.28);
+  color: rgba(255, 255, 255, 0.82);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  flex-shrink: 0;
+}
+
+.custom-dropdown-trigger.has-badge .trigger-badge {
+  display: inline-flex;
+}
+
 .custom-dropdown-trigger .trigger-chevron {
   font-size: 8px;
   color: rgba(255, 255, 255, 0.5);
@@ -3564,6 +3711,35 @@ input:checked + .slider:before {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 55%;
+}
+
+.custom-dropdown-item .item-meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: 12px;
+  min-width: 0;
+}
+
+.custom-dropdown-item .item-meta .item-description {
+  margin-left: 0;
+}
+
+.custom-dropdown-item .item-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  font-family: "SF Mono", "Monaco", "Inconsolata", "Roboto Mono", monospace;
+  background: rgba(247, 138, 151, 0.12);
+  border: 1px solid rgba(247, 138, 151, 0.34);
+  color: rgba(255, 255, 255, 0.86);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  flex-shrink: 0;
 }
 
 /* Description Tooltip - Appears on left when hovering options */
@@ -8594,6 +8770,28 @@ input:checked + .slider:before {
 .notes-upcoming-cta:hover {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
+}
+
+/* Overflow: hide events beyond the visible count */
+.notes-upcoming-overflow {
+  display: none;
+}
+.notes-upcoming-expanded .notes-upcoming-overflow {
+  display: flex;
+}
+
+/* "Show N more" / "Show less" toggle */
+.notes-upcoming-toggle {
+  background: none;
+  border: none;
+  color: rgba(212, 165, 116, 0.6);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 6px 0 2px;
+  transition: color 0.15s;
+}
+.notes-upcoming-toggle:hover {
+  color: rgba(212, 165, 116, 0.9);
 }
 
 /* Date group */

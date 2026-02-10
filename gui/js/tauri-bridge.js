@@ -476,6 +476,15 @@
         if (channel === 'saveSettings') {
           return tauriInvoke('save_settings', { settings: args[0] });
         }
+        if (channel === 'listContexts') {
+          return tauriInvoke('list_contexts');
+        }
+        if (channel === 'createContext') {
+          return tauriInvoke('create_context', { payload: args[0] || {} });
+        }
+        if (channel === 'updateTaskContext') {
+          return tauriInvoke('update_task_context', { payload: args[0] || {} });
+        }
         if (channel === 'getAgentSkills') {
           return tauriInvoke('get_agent_skills', {
             agentId: args[0],

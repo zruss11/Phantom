@@ -93,7 +93,7 @@ gh auth login
 
 #### Linear
 
-1. Go to **[Linear Settings → API](https://linear.app/settings/api)**
+1. Go to **[Linear Settings → API](https://linear.app/settings/account/security)**
 2. Click **"Create new API key"**
 3. Give it a label (e.g., "Phantom Harness")
 4. Copy the key and paste it into the Command Center config
@@ -127,6 +127,24 @@ Visualize all your agent skills in an interactive orbital view. Personal skills,
 
 ---
 
+### Shared Context
+
+**Give your agents shared memory.**
+
+When you're running multiple tasks on the same feature — one agent doing the backend, another on the frontend, a third writing tests — they normally have no idea what the others are doing. Shared Context fixes that.
+
+1. **Create a context** — Use the Context dropdown when creating a task, or click the bookmark icon (🔖) on any completed task to assign it to a context after the fact
+2. **Group related tasks** — Multiple tasks under the same context become aware of each other
+3. **Automatic prompt hydration** — When you start a new task in a context, Phantom prepends a brief of what sibling tasks have done (their prompts, summaries, and compacted message history) so the agent picks up where others left off
+
+The bookmark icon on each task row shows context status at a glance:
+- **Hollow bookmark** — No context assigned
+- **Solid blue bookmark** — Part of a shared context
+
+This is lightweight shared memory between agent tasks — no external databases, no complex orchestration. Just SQLite and smart prompt injection.
+
+---
+
 <p align="center">
   <img src="docs/screenshots/discord.png" alt="Agent Notifications" width="400">
 </p>
@@ -141,6 +159,7 @@ Get notified when your agents need attention. Whether it's a native notification
 
 - **Multi-agent orchestration** — Run Codex, Claude Code, Amp, Droid, and OpenCode from one app
 - **Git worktrees** — Every task gets an isolated branch. No merge conflicts between agents.
+- **Shared context** — Group related tasks so agents know what sibling tasks have done
 - **Unified auth** — OAuth login for ChatGPT and Claude, or bring your own API keys
 - **Usage tracking** — Session and weekly limits visible at a glance
 - **Analytics dashboard** — Token usage, costs, model distribution, and agent comparisons
