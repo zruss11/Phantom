@@ -276,14 +276,62 @@ async function refreshBaseBranchOptions() {
       return;
     }
 
-    const items = branches.map((branch) => {
+    const openPrs = Array.isArray(result?.openPrs) ? result.openPrs : [];
+    const prByBranch = new Map();
+    openPrs.forEach((pr) => {
+      const b = pr && pr.branch ? String(pr.branch) : '';
+      if (!b) return;
+      // If multiple open PRs exist for the same branch (rare), keep the newest.
+      const existing = prByBranch.get(b);
+      if (!existing) {
+        prByBranch.set(b, pr);
+        return;
+      }
+      const aTime = Date.parse(existing.updatedAt || '') || 0;
+      const bTime = Date.parse(pr.updatedAt || '') || 0;
+      if (bTime > aTime) {
+        prByBranch.set(b, pr);
+      }
+    });
+
+    const openPrBranches = Array.from(prByBranch.keys()).filter((b) => branches.includes(b));
+    openPrBranches.sort((a, b) => {
+      const pa = prByBranch.get(a);
+      const pb = prByBranch.get(b);
+      const ta = Date.parse(pa?.updatedAt || '') || 0;
+      const tb = Date.parse(pb?.updatedAt || '') || 0;
+      // Newest PR first; tie-break alphabetically for stability.
+      if (tb !== ta) return tb - ta;
+      return a.localeCompare(b);
+    });
+
+    const openSet = new Set(openPrBranches);
+    const orderedBranches = openPrBranches.concat(branches.filter((b) => !openSet.has(b)));
+
+    const items = orderedBranches.map((branch) => {
       let description = '';
       if (result?.defaultBranch && branch === result.defaultBranch) {
         description = 'Default branch';
       } else if (result?.currentBranch && branch === result.currentBranch) {
         description = 'Current branch';
       }
-      return { value: branch, name: branch, description };
+
+      const pr = prByBranch.get(branch);
+      const prNumber = pr && pr.number ? Number(pr.number) : 0;
+      const prTitle = pr && pr.title ? String(pr.title) : '';
+      const badge = prNumber ? `#${prNumber}` : '';
+      const tooltip = prNumber
+        ? (`PR #${prNumber}` + (prTitle ? `: ${prTitle}` : ''))
+        : '';
+
+      return {
+        value: branch,
+        name: branch,
+        description,
+        badge: badge || null,
+        badgeTitle: prNumber ? `Open PR #${prNumber}` : null,
+        tooltip: tooltip || null
+      };
     });
     baseBranchDropdown.setOptions(items);
 

@@ -928,8 +928,20 @@ struct RepoBranches {
     branches: Vec<String>,
     default_branch: Option<String>,
     current_branch: Option<String>,
+    open_prs: Vec<BranchPrInfo>,
     source: String,
     error: Option<String>,
+}
+
+/// Lightweight PR info for annotating branch dropdowns.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchPrInfo {
+    branch: String,
+    number: u32,
+    url: String,
+    title: String,
+    updated_at: Option<String>,
 }
 
 /// Git state for PR creation readiness
@@ -2494,6 +2506,58 @@ async fn run_gh_command(repo_root: &Path, args: &[&str]) -> Result<String, Strin
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhOpenPr {
+    number: u32,
+    url: String,
+    title: String,
+    head_ref_name: String,
+    updated_at: Option<String>,
+    #[serde(default)]
+    is_cross_repository: bool,
+}
+
+async fn get_open_prs_via_gh(repo_root: &Path) -> Result<Vec<BranchPrInfo>, String> {
+    let gh_path = resolve_gh_binary()?;
+    let output = TokioCommand::new(&gh_path)
+        .args(&[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,url,title,headRefName,updatedAt,isCrossRepository",
+            "--limit",
+            "200",
+        ])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .map_err(|e| format!("gh not available: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh command failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let prs = serde_json::from_str::<Vec<GhOpenPr>>(&stdout)
+        .map_err(|e| format!("Failed to parse gh output: {}", e))?;
+
+    Ok(prs
+        .into_iter()
+        .filter(|pr| !pr.head_ref_name.trim().is_empty() && !pr.is_cross_repository)
+        .map(|pr| BranchPrInfo {
+            branch: pr.head_ref_name,
+            number: pr.number,
+            url: pr.url,
+            title: pr.title,
+            updated_at: pr.updated_at,
+        })
+        .collect())
+}
+
 async fn get_repo_branches_via_gh(
     repo_root: &Path,
     owner: &str,
@@ -2539,10 +2603,14 @@ async fn get_repo_branches_via_gh(
         }
     }
 
+    // Best-effort: don't fail branch listing if PRs cannot be loaded (auth, gh missing, etc).
+    let open_prs = get_open_prs_via_gh(repo_root).await.unwrap_or_default();
+
     Ok(RepoBranches {
         branches,
         default_branch,
         current_branch,
+        open_prs,
         source: "gh".to_string(),
         error: None,
     })
@@ -2558,6 +2626,7 @@ async fn get_repo_branches(project_path: Option<String>) -> Result<RepoBranches,
                 branches: Vec::new(),
                 default_branch: None,
                 current_branch: None,
+                open_prs: Vec::new(),
                 source: "none".to_string(),
                 error: Some("Not a git repository".to_string()),
             });
@@ -2588,6 +2657,7 @@ async fn get_repo_branches(project_path: Option<String>) -> Result<RepoBranches,
         branches,
         default_branch: None,
         current_branch,
+        open_prs: Vec::new(),
         source: "git".to_string(),
         error: None,
     })
