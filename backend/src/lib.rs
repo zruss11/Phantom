@@ -1,5 +1,7 @@
 pub mod cli;
 pub mod models;
+pub mod ws_bridge;
+pub mod ws_types;
 
 pub use models::{
     apply_model_selection, extract_mode_options, find_model_config_id, get_agent_models,

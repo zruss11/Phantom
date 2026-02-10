@@ -408,6 +408,9 @@ pub(crate) struct AgentConfig {
     command: String,
     #[serde(default)]
     args: Vec<String>,
+    /// Enable Companion-style Claude Code `--sdk-url` WebSocket protocol (per-agent toggle).
+    #[serde(default)]
+    pub(crate) use_websocket: bool,
     #[serde(default)]
     required_env: Vec<String>,
     #[serde(default)]
@@ -3679,6 +3682,9 @@ async fn spawn_agent_client(
     {
         Ok(client) => {
             tracing::info!(agent_id = %agent.id, command = %spawn_spec.command, "Agent CLI spawned");
+            if agent.id == "claude-code" {
+                client.set_claude_ws_enabled(agent.use_websocket);
+            }
             Ok(Arc::new(client))
         }
         Err(err) => {
@@ -3728,6 +3734,9 @@ async fn reconnect_session_with_context(
 
     // Spawn and initialize Agent client
     let client = spawn_agent_client(agent, cwd, env, spawn_spec).await?;
+    if agent.id == "claude-code" {
+        client.set_ws_session_id(Some(task.id.clone()));
+    }
     let _capabilities = client
         .initialize("Phantom Harness", "0.1.0")
         .await
@@ -3888,6 +3897,14 @@ fn get_all_cached_models(
     }
 
     Ok(result)
+}
+
+#[tauri::command]
+async fn get_ws_bridge_port() -> Result<u16, String> {
+    let bridge = phantom_harness_backend::ws_bridge::WsBridge::ensure_started()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(bridge.port())
 }
 
 /// Get cached modes for an agent
@@ -5154,6 +5171,11 @@ pub(crate) async fn create_agent_session_internal(
             .unwrap_or("0000")
     );
 
+    // Stable per-task WS session id for Companion-style Claude Code `--sdk-url` mode.
+    if payload.agent_id == "claude-code" {
+        client.set_ws_session_id(Some(task_id.clone()));
+    }
+
     // Spawn Claude usage watcher for real-time cost tracking
     let claude_watcher = if payload.agent_id == "claude-code" {
         Some(claude_usage_watcher::start_watching(
@@ -5457,6 +5479,8 @@ pub(crate) async fn create_task_from_discord(
             .codex_access_mode
             .clone()
             .unwrap_or_else(|| "bypassPermissions".to_string())
+    } else if agent_id == "claude-code" && plan_mode {
+        "plan".to_string()
     } else if agents_with_own_permissions.contains(&agent_id.as_str()) {
         "bypassPermissions".to_string()
     } else {
@@ -6173,6 +6197,10 @@ pub(crate) async fn start_task_internal(
     let task_id_clone = task_id.clone();
     let db_for_stream = state.db.clone();
     let state_for_stream: AppState = state.clone();
+    let skip_chat_window_streaming = agent_id_for_stream == "claude-code"
+        && find_agent(&state.config, &agent_id_for_stream)
+            .map(|a| a.use_websocket)
+            .unwrap_or(false);
     let stream_emit_handle = tokio::task::spawn_blocking(move || {
         use std::time::{Duration, Instant};
 
@@ -6489,7 +6517,10 @@ pub(crate) async fn start_task_internal(
                         })
                     }
                 };
-                let _ = chat_window.emit("ChatLogStreaming", (&task_id_clone, chat_msg.clone()));
+                if !skip_chat_window_streaming {
+                    let _ =
+                        chat_window.emit("ChatLogStreaming", (&task_id_clone, chat_msg.clone()));
+                }
                 if let Some(main_window) = app_handle.get_webview_window("main") {
                     let _ = main_window.emit("ChatLogStreaming", (&task_id_clone, chat_msg));
                 }
@@ -12674,6 +12705,10 @@ async fn send_chat_message_once_internal(
     let window_label_streaming = window_label.clone();
     let agent_id_for_stream = agent_id.clone();
     let state_for_stream: AppState = state.clone();
+    let skip_chat_window_streaming = agent_id_for_stream == "claude-code"
+        && find_agent(&state.config, &agent_id_for_stream)
+            .map(|a| a.use_websocket)
+            .unwrap_or(false);
     let stream_emit_handle = tokio::task::spawn_blocking(move || {
         use std::time::{Duration, Instant};
 
@@ -12857,8 +12892,10 @@ async fn send_chat_message_once_internal(
                         })
                     }
                 };
-                let _ =
-                    chat_window.emit("ChatLogStreaming", (&task_id_streaming, chat_msg.clone()));
+                if !skip_chat_window_streaming {
+                    let _ = chat_window
+                        .emit("ChatLogStreaming", (&task_id_streaming, chat_msg.clone()));
+                }
                 if let Some(main_window) = app_handle.get_webview_window("main") {
                     let _ = main_window.emit("ChatLogStreaming", (&task_id_streaming, chat_msg));
                 }
@@ -14813,6 +14850,7 @@ fn main() {
             get_agent_models,
             get_cached_models,
             get_all_cached_models,
+            get_ws_bridge_port,
             refresh_agent_models,
             get_enriched_models,
             get_codex_commands,

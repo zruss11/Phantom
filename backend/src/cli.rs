@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, RwLock as TokioRwLock};
@@ -1111,6 +1112,9 @@ pub struct AgentProcessClient {
     env: Vec<(String, String)>,
     cwd: PathBuf,
     cli_kind: AgentCliKind,
+    claude_ws_enabled: AtomicBool,
+    /// Session identifier used for Companion-style `--sdk-url` WS bridging (stable per task/UI session).
+    ws_session_id: std::sync::Mutex<Option<String>>,
     model: std::sync::Mutex<Option<String>>,
     reasoning_effort: std::sync::Mutex<Option<String>>,
     permission_mode: std::sync::Mutex<Option<String>>,
@@ -1358,6 +1362,8 @@ impl AgentProcessClient {
             env: env.to_vec(),
             cwd: cwd.to_path_buf(),
             cli_kind,
+            claude_ws_enabled: AtomicBool::new(false),
+            ws_session_id: std::sync::Mutex::new(None),
             model: std::sync::Mutex::new(None),
             reasoning_effort: std::sync::Mutex::new(None),
             permission_mode: std::sync::Mutex::new(None),
@@ -1366,6 +1372,22 @@ impl AgentProcessClient {
             codex_app_server,
             acp_client,
         })
+    }
+
+    pub fn set_claude_ws_enabled(&self, enabled: bool) {
+        self.claude_ws_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    pub fn set_ws_session_id(&self, session_id: Option<String>) {
+        let mut guard = self.ws_session_id.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = session_id;
+    }
+
+    fn ws_session_id(&self) -> Option<String> {
+        self.ws_session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     pub async fn initialize(&self, _name: &str, _version: &str) -> Result<()> {
@@ -1550,9 +1572,18 @@ impl AgentProcessClient {
     pub async fn send_permission_response(
         &self,
         _session_id: &str,
-        _request_id: &str,
-        _response_id: &str,
+        request_id: &str,
+        response_id: &str,
     ) -> Result<()> {
+        if self.cli_kind.is_claude() && self.claude_ws_enabled.load(Ordering::Relaxed) {
+            let ws_session_id = self
+                .ws_session_id()
+                .context("missing ws_session_id for Claude WS permission response")?;
+            let bridge = crate::ws_bridge::WsBridge::ensure_started().await?;
+            bridge
+                .respond_permission_simple(&ws_session_id, request_id, response_id)
+                .await?;
+        }
         Ok(())
     }
 
@@ -1693,6 +1724,22 @@ impl AgentProcessClient {
             });
         }
 
+        let cli_kind = self.cli_kind;
+        if cli_kind.is_claude() && self.claude_ws_enabled.load(Ordering::Relaxed) {
+            match self
+                .run_prompt_claude_ws(session_id, content, images, on_update, cancel_token)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => {
+                    eprintln!(
+                        "[Harness][ClaudeWS] ws --sdk-url path failed, falling back to stdio: {}",
+                        err
+                    );
+                }
+            }
+        }
+
         let mut cmd = Command::new(&self.command);
         let mut args = self.args.clone();
 
@@ -1778,7 +1825,13 @@ impl AgentProcessClient {
             } else if !cli_kind.is_opencode() {
                 // YOLO mode: always bypass permission prompts.
                 let effective_mode = if cli_kind.is_claude() {
-                    "bypassPermissions".to_string()
+                    // In plan mode, pass through to let Claude operate in read-only planning.
+                    // Otherwise bypass for non-interactive usage.
+                    if mode == "plan" {
+                        "plan".to_string()
+                    } else {
+                        "bypassPermissions".to_string()
+                    }
                 } else {
                     mode.to_string()
                 };
@@ -2322,6 +2375,418 @@ impl AgentProcessClient {
             session_id: observed_session_id,
         })
     }
+
+    async fn run_prompt_claude_ws<F>(
+        &self,
+        session_id: &str,
+        content: &str,
+        images: &[ImageContent],
+        on_update: &mut F,
+        cancel_token: Option<&CancellationToken>,
+    ) -> Result<SessionPromptResult>
+    where
+        F: FnMut(StreamingUpdate),
+    {
+        use tokio::time::{timeout, Duration};
+
+        let ws_session_id = self
+            .ws_session_id()
+            .context("missing ws_session_id for Claude --sdk-url mode")?;
+
+        let bridge = crate::ws_bridge::WsBridge::ensure_started().await?;
+        let port = bridge.port();
+        let sdk_url = format!("ws://127.0.0.1:{}/ws/cli/{}", port, ws_session_id);
+
+        let mut args = self.args.clone();
+        // Strip flags we fully control in WS mode (avoid ambiguous duplicates).
+        strip_arg_with_value(&mut args, "--sdk-url");
+        strip_arg_with_value(&mut args, "--input-format");
+        strip_arg_with_value(&mut args, "--permission-mode");
+
+        // Required protocol flags.
+        args.insert(0, sdk_url);
+        args.insert(0, "--sdk-url".to_string());
+        ensure_output_format(&mut args);
+        ensure_input_format(&mut args);
+        ensure_flag(&mut args, "--print");
+        ensure_flag(&mut args, "--verbose");
+
+        // Optional flags based on Phantom task settings.
+        let model = self.model.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(model) = model.as_ref() {
+            if model != "default" && !model.trim().is_empty() {
+                args.push("--model".to_string());
+                args.push(model.to_string());
+            }
+        }
+
+        if !session_id.is_empty() && !session_id.starts_with("local-") {
+            args.push("--resume".to_string());
+            args.push(session_id.to_string());
+        }
+
+        let permission_mode = self
+            .permission_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(mode) = permission_mode.as_ref() {
+            if !mode.is_empty() && mode != "default" {
+                args.push("--permission-mode".to_string());
+                args.push(mode.to_string());
+            }
+        }
+
+        let agent_mode = self
+            .agent_mode
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(agent_mode) = agent_mode.as_ref() {
+            if !agent_mode.is_empty() && agent_mode != "default" {
+                args.push("--agent-mode".to_string());
+                args.push(agent_mode.to_string());
+            }
+        }
+
+        // `-p ""` is required for headless mode, but ignored when --sdk-url is used.
+        // (Matches the Companion launcher behavior.)
+        args.push("-p".to_string());
+        args.push("".to_string());
+
+        eprintln!(
+            "[Harness][ClaudeWS] spawn agent: cmd={} args={}",
+            self.command,
+            args.iter()
+                .map(|a| format!("{:?}", a))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        let mut cmd = Command::new(&self.command);
+        cmd.args(&args)
+            .current_dir(&self.cwd)
+            .envs(self.env.clone())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd.spawn().context("failed to spawn claude --sdk-url")?;
+        let stdout = child.stdout.take().context("missing stdout")?;
+        let stderr = child.stderr.take().context("missing stderr")?;
+
+        // Drain stdout (should be mostly empty in --sdk-url mode, but don't let it block).
+        tokio::spawn(async move {
+            let mut r = BufReader::new(stdout).lines();
+            while let Ok(Some(line)) = r.next_line().await {
+                if std::env::var("PHANTOM_CLAUDE_DEBUG").ok().as_deref() == Some("1") {
+                    eprintln!("[Harness][ClaudeWS][stdout] {}", line);
+                }
+            }
+        });
+
+        // Drain stderr into a bounded buffer for diagnostics.
+        let stderr_buf: std::sync::Arc<std::sync::Mutex<String>> =
+            std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let stderr_buf_clone = stderr_buf.clone();
+        tokio::spawn(async move {
+            let mut r = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = r.next_line().await {
+                if std::env::var("PHANTOM_CLAUDE_DEBUG").ok().as_deref() == Some("1") {
+                    eprintln!("[Harness][ClaudeWS][stderr] {}", line);
+                }
+                if let Ok(mut buf) = stderr_buf_clone.lock() {
+                    if buf.len() > 50_000 {
+                        let drain = buf.len() - 50_000;
+                        buf.drain(..drain);
+                    }
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
+            }
+        });
+
+        // Subscribe before sending to minimize the chance we miss early init/status lines.
+        let mut cli_rx = bridge.subscribe_cli(&ws_session_id).await;
+
+        // Send the user message over WS. (Server will queue if CLI isn't connected yet.)
+        let user_session_id = if session_id.is_empty() || session_id.starts_with("local-") {
+            "".to_string()
+        } else {
+            session_id.to_string()
+        };
+        let message_content: Value = if images.is_empty() {
+            Value::String(content.to_string())
+        } else {
+            let mut blocks: Vec<Value> = Vec::new();
+            for img in images {
+                blocks.push(json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": img.media_type, "data": img.data }
+                }));
+            }
+            blocks.push(json!({ "type": "text", "text": content }));
+            Value::Array(blocks)
+        };
+        let user_ndjson = json!({
+            "type": "user",
+            "message": { "role": "user", "content": message_content },
+            "parent_tool_use_id": Value::Null,
+            "session_id": user_session_id,
+        })
+        .to_string();
+        bridge.send_to_cli(&ws_session_id, &user_ndjson).await?;
+
+        let mut messages: Vec<PromptMessage> = Vec::new();
+        let mut current_assistant_text = String::new();
+        let mut current_reasoning_text = String::new();
+        let mut token_usage: Option<TokenUsageInfo> = None;
+        let mut observed_session_id: Option<String> = None;
+
+        // Track Claude Code sub-agent Tasks for progress pill.
+        let mut claude_tasks: Vec<(String, String, String)> = Vec::new();
+
+        let mut saw_result = false;
+        let mut saw_any_message = false;
+        let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+
+        loop {
+            if let Some(token) = cancel_token {
+                if token.is_cancelled() {
+                    eprintln!("[Harness][ClaudeWS] cancelled by user, killing subprocess");
+                    let _ = child.kill().await;
+                    break;
+                }
+            }
+
+            // Fail fast if the process exited and we didn't observe a terminal result.
+            if let Ok(Some(status)) = child.try_wait() {
+                if !saw_result {
+                    let stderr_output = stderr_buf
+                        .lock()
+                        .map(|s| s.clone())
+                        .unwrap_or_else(|_| String::new());
+                    return Err(anyhow::anyhow!(
+                        "claude --sdk-url exited with {}: {}",
+                        status,
+                        stderr_output.trim()
+                    ));
+                }
+                break;
+            }
+
+            // After a short startup window, require that we have seen *something* from the CLI.
+            if !saw_any_message && std::time::Instant::now() > start_deadline {
+                let _ = child.kill().await;
+                let stderr_output = stderr_buf
+                    .lock()
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|_| String::new());
+                return Err(anyhow::anyhow!(
+                    "timeout waiting for claude websocket messages (stderr: {})",
+                    stderr_output.trim()
+                ));
+            }
+
+            let recv = timeout(Duration::from_millis(250), cli_rx.recv()).await;
+            let value = match recv {
+                Ok(Ok(v)) => {
+                    saw_any_message = true;
+                    v
+                }
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
+                Err(_) => continue, // periodic loop so we can poll try_wait/cancel quickly
+            };
+
+            if observed_session_id.is_none() {
+                observed_session_id = find_session_id(&value);
+            }
+
+            for update in parse_streaming_updates(&value) {
+                on_update(update);
+            }
+
+            // Preserve existing Claude task/todo progress extraction behavior.
+            let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if event_type == "assistant" {
+                if let Some(items) = value
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array())
+                {
+                    for item in items {
+                        let item_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if item_type != "tool_use" {
+                            continue;
+                        }
+                        let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        if name == "TodoWrite" {
+                            if let Some(todos) = item
+                                .get("input")
+                                .and_then(|i| i.get("todos"))
+                                .and_then(|t| t.as_array())
+                            {
+                                let steps: Vec<PlanStep> = todos
+                                    .iter()
+                                    .filter_map(|t| {
+                                        let content = t.get("content").and_then(|c| c.as_str())?;
+                                        let status = t
+                                            .get("status")
+                                            .and_then(|s| s.as_str())
+                                            .unwrap_or("pending")
+                                            .to_string();
+                                        Some(PlanStep {
+                                            step: content.to_string(),
+                                            status,
+                                        })
+                                    })
+                                    .collect();
+                                if !steps.is_empty() {
+                                    on_update(StreamingUpdate::PlanUpdate {
+                                        turn_id: None,
+                                        explanation: None,
+                                        steps,
+                                    });
+                                }
+                            }
+                        } else if name == "Task" {
+                            let tool_id = item
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let desc = item
+                                .get("input")
+                                .and_then(|i| i.get("description"))
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("Working…")
+                                .to_string();
+                            if !tool_id.is_empty() {
+                                claude_tasks.push((tool_id, desc, "in_progress".to_string()));
+                                let steps: Vec<PlanStep> = claude_tasks
+                                    .iter()
+                                    .map(|(_, d, s)| PlanStep {
+                                        step: d.clone(),
+                                        status: s.clone(),
+                                    })
+                                    .collect();
+                                on_update(StreamingUpdate::PlanUpdate {
+                                    turn_id: None,
+                                    explanation: None,
+                                    steps,
+                                });
+                            }
+                        }
+                    }
+                }
+            } else if event_type == "user" && !claude_tasks.is_empty() {
+                let parent_id = value.get("parent_tool_use_id").and_then(|v| v.as_str());
+                let result_status = value
+                    .get("tool_use_result")
+                    .and_then(|r| r.get("status"))
+                    .and_then(|s| s.as_str());
+                if parent_id.is_none() && result_status == Some("completed") {
+                    if let Some(items) = value
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_array())
+                    {
+                        let mut changed = false;
+                        for item in items {
+                            if let Some(tool_use_id) =
+                                item.get("tool_use_id").and_then(|v| v.as_str())
+                            {
+                                for task in claude_tasks.iter_mut() {
+                                    if task.0 == tool_use_id && task.2 != "completed" {
+                                        task.2 = "completed".to_string();
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                        if changed {
+                            let steps: Vec<PlanStep> = claude_tasks
+                                .iter()
+                                .map(|(_, d, s)| PlanStep {
+                                    step: d.clone(),
+                                    status: s.clone(),
+                                })
+                                .collect();
+                            on_update(StreamingUpdate::PlanUpdate {
+                                turn_id: None,
+                                explanation: None,
+                                steps,
+                            });
+                        }
+                    }
+                }
+            }
+
+            for msg in parse_prompt_messages(
+                &value,
+                &mut current_assistant_text,
+                &mut current_reasoning_text,
+            ) {
+                messages.push(msg);
+            }
+            if let Some(usage) = parse_token_usage(&value, observed_session_id.clone()) {
+                token_usage = Some(usage);
+            }
+
+            if event_type == "result" {
+                saw_result = true;
+                break;
+            }
+        }
+
+        if saw_result {
+            use tokio::time::{timeout, Duration};
+            let _ = child.kill().await;
+            let _ = timeout(Duration::from_secs(5), child.wait()).await;
+        } else {
+            let status = child.wait().await?;
+            if !status.success() {
+                let stderr_output = stderr_buf
+                    .lock()
+                    .map(|s| s.clone())
+                    .unwrap_or_else(|_| String::new());
+                return Err(anyhow::anyhow!(
+                    "claude --sdk-url exited with {}: {}",
+                    status,
+                    stderr_output.trim()
+                ));
+            }
+        }
+
+        if !current_reasoning_text.is_empty() {
+            messages.push(PromptMessage {
+                message_type: "reasoning_message".to_string(),
+                content: None,
+                reasoning: Some(current_reasoning_text),
+                name: None,
+                arguments: None,
+                tool_return: None,
+            });
+        }
+        if !current_assistant_text.is_empty() {
+            messages.push(PromptMessage {
+                message_type: "assistant_message".to_string(),
+                content: Some(current_assistant_text),
+                reasoning: None,
+                name: None,
+                arguments: None,
+                tool_return: None,
+            });
+        }
+
+        Ok(SessionPromptResult {
+            messages,
+            stop_reason: None,
+            token_usage,
+            session_id: observed_session_id,
+        })
+    }
 }
 
 fn ensure_output_format(args: &mut Vec<String>) {
@@ -2330,6 +2795,35 @@ fn ensure_output_format(args: &mut Vec<String>) {
     }
     args.push("--output-format".to_string());
     args.push("stream-json".to_string());
+}
+
+fn ensure_input_format(args: &mut Vec<String>) {
+    if args.iter().any(|arg| arg == "--input-format") {
+        return;
+    }
+    args.push("--input-format".to_string());
+    args.push("stream-json".to_string());
+}
+
+fn ensure_flag(args: &mut Vec<String>, flag: &str) {
+    if args.iter().any(|arg| arg == flag) {
+        return;
+    }
+    args.push(flag.to_string());
+}
+
+fn strip_arg_with_value(args: &mut Vec<String>, flag: &str) {
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            args.remove(i);
+            if i < args.len() {
+                args.remove(i);
+            }
+            continue;
+        }
+        i += 1;
+    }
 }
 
 fn write_image_temp(image: &ImageContent) -> Result<Option<tempfile::TempPath>> {
@@ -2828,6 +3322,36 @@ fn parse_streaming_updates(value: &Value) -> Vec<StreamingUpdate> {
     let mut out: Vec<StreamingUpdate> = Vec::new();
 
     match event_type {
+        "stream_event" => {
+            // Claude Code token streaming (only present with --verbose).
+            // We surface text deltas as TextChunk updates so the UI can render token-by-token.
+            if let Some(evt) = value.get("event") {
+                let evt_type = evt.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                if evt_type == "content_block_delta" {
+                    if let Some(delta) = evt.get("delta") {
+                        let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                        if delta_type == "text_delta" {
+                            if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                                out.push(StreamingUpdate::TextChunk {
+                                    text: text.to_string(),
+                                    item_id: None,
+                                });
+                            }
+                        } else if delta_type == "thinking_delta" {
+                            if let Some(thinking) = delta
+                                .get("thinking")
+                                .or_else(|| delta.get("text"))
+                                .and_then(|v| v.as_str())
+                            {
+                                out.push(StreamingUpdate::ReasoningChunk {
+                                    text: thinking.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
         "assistant" => {
             let content = value
                 .get("message")
@@ -2920,6 +3444,65 @@ fn parse_streaming_updates(value: &Value) -> Vec<StreamingUpdate> {
                         message: "Loading context…".to_string(),
                     });
                 }
+            }
+        }
+        "control_request" => {
+            // Companion-style permission requests in --sdk-url mode.
+            let subtype = value
+                .get("request")
+                .and_then(|r| r.get("subtype"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if subtype == "can_use_tool" {
+                let request_id = value
+                    .get("request_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("permission")
+                    .to_string();
+                let tool_name = value
+                    .get("request")
+                    .and_then(|r| r.get("tool_name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let description = value
+                    .get("request")
+                    .and_then(|r| r.get("description"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let raw_input = value
+                    .get("request")
+                    .and_then(|r| r.get("input"))
+                    .map(|v| v.to_string());
+
+                // Minimal allow/deny options; we can expand this later to honor
+                // permission_suggestions / updatedPermissions.
+                let options = vec![
+                    PermissionOption {
+                        id: "manual".to_string(),
+                        label: "Allow".to_string(),
+                        kind: Some("allow_once".to_string()),
+                        shortcut: Some("Y".to_string()),
+                        icon: Some("check".to_string()),
+                        style: Some("primary".to_string()),
+                    },
+                    PermissionOption {
+                        id: "deny".to_string(),
+                        label: "Deny".to_string(),
+                        kind: Some("reject_once".to_string()),
+                        shortcut: Some("N".to_string()),
+                        icon: Some("times".to_string()),
+                        style: Some("danger".to_string()),
+                    },
+                ];
+
+                out.push(StreamingUpdate::PermissionRequest {
+                    request_id,
+                    tool_name,
+                    description,
+                    raw_input,
+                    options,
+                });
             }
         }
         "result" => {

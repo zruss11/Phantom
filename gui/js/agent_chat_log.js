@@ -1227,7 +1227,7 @@
       if (btn.hasClass("permission-menu-toggle")) {
         return;
       }
-      const card = btn.closest(".permission-request");
+      const card = btn.closest(".permission-request, .plan-content");
       const requestId = card.attr("data-request-id");
       // User input submission uses a different handler
       if (btn.attr("data-action") === "submit_user_input") {
@@ -2189,6 +2189,8 @@
           type: "plan_content",
           file_path: update.file_path,
           content: update.content,
+          request_id: update.request_id || null,
+          allowed_prompts: update.allowed_prompts || null,
         });
         updateStatus("Plan content", "running");
         break;
@@ -3878,6 +3880,8 @@
         div.className += " assistant plan-content";
         let planContent = message.content || "";
         let filePath = message.file_path || "";
+        const planRequestId = message.request_id || null;
+        const allowedPrompts = message.allowed_prompts || null;
 
         // Parse JSON payload if needed
         if (typeof message.content === "string" && message.content.startsWith("{")) {
@@ -3896,6 +3900,33 @@
           ? `<span class="plan-file-path"><i class="fal fa-file-alt"></i> ${escapeHtml(filePath)}</span>`
           : '';
 
+        // When from WS ExitPlanMode (has request_id), show approve/deny actions
+        let planActionsHtml = '';
+        if (planRequestId) {
+          div.setAttribute("data-request-id", planRequestId);
+          const promptsList = Array.isArray(allowedPrompts) && allowedPrompts.length > 0
+            ? '<div class="plan-prompts"><span class="plan-prompts-label">Requested permissions:</span><ul>' +
+              allowedPrompts.map(function(p) {
+                return '<li><code>' + escapeHtml(p.tool || '') + '</code> — ' + escapeHtml(p.prompt || '') + '</li>';
+              }).join('') + '</ul></div>'
+            : '';
+          planActionsHtml = `
+            ${promptsList}
+            <div class="permission-actions">
+              <button class="permission-btn primary" data-response-id="manual" type="button">
+                <i class="fal fa-check"></i> Approve Plan
+              </button>
+              <button class="permission-btn danger" data-response-id="deny" type="button">
+                <i class="fal fa-times"></i> Deny
+              </button>
+            </div>
+            <div class="permission-status">
+              <div class="status-dot"></div>
+              <span>Waiting for approval</span>
+            </div>
+          `;
+        }
+
         const headerHtml = `
           <div class="plan-content-header">
             ${filePathHtml}
@@ -3912,7 +3943,7 @@
 
         // Store plan content as data attribute for later retrieval
         div.dataset.planContent = planContent;
-        div.innerHTML = headerHtml + '<div class="markdown-content">' + renderMarkdown(planContent) + '</div>';
+        div.innerHTML = headerHtml + '<div class="markdown-content">' + renderMarkdown(planContent) + '</div>' + planActionsHtml;
         break;
       }
 
