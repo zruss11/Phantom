@@ -583,6 +583,10 @@ struct Settings {
     openai_api_key: Option<String>,
     #[serde(rename = "anthropicApiKey")]
     anthropic_api_key: Option<String>,
+    /// Extra environment variables passed to the Claude Code CLI process.
+    /// Stored as a multiline string with `KEY=VALUE` per line (like a .env file).
+    #[serde(rename = "claudeCodeEnv")]
+    claude_code_env: Option<String>,
     #[serde(rename = "codexAuthMethod")]
     codex_auth_method: Option<String>,
     #[serde(rename = "activeCodexAccountId")]
@@ -1605,6 +1609,59 @@ fn auth_env_for(
     settings: &Settings,
     codex_home: Option<&Path>,
 ) -> Vec<(String, String)> {
+    fn is_valid_env_key(key: &str) -> bool {
+        let mut chars = key.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return false;
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    fn parse_env_kv_lines(input: &str) -> Vec<(String, String)> {
+        const RESERVED: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_HOME"];
+        let mut out: Vec<(String, String)> = Vec::new();
+        for line in input.lines() {
+            let mut s = line.trim();
+            if s.is_empty() || s.starts_with('#') {
+                continue;
+            }
+            if let Some(rest) = s.strip_prefix("export ") {
+                s = rest.trim();
+            }
+            let Some((k, v)) = s.split_once('=') else {
+                continue;
+            };
+            let key = k.trim();
+            if key.is_empty() || !is_valid_env_key(key) {
+                continue;
+            }
+            if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(key)) {
+                continue;
+            }
+
+            let mut value = v.trim().to_string();
+            // If the value is a single quoted/double quoted token, strip the outer quotes.
+            if value.len() >= 2 {
+                let bytes = value.as_bytes();
+                let first = bytes[0];
+                let last = bytes[bytes.len() - 1];
+                if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+                    value = value[1..value.len() - 1].to_string();
+                }
+            }
+
+            // Last writer wins for duplicate keys.
+            if let Some(pos) = out.iter().position(|(ek, _)| ek.eq_ignore_ascii_case(key)) {
+                out.remove(pos);
+            }
+            out.push((key.to_string(), value));
+        }
+        out
+    }
+
     let mut env = Vec::new();
     if let Some(value) = settings.openai_api_key.as_ref() {
         env.push(("OPENAI_API_KEY".to_string(), value.clone()));
@@ -1635,6 +1692,15 @@ fn auth_env_for(
             }
         }
     }
+
+    if agent_id == "claude-code" {
+        if let Some(raw) = settings.claude_code_env.as_deref() {
+            if !raw.trim().is_empty() {
+                env.extend(parse_env_kv_lines(raw));
+            }
+        }
+    }
+
     if agent_id != "codex" && agent_id != "opencode" {
         env.retain(|(key, _)| key != "OPENAI_API_KEY");
     }
@@ -6658,6 +6724,14 @@ async fn save_settings(
             .unwrap_or(false)
     {
         next.claude_auth_method = Some("api".to_string());
+    }
+    if next
+        .claude_code_env
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        next.claude_code_env = None;
     }
 
     // Validate and normalize summaries_agent setting

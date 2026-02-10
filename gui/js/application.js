@@ -316,10 +316,9 @@ function collectAuthInputs() {
   document.querySelectorAll("[data-auth-key]").forEach((input) => {
     const key = input.dataset.authKey;
     if (!key) return;
-    const value = input.value.trim();
-    if (value) {
-      auth[key] = value;
-    }
+    const allowEmpty = input.dataset.authAllowEmpty === "true";
+    const value = (input.value || "").trim();
+    if (value || allowEmpty) auth[key] = value;
   });
   return auth;
 }
