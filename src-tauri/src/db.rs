@@ -1655,7 +1655,7 @@ pub fn get_messages(conn: &Connection, task_id: &str) -> Result<Vec<serde_json::
 pub fn list_tasks(conn: &Connection) -> Result<Vec<TaskRecord>> {
     let mut stmt = conn.prepare_cached(
         "SELECT id, agent_id, codex_account_id, model, prompt, project_path, worktree_path, branch, context_id, status, status_state, cost, created_at, updated_at, title_summary, agent_session_id, total_tokens, context_window, claude_runtime, claude_team_name, claude_agent_name
-         FROM tasks ORDER BY created_at DESC"
+         FROM tasks ORDER BY created_at ASC"
     )?;
     let tasks = stmt.query_map([], |row| {
         Ok(TaskRecord {
