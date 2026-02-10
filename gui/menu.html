@@ -3095,10 +3095,16 @@
     <script src="js/vendor/bootstrap.min.js?v=1.0.3.10"></script>
     <script>
       // Window controls via tauri-bridge
-      $("#close-icon").click(() => {
-        if (window.tauriBridge && window.tauriBridge.remote) {
-          window.tauriBridge.remote.getCurrentWindow().close();
+      $("#close-icon").click(async () => {
+        if (!window.tauriBridge || !window.tauriBridge.remote) return;
+        try {
+          if (typeof window.flushPendingSettingsEdits === "function") {
+            await window.flushPendingSettingsEdits();
+          }
+        } catch (err) {
+          console.warn("[Harness] Failed to flush pending settings before close", err);
         }
+        window.tauriBridge.remote.getCurrentWindow().close();
       });
 
       $("#minimize-icon").click(() => {

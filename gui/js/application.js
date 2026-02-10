@@ -484,6 +484,16 @@ let currentSettings = {};
 let settingsLoaded = false;
 let recentProjectPaths = [];
 
+function setAuthInputsEnabled(enabled) {
+  document.querySelectorAll("[data-auth-key]").forEach((input) => {
+    input.disabled = !enabled;
+  });
+}
+
+// Prevent a common race: users paste keys/env vars immediately after launch,
+// then async settings restore overwrites their edits before autosave is active.
+setAuthInputsEnabled(false);
+
 function collectAuthInputs() {
   const auth = {};
   document.querySelectorAll("[data-auth-key]").forEach((input) => {
@@ -494,6 +504,37 @@ function collectAuthInputs() {
     if (value || allowEmpty) auth[key] = value;
   });
   return auth;
+}
+
+// Auto-save credentials/env vars as the user types (best-effort).
+// Historically these required clicking "Save Credentials", which was easy to miss and
+// made Claude auth/env edits feel non-persistent across restarts.
+let authAutoSaveTimeout = null;
+function scheduleAuthAutoSave() {
+  if (!settingsLoaded || isRestoringSettings) return;
+  if (authAutoSaveTimeout) {
+    clearTimeout(authAutoSaveTimeout);
+  }
+  authAutoSaveTimeout = setTimeout(() => {
+    authAutoSaveTimeout = null;
+    saveAuthSettingsFromUiSilently();
+  }, 400);
+}
+
+async function saveAuthSettingsFromUiSilently() {
+  if (!settingsLoaded || isRestoringSettings) return;
+  const auth = collectAuthInputs();
+  const keys = Object.keys(auth);
+  if (!keys.length) return;
+
+  const updated = Object.assign({}, currentSettings, auth);
+  currentSettings = updated;
+
+  try {
+    await ipcRenderer.invoke("saveSettings", updated);
+  } catch (err) {
+    console.warn("[Harness] auth settings auto-save failed", err);
+  }
 }
 
 function getProjectAllowlist() {
@@ -663,6 +704,52 @@ document.querySelectorAll("[data-auth-save]").forEach((button) => {
     saveSettingsFromUi();
   });
 });
+
+// Persist auth/env edits without requiring an explicit save click.
+document.querySelectorAll("[data-auth-key]").forEach((input) => {
+  // input: fires on every keystroke/paste; we debounce.
+  input.addEventListener("input", scheduleAuthAutoSave);
+  // change: fires on blur; useful when the user stops editing then navigates.
+  input.addEventListener("change", scheduleAuthAutoSave);
+});
+
+// If the app is closing or the page is being backgrounded, flush any pending credential edits.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "hidden") return;
+  if (!authAutoSaveTimeout) return;
+  clearTimeout(authAutoSaveTimeout);
+  authAutoSaveTimeout = null;
+  // Fire-and-forget; on close this is best-effort.
+  saveAuthSettingsFromUiSilently();
+});
+
+window.addEventListener("beforeunload", () => {
+  if (!authAutoSaveTimeout) return;
+  clearTimeout(authAutoSaveTimeout);
+  authAutoSaveTimeout = null;
+  // Fire-and-forget; we can't await during unload.
+  saveAuthSettingsFromUiSilently();
+});
+
+// Called by the window close button so we can persist the last edits before exiting.
+// This is more reliable than beforeunload/visibilitychange because we can await IPC.
+window.flushPendingSettingsEdits = async function flushPendingSettingsEdits() {
+  if (!settingsLoaded || isRestoringSettings) return;
+
+  if (authAutoSaveTimeout) {
+    clearTimeout(authAutoSaveTimeout);
+    authAutoSaveTimeout = null;
+    await saveAuthSettingsFromUiSilently();
+  }
+
+  if (typeof taskSettingsSaveTimeout !== "undefined" && taskSettingsSaveTimeout) {
+    clearTimeout(taskSettingsSaveTimeout);
+    taskSettingsSaveTimeout = null;
+    if (typeof saveTaskSettingsCore === "function") {
+      await saveTaskSettingsCore();
+    }
+  }
+};
 
 // Simplified auth state management (per research insights)
 let codexAuthState = { authenticated: false, method: null };
@@ -2733,6 +2820,7 @@ async function getSettings() {
   initSettingsToggles();
 
   // Mark settings as loaded
+  setAuthInputsEnabled(true);
   settingsLoaded = true;
 }
 
