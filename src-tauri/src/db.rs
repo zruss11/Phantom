@@ -1230,6 +1230,19 @@ pub fn get_task_agent_session_id(conn: &Connection, id: &str) -> Result<Option<S
     }
 }
 
+pub fn update_task_context_id(
+    conn: &Connection,
+    id: &str,
+    context_id: Option<&str>,
+) -> Result<()> {
+    let now = chrono::Utc::now().timestamp();
+    conn.execute(
+        "UPDATE tasks SET context_id = ?1, updated_at = ?2 WHERE id = ?3",
+        params![context_id, now, id],
+    )?;
+    Ok(())
+}
+
 pub fn get_task_context_id(conn: &Connection, id: &str) -> Result<Option<String>> {
     let result = conn.query_row(
         "SELECT context_id FROM tasks WHERE id = ?1",

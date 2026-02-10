@@ -9074,6 +9074,23 @@ fn create_context(
     db::create_context(&conn, name, payload.description.as_deref()).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateTaskContextPayload {
+    task_id: String,
+    context_id: Option<String>,
+}
+
+#[tauri::command]
+fn update_task_context(
+    payload: UpdateTaskContextPayload,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::update_task_context_id(&conn, &payload.task_id, payload.context_id.as_deref())
+        .map_err(|e| e.to_string())
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|v| v.trim().to_string())
@@ -13671,6 +13688,7 @@ fn main() {
             load_tasks,
             list_contexts,
             create_context,
+            update_task_context,
             // Automations
             load_automations,
             load_automation_runs,
