@@ -104,13 +104,15 @@ pub fn ensure_team(team_name: &str, cwd: &str, lead_session_id: &str) -> Result<
 
     let config_path =
         paths::team_config_path(team_name).ok_or_else(|| "home dir not found".to_string())?;
+
+    let _lock = lock_team_config(team_name)?;
     if config_path.exists() {
         return Ok(());
     }
 
     let lead_name = "controller";
     let lead_agent_id = format!("{lead_name}@{team_name}");
-    let now = chrono::Utc::now().timestamp_millis();
+    let now = chrono::Utc::now().timestamp();
     let config = TeamConfig {
         name: team_name.to_string(),
         description: None,
@@ -144,25 +146,27 @@ pub fn read_config(team_name: &str) -> Result<TeamConfig, String> {
     out
 }
 
-pub fn write_config(team_name: &str, config: &TeamConfig) -> Result<(), String> {
-    let lock = lock_team_config(team_name)?;
+pub fn add_member(team_name: &str, member: TeamMember) -> Result<(), String> {
+    let _lock = lock_team_config(team_name)?;
     let path =
         paths::team_config_path(team_name).ok_or_else(|| "home dir not found".to_string())?;
-    let bytes = serde_json::to_vec_pretty(config).map_err(|e| format!("serialize: {e}"))?;
-    let out = write_json_atomic(&path, &bytes);
-    lock.unlock().ok();
-    out
-}
-
-pub fn add_member(team_name: &str, member: TeamMember) -> Result<(), String> {
-    let mut config = read_config(team_name)?;
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read config: {e}"))?;
+    let mut config: TeamConfig =
+        serde_json::from_str(&raw).map_err(|e| format!("parse config: {e}"))?;
     config.members.retain(|m| m.name != member.name);
     config.members.push(member);
-    write_config(team_name, &config)
+    let bytes = serde_json::to_vec_pretty(&config).map_err(|e| format!("serialize: {e}"))?;
+    write_json_atomic(&path, &bytes)
 }
 
 pub fn remove_member(team_name: &str, name: &str) -> Result<(), String> {
-    let mut config = read_config(team_name)?;
+    let _lock = lock_team_config(team_name)?;
+    let path =
+        paths::team_config_path(team_name).ok_or_else(|| "home dir not found".to_string())?;
+    let raw = fs::read_to_string(&path).map_err(|e| format!("read config: {e}"))?;
+    let mut config: TeamConfig =
+        serde_json::from_str(&raw).map_err(|e| format!("parse config: {e}"))?;
     config.members.retain(|m| m.name != name);
-    write_config(team_name, &config)
+    let bytes = serde_json::to_vec_pretty(&config).map_err(|e| format!("serialize: {e}"))?;
+    write_json_atomic(&path, &bytes)
 }

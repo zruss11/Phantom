@@ -31,14 +31,18 @@ struct ApiState {
 }
 
 fn origin_allowed(origin: &str) -> bool {
+    let normalized = origin.trim_end_matches('/');
     matches!(
-        origin,
+        normalized,
         "http://localhost"
             | "http://127.0.0.1"
             | "https://localhost"
             | "https://127.0.0.1"
             | "tauri://localhost"
-    )
+    ) || normalized.starts_with("http://localhost:")
+      || normalized.starts_with("http://127.0.0.1:")
+      || normalized.starts_with("https://localhost:")
+      || normalized.starts_with("https://127.0.0.1:")
 }
 
 fn apply_cors_headers(resp: &mut Response<Body>, origin: Option<&str>) {
@@ -197,6 +201,14 @@ fn validate_name(value: &str) -> Result<(), Response<Body>> {
 }
 
 async fn read_body_json<T: DeserializeOwned>(body: Body) -> Result<T, Response<Body>> {
+    use hyper::body::HttpBody;
+    let upper = body.size_hint().upper().unwrap_or(u64::MAX);
+    if upper > 1_000_000 {
+        return Err(response_json(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({"error":"payload_too_large"}),
+        ));
+    }
     let bytes = hyper::body::to_bytes(body)
         .await
         .map_err(|_| response_json(StatusCode::BAD_REQUEST, json!({"error":"invalid_body"})))?;
@@ -569,7 +581,9 @@ pub(crate) async fn start_claude_controller_api(
             eprintln!(
                 "[Harness] Claude controller API could not bind to http://127.0.0.1:{port}: {err}"
             );
-            return Ok(());
+            return Err(anyhow::anyhow!(
+                "Claude controller API could not bind to http://127.0.0.1:{port}: {err}"
+            ));
         }
     };
 

@@ -177,7 +177,7 @@ impl ClaudeTeamsController {
                                 "timestamp": timestamp,
                             })
                             .to_string();
-                            let _ = tokio::task::spawn_blocking({
+                            if let Err(e) = tokio::task::spawn_blocking({
                                 let team_name = team_name.clone();
                                 let from = from.clone();
                                 move || {
@@ -195,7 +195,11 @@ impl ClaudeTeamsController {
                                     )
                                 }
                             })
-                            .await;
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|r| r) {
+                                eprintln!("[Harness] Failed to auto-approve plan for {from}: {e}");
+                            }
                             continue;
                         }
                         ParsedMessage::Structured(StructuredMessage::PermissionRequest {
@@ -211,7 +215,7 @@ impl ClaudeTeamsController {
                                 "timestamp": timestamp,
                             })
                             .to_string();
-                            let _ = tokio::task::spawn_blocking({
+                            if let Err(e) = tokio::task::spawn_blocking({
                                 let team_name = team_name.clone();
                                 let from = from.clone();
                                 move || {
@@ -229,7 +233,11 @@ impl ClaudeTeamsController {
                                     )
                                 }
                             })
-                            .await;
+                            .await
+                            .map_err(|e| e.to_string())
+                            .and_then(|r| r) {
+                                eprintln!("[Harness] Failed to auto-approve permission for {from}: {e}");
+                            }
                             continue;
                         }
                         ParsedMessage::Structured(_) => {}
@@ -290,7 +298,8 @@ impl ClaudeTeamsController {
             move || inbox::ensure_inbox_file(&team_name, &agent_name)
         })
         .await
-        .ok();
+        .map_err(|e| format!("ensure inbox join: {e}"))?
+        .map_err(|e| format!("ensure inbox: {e}"))?;
 
         let member = TeamMember {
             agent_id: agent_id.clone(),
@@ -299,7 +308,7 @@ impl ClaudeTeamsController {
                 .clone()
                 .unwrap_or_else(|| "general-purpose".to_string()),
             model: model.clone(),
-            joined_at: chrono::Utc::now().timestamp_millis(),
+            joined_at: chrono::Utc::now().timestamp(),
             tmux_pane_id: Some(String::new()),
             cwd: cwd.clone(),
             subscriptions: Some(Vec::new()),
