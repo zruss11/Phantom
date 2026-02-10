@@ -32,6 +32,7 @@ async fn main() -> anyhow::Result<()> {
             StreamingUpdate::AvailableCommands { .. } => {}
             StreamingUpdate::UserInputRequest { .. } => {}
             StreamingUpdate::PlanUpdate { .. } => {}
+            StreamingUpdate::PlanContent { .. } => {}
         }),
     )
     .await??;
