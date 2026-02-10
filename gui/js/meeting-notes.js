@@ -610,9 +610,13 @@
       return;
     }
 
-    events.forEach(function (ev) {
+    var VISIBLE_COUNT = 3;
+    var hasOverflow = events.length > VISIBLE_COUNT;
+
+    events.forEach(function (ev, idx) {
       var row = document.createElement('div');
       row.className = 'notes-upcoming-row';
+      if (idx >= VISIBLE_COUNT) row.classList.add('notes-upcoming-overflow');
 
       var date = document.createElement('div');
       date.className = 'notes-upcoming-date';
@@ -660,6 +664,21 @@
 
       list.appendChild(row);
     });
+
+    if (hasOverflow) {
+      var remaining = events.length - VISIBLE_COUNT;
+      var toggle = document.createElement('button');
+      toggle.className = 'notes-upcoming-toggle';
+      toggle.type = 'button';
+      toggle.textContent = 'Show ' + remaining + ' more';
+      toggle.addEventListener('click', function () {
+        var expanded = list.classList.toggle('notes-upcoming-expanded');
+        toggle.textContent = expanded
+          ? 'Show less'
+          : 'Show ' + remaining + ' more';
+      });
+      list.appendChild(toggle);
+    }
   }
 
   async function loadUpcomingEvents() {

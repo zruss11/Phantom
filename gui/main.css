@@ -2286,6 +2286,87 @@ input:checked + .slider:before {
   color: #fff;
 }
 
+.view-tasks-page .actions-cell .save-context {
+  color: #6c757d;
+  padding: 3px 4px;
+}
+
+.view-tasks-page .actions-cell .save-context:hover {
+  color: #4a9eff;
+}
+
+.view-tasks-page .actions-cell .save-context.has-context {
+  color: #4a9eff;
+}
+
+.view-tasks-page .actions-cell .save-context.has-context:hover {
+  color: #6bb1ff;
+}
+
+/* Context picker popover */
+.context-picker-popover {
+  position: fixed;
+  z-index: 10000;
+  background: #1e1e2e;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  min-width: 180px;
+  max-width: 260px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.context-picker-popover .context-picker-loading {
+  padding: 8px 12px;
+  color: #888;
+  font-size: 12px;
+}
+
+.context-picker-popover .context-picker-item {
+  display: block;
+  padding: 6px 12px;
+  color: #ccc;
+  font-size: 12px;
+  text-decoration: none;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.context-picker-popover .context-picker-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.context-picker-popover .context-picker-item.active {
+  color: #4a9eff;
+  font-weight: 600;
+}
+
+.context-picker-popover .context-picker-remove {
+  color: #ff6b6b;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  margin-bottom: 2px;
+}
+
+.context-picker-popover .context-picker-remove:hover {
+  background: rgba(255, 67, 67, 0.12);
+  color: #ff8a8a;
+}
+
+.context-picker-popover .context-picker-new {
+  color: #888;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  margin-top: 2px;
+}
+
+.context-picker-popover .context-picker-new:hover {
+  color: #4a9eff;
+}
+
 /* ============================================
    Phantom Analytics Center - Analytics Dashboard
    ============================================ */
@@ -8594,6 +8675,28 @@ input:checked + .slider:before {
 .notes-upcoming-cta:hover {
   background: rgba(255, 255, 255, 0.1);
   color: #fff;
+}
+
+/* Overflow: hide events beyond the visible count */
+.notes-upcoming-overflow {
+  display: none;
+}
+.notes-upcoming-expanded .notes-upcoming-overflow {
+  display: flex;
+}
+
+/* "Show N more" / "Show less" toggle */
+.notes-upcoming-toggle {
+  background: none;
+  border: none;
+  color: rgba(212, 165, 116, 0.6);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 6px 0 2px;
+  transition: color 0.15s;
+}
+.notes-upcoming-toggle:hover {
+  color: rgba(212, 165, 116, 0.9);
 }
 
 /* Date group */
