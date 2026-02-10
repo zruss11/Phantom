@@ -4359,9 +4359,11 @@ init();
         : null;
       const permissionMode = agentId === "codex"
         ? codexAccessMode
-        : (agentsWithOwnPermissions.includes(agentId)
-          ? "bypassPermissions"
-          : (prefs.permissionMode || "default"));
+        : (agentId === "claude-code" && planMode
+          ? "plan"
+          : (agentsWithOwnPermissions.includes(agentId)
+            ? "bypassPermissions"
+            : (prefs.permissionMode || "default")));
       const claudeRuntime = agentId === "claude-code"
         ? (document.getElementById("claudeDockerToggle")?.checked ? "docker" : "native")
         : null;

@@ -1825,7 +1825,13 @@ impl AgentProcessClient {
             } else if !cli_kind.is_opencode() {
                 // YOLO mode: always bypass permission prompts.
                 let effective_mode = if cli_kind.is_claude() {
-                    "bypassPermissions".to_string()
+                    // In plan mode, pass through to let Claude operate in read-only planning.
+                    // Otherwise bypass for non-interactive usage.
+                    if mode == "plan" {
+                        "plan".to_string()
+                    } else {
+                        "bypassPermissions".to_string()
+                    }
                 } else {
                     mode.to_string()
                 };

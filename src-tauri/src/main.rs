@@ -5479,6 +5479,8 @@ pub(crate) async fn create_task_from_discord(
             .codex_access_mode
             .clone()
             .unwrap_or_else(|| "bypassPermissions".to_string())
+    } else if agent_id == "claude-code" && plan_mode {
+        "plan".to_string()
     } else if agents_with_own_permissions.contains(&agent_id.as_str()) {
         "bypassPermissions".to_string()
     } else {

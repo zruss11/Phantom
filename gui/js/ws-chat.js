@@ -124,6 +124,28 @@
 
   function handlePermissionRequest(taskId, request) {
     if (!request) return;
+
+    // ExitPlanMode is a special permission request — render it as a plan card
+    // instead of a generic tool approval prompt.
+    if (request.tool_name === 'ExitPlanMode') {
+      var input = request.input || {};
+      if (typeof input === 'string') {
+        try { input = JSON.parse(input); } catch (e) { input = {}; }
+      }
+      var plan = typeof input.plan === 'string' ? input.plan : '';
+      var allowedPrompts = Array.isArray(input.allowedPrompts) ? input.allowedPrompts : [];
+
+      // Emit plan content so the chat log renders the markdown plan UI
+      emitStreaming(taskId, {
+        type: 'streaming',
+        message_type: 'plan_content',
+        content: plan,
+        request_id: request.request_id || '',
+        allowed_prompts: allowedPrompts,
+      });
+      return;
+    }
+
     emitStreaming(taskId, {
       type: 'streaming',
       message_type: 'permission_request',
