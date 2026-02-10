@@ -18,9 +18,9 @@
   }
 
   async function getBridgePort() {
-    const tauri = window.__TAURI__ || null;
-    const invoke = tauri && tauri.core && typeof tauri.core.invoke === 'function'
-      ? tauri.core.invoke
+    const bridge = window.tauriBridge || null;
+    const invoke = bridge && bridge.ipcRenderer && typeof bridge.ipcRenderer.invoke === 'function'
+      ? bridge.ipcRenderer.invoke
       : null;
     if (!invoke) return null;
     try {
@@ -214,6 +214,39 @@
           break;
         case 'permission_request':
           handlePermissionRequest(taskId, data.request);
+          break;
+        case 'user_input_request':
+          if (data.request) {
+            emitStreaming(taskId, {
+              type: 'streaming',
+              message_type: 'user_input_request',
+              request_id: data.request.request_id || '',
+              tool_name: data.request.tool_name || null,
+              description: data.request.description || null,
+              raw_input: data.request.input ? toJsonString(data.request.input) : null,
+            });
+          }
+          break;
+        case 'plan_update':
+          if (data) {
+            emitStreaming(taskId, {
+              type: 'streaming',
+              message_type: 'plan_update',
+              content: data.content || '',
+              file_path: data.file_path || null,
+            });
+          }
+          break;
+        case 'plan_content':
+          if (data) {
+            emitStreaming(taskId, {
+              type: 'streaming',
+              message_type: 'plan_content',
+              content: data.content || '',
+              request_id: data.request_id || '',
+              allowed_prompts: Array.isArray(data.allowed_prompts) ? data.allowed_prompts : [],
+            });
+          }
           break;
         default:
           break;

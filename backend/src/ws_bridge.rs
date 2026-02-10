@@ -665,11 +665,15 @@ async fn route_cli_message(bridge: &Arc<WsBridge>, session: &Arc<Session>, value
                 st.num_turns = num_turns;
             }
             if let Some(model_usage) = value.get("modelUsage").and_then(|v| v.as_object()) {
+                let mut max_percent: i64 = 0;
                 for usage in model_usage.values() {
                     let ctx = usage
                         .get("contextWindow")
                         .and_then(|v| v.as_f64())
                         .unwrap_or(0.0);
+                    if ctx == 0.0 {
+                        continue;
+                    }
                     let input = usage
                         .get("inputTokens")
                         .and_then(|v| v.as_f64())
@@ -678,11 +682,13 @@ async fn route_cli_message(bridge: &Arc<WsBridge>, session: &Arc<Session>, value
                         .get("outputTokens")
                         .and_then(|v| v.as_f64())
                         .unwrap_or(0.0);
-                    if ctx > 0.0 {
-                        let mut st = session.state.write().await;
-                        st.context_used_percent = (((input + output) / ctx) * 100.0).round() as i64;
+                    let percent = (((input + output) / ctx) * 100.0).round() as i64;
+                    if percent > max_percent {
+                        max_percent = percent;
                     }
                 }
+                let mut st = session.state.write().await;
+                st.context_used_percent = max_percent;
             }
 
             let browser_msg = BrowserIncomingMessage::Result {
@@ -763,7 +769,7 @@ async fn route_cli_message(bridge: &Arc<WsBridge>, session: &Arc<Session>, value
                     description,
                     tool_use_id,
                     agent_id,
-                    timestamp: chrono::Utc::now().timestamp_millis(),
+                    timestamp: chrono::Utc::now().timestamp(),
                 };
                 {
                     let mut guard = session.pending_permissions.lock().await;
