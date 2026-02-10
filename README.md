@@ -93,7 +93,7 @@ gh auth login
 
 #### Linear
 
-1. Go to **[Linear Settings → API](https://linear.app/settings/api)**
+1. Go to **[Linear Settings → API](https://linear.app/settings/account/security)**
 2. Click **"Create new API key"**
 3. Give it a label (e.g., "Phantom Harness")
 4. Copy the key and paste it into the Command Center config
