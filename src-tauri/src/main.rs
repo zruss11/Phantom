@@ -1654,7 +1654,7 @@ fn auth_env_for(
             }
 
             // Last writer wins for duplicate keys.
-            if let Some(pos) = out.iter().position(|(ek, _)| ek == key) {
+            if let Some(pos) = out.iter().position(|(ek, _)| ek.eq_ignore_ascii_case(key)) {
                 out.remove(pos);
             }
             out.push((key.to_string(), value));
