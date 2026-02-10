@@ -622,6 +622,7 @@ async fn tool_create_task(arguments: Value, server_state: McpServerState) -> Res
     let payload = CreateAgentPayload {
         agent_id: agent_id.clone(),
         prompt: args.prompt,
+        context_id: None,
         project_path: args.project_path.clone(),
         base_branch: args.base_branch.clone(),
         plan_mode,
