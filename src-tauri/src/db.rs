@@ -185,6 +185,17 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
     let _ = conn.query_row("PRAGMA cache_size = -16000", [], |_| Ok(()));
     let _ = conn.query_row("PRAGMA mmap_size = 268435456", [], |_| Ok(())); // 256MB memory-mapped I/O
     conn.execute(
+        "CREATE TABLE IF NOT EXISTS contexts (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+        [],
+    )?;
+
+    conn.execute(
         "CREATE TABLE IF NOT EXISTS tasks (
             id TEXT PRIMARY KEY,
             agent_id TEXT NOT NULL,
@@ -201,18 +212,8 @@ pub fn init_db(path: &PathBuf) -> Result<Connection> {
             updated_at INTEGER NOT NULL,
             claude_runtime TEXT,
             claude_team_name TEXT,
-            claude_agent_name TEXT
-        )",
-        [],
-    )?;
-
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS contexts (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            claude_agent_name TEXT,
+            FOREIGN KEY(context_id) REFERENCES contexts(id) ON DELETE SET NULL
         )",
         [],
     )?;
@@ -1344,11 +1345,7 @@ pub fn build_shared_context_brief(
     let tasks: Vec<ContextTaskRow> = rows.filter_map(|r| r.ok()).collect();
 
     if tasks.is_empty() {
-        if out.is_empty() {
-            out.push_str("No prior tasks in this context.");
-        } else {
-            out.push_str("No prior tasks in this context.");
-        }
+        out.push_str("No prior tasks in this context.");
         if out.len() > max_chars {
             return Ok(safe_prefix(&out, max_chars).to_string());
         }
@@ -1395,7 +1392,7 @@ pub fn build_shared_context_brief(
     }
 
     if out.len() > max_chars {
-        let prefix = safe_prefix(&out, max_chars);
+        let prefix = safe_prefix(&out, max_chars.saturating_sub(3));
         let mut clipped = prefix.to_string();
         if clipped.len() < out.len() {
             clipped.push_str("...");

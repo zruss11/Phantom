@@ -6012,7 +6012,7 @@ pub(crate) async fn start_task_internal(
     };
     let mut prompt = prompt;
 
-    if !prompt.contains("[Shared Context]") {
+    if !prompt.trim_start().starts_with("[Shared Context]") {
         let brief_opt = {
             let conn = state.db.lock().map_err(|e| e.to_string())?;
             match db::get_task_context_id(&conn, &task_id).map_err(|e| e.to_string())? {
