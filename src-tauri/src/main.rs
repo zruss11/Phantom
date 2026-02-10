@@ -588,6 +588,10 @@ struct Settings {
     openai_api_key: Option<String>,
     #[serde(rename = "anthropicApiKey")]
     anthropic_api_key: Option<String>,
+    /// Extra environment variables passed to the Claude Code CLI process.
+    /// Stored as a multiline string with `KEY=VALUE` per line (like a .env file).
+    #[serde(rename = "claudeCodeEnv")]
+    claude_code_env: Option<String>,
     #[serde(rename = "codexAuthMethod")]
     codex_auth_method: Option<String>,
     #[serde(rename = "activeCodexAccountId")]
@@ -947,8 +951,20 @@ struct RepoBranches {
     branches: Vec<String>,
     default_branch: Option<String>,
     current_branch: Option<String>,
+    open_prs: Vec<BranchPrInfo>,
     source: String,
     error: Option<String>,
+}
+
+/// Lightweight PR info for annotating branch dropdowns.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BranchPrInfo {
+    branch: String,
+    number: u32,
+    url: String,
+    title: String,
+    updated_at: Option<String>,
 }
 
 /// Git state for PR creation readiness
@@ -1655,6 +1671,59 @@ fn auth_env_for(
     settings: &Settings,
     codex_home: Option<&Path>,
 ) -> Vec<(String, String)> {
+    fn is_valid_env_key(key: &str) -> bool {
+        let mut chars = key.chars();
+        let Some(first) = chars.next() else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return false;
+        }
+        chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    fn parse_env_kv_lines(input: &str) -> Vec<(String, String)> {
+        const RESERVED: &[&str] = &["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CODEX_HOME"];
+        let mut out: Vec<(String, String)> = Vec::new();
+        for line in input.lines() {
+            let mut s = line.trim();
+            if s.is_empty() || s.starts_with('#') {
+                continue;
+            }
+            if let Some(rest) = s.strip_prefix("export ") {
+                s = rest.trim();
+            }
+            let Some((k, v)) = s.split_once('=') else {
+                continue;
+            };
+            let key = k.trim();
+            if key.is_empty() || !is_valid_env_key(key) {
+                continue;
+            }
+            if RESERVED.iter().any(|r| r.eq_ignore_ascii_case(key)) {
+                continue;
+            }
+
+            let mut value = v.trim().to_string();
+            // If the value is a single quoted/double quoted token, strip the outer quotes.
+            if value.len() >= 2 {
+                let bytes = value.as_bytes();
+                let first = bytes[0];
+                let last = bytes[bytes.len() - 1];
+                if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+                    value = value[1..value.len() - 1].to_string();
+                }
+            }
+
+            // Last writer wins for duplicate keys.
+            if let Some(pos) = out.iter().position(|(ek, _)| ek.eq_ignore_ascii_case(key)) {
+                out.remove(pos);
+            }
+            out.push((key.to_string(), value));
+        }
+        out
+    }
+
     let mut env = Vec::new();
     if let Some(value) = settings.openai_api_key.as_ref() {
         env.push(("OPENAI_API_KEY".to_string(), value.clone()));
@@ -1685,6 +1754,15 @@ fn auth_env_for(
             }
         }
     }
+
+    if agent_id == "claude-code" {
+        if let Some(raw) = settings.claude_code_env.as_deref() {
+            if !raw.trim().is_empty() {
+                env.extend(parse_env_kv_lines(raw));
+            }
+        }
+    }
+
     if agent_id != "codex" && agent_id != "opencode" {
         env.retain(|(key, _)| key != "OPENAI_API_KEY");
     }
@@ -2478,6 +2556,58 @@ async fn run_gh_command(repo_root: &Path, args: &[&str]) -> Result<String, Strin
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GhOpenPr {
+    number: u32,
+    url: String,
+    title: String,
+    head_ref_name: String,
+    updated_at: Option<String>,
+    #[serde(default)]
+    is_cross_repository: bool,
+}
+
+async fn get_open_prs_via_gh(repo_root: &Path) -> Result<Vec<BranchPrInfo>, String> {
+    let gh_path = resolve_gh_binary()?;
+    let output = TokioCommand::new(&gh_path)
+        .args(&[
+            "pr",
+            "list",
+            "--state",
+            "open",
+            "--json",
+            "number,url,title,headRefName,updatedAt,isCrossRepository",
+            "--limit",
+            "200",
+        ])
+        .current_dir(repo_root)
+        .output()
+        .await
+        .map_err(|e| format!("gh not available: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("gh command failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let prs = serde_json::from_str::<Vec<GhOpenPr>>(&stdout)
+        .map_err(|e| format!("Failed to parse gh output: {}", e))?;
+
+    Ok(prs
+        .into_iter()
+        .filter(|pr| !pr.head_ref_name.trim().is_empty() && !pr.is_cross_repository)
+        .map(|pr| BranchPrInfo {
+            branch: pr.head_ref_name,
+            number: pr.number,
+            url: pr.url,
+            title: pr.title,
+            updated_at: pr.updated_at,
+        })
+        .collect())
+}
+
 async fn get_repo_branches_via_gh(
     repo_root: &Path,
     owner: &str,
@@ -2523,10 +2653,14 @@ async fn get_repo_branches_via_gh(
         }
     }
 
+    // Best-effort: don't fail branch listing if PRs cannot be loaded (auth, gh missing, etc).
+    let open_prs = get_open_prs_via_gh(repo_root).await.unwrap_or_default();
+
     Ok(RepoBranches {
         branches,
         default_branch,
         current_branch,
+        open_prs,
         source: "gh".to_string(),
         error: None,
     })
@@ -2542,6 +2676,7 @@ async fn get_repo_branches(project_path: Option<String>) -> Result<RepoBranches,
                 branches: Vec::new(),
                 default_branch: None,
                 current_branch: None,
+                open_prs: Vec::new(),
                 source: "none".to_string(),
                 error: Some("Not a git repository".to_string()),
             });
@@ -2572,6 +2707,7 @@ async fn get_repo_branches(project_path: Option<String>) -> Result<RepoBranches,
         branches,
         default_branch: None,
         current_branch,
+        open_prs: Vec::new(),
         source: "git".to_string(),
         error: None,
     })
@@ -7267,6 +7403,14 @@ async fn save_settings(
             .unwrap_or(false)
     {
         next.claude_auth_method = Some("api".to_string());
+    }
+    if next
+        .claude_code_env
+        .as_ref()
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(false)
+    {
+        next.claude_code_env = None;
     }
 
     // Validate and normalize summaries_agent setting
