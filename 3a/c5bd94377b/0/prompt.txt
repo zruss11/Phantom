@@ -1,0 +1,105 @@
+start the app in dev
+
+---
+
+<task-notification>
+<task-id>b7e17b4</task-id>
+<output-file>REDACTED.output</output-file>
+<status>completed</status>
+<summary>Background command "Start Tauri app in development mode" completed (exit code 0)</summary>
+</task-notification>
+Read the output file to retrieve the result: REDACTED.output
+
+---
+
+start a new ci build release. do it as 1.0.4.alpha1.
+
+---
+
+Base directory for this skill: /Users/zachrussell/.claude/skills/tauri-release
+
+# Tauri Release
+
+Bump versions and trigger CI releases for Tauri desktop applications.
+
+## When to Use
+
+- User requests a new release or version bump
+- User says "release", "push a release", "new version", "bump to X.Y.Z"
+- User wants to trigger a CI build for distribution
+
+## Version File Locations
+
+Tauri projects have version information in multiple files that must stay synchronized:
+
+| File | Field | Purpose |
+|------|-------|---------|
+| `src-tauri/tauri.conf.json` | `"version"` | Primary app version for distribution |
+| `src-tauri/Cargo.toml` | `version` | Tauri frontend crate version |
+| `backend/Cargo.toml` | `version` (if exists) | Backend crate version |
+
+## Release Workflow
+
+### 1. Determine Version
+
+Parse the user's requested version. Common formats:
+- Semantic: `1.2.3`
+- Pre-release: `1.2.3-alpha1`, `1.2.3-beta2`, `1.2.3-rc1`
+- If user says "patch bump", increment the patch version
+- If user says "minor bump", increment the minor version
+
+### 2. Update Version Files
+
+Update all version files to the new version:
+
+```bash
+# tauri.conf.json - update the "version" field
+# src-tauri/Cargo.toml - update version = "X.Y.Z"
+# backend/Cargo.toml - update version = "X.Y.Z" (if exists)
+```
+
+### 3. Commit and Tag
+
+Create a commit and tag following this pattern:
+
+```bash
+git add src-tauri/tauri.conf.json src-tauri/Cargo.toml backend/Cargo.toml
+git commit -m "chore: bump version to X.Y.Z"
+git tag vX.Y.Z
+```
+
+### 4. Push to Trigger CI
+
+Push both the commit and tag to trigger CI release:
+
+```bash
+git push origin main --tags
+```
+
+The `v*` tag pattern triggers the release workflow which:
+- Builds on macOS (ARM64)
+- Signs with Apple certificates
+- Generates `latest.json` for auto-updater
+- Creates a draft GitHub release
+
+## Version Format Guidelines
+
+- Always use semver: `MAJOR.MINOR.PATCH`
+- Pre-release suffix: `-alpha1`, `-beta2`, `-rc1`
+- Tag prefix: Always use `v` prefix (e.g., `v1.2.3`)
+
+## Post-Release
+
+After CI completes, remind the user to:
+1. Check GitHub Actions for successful build
+2. Review the draft release
+3. Publish when ready
+
+## Notes
+
+- No static `release.json` exists - CI generates `latest.json` dynamically
+- Keep all Cargo.toml versions synchronized with tauri.conf.json
+- The release workflow creates a **draft** release for review before publishing
+
+
+ARGUMENTS: 1.0.4.alpha1
