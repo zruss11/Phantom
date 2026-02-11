@@ -1,0 +1,28 @@
+{
+  "cli_version": "0.4.2",
+  "checkpoint_id": "f1eff4d8d5c8",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "backend/Cargo.toml",
+    "src-tauri/Cargo.toml",
+    "src-tauri/tauri.conf.json"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f1/eff4d8d5c8/0/metadata.json",
+      "transcript": "/f1/eff4d8d5c8/0/full.jsonl",
+      "context": "/f1/eff4d8d5c8/0/context.md",
+      "content_hash": "/f1/eff4d8d5c8/0/content_hash.txt",
+      "prompt": "/f1/eff4d8d5c8/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 49415,
+    "cache_creation_tokens": 0,
+    "cache_read_tokens": 197632,
+    "output_tokens": 912,
+    "api_call_count": 5
+  }
+}
