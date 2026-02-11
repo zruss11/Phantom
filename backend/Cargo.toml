@@ -1,6 +1,6 @@
 [package]
 name = "phantom_harness_backend"
-version = "1.0.3"
+version = "1.0.4.alpha1"
 edition = "2021"
 
 [dependencies]
