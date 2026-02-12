@@ -269,10 +269,6 @@
                           <label class="muted-label">Thinking Level</label>
                           <div id="reasoningEffortDropdown" class="custom-dropdown-wrapper"></div>
                         </div>
-                        <div class="form-group col-4" id="agentModeGroup" style="display: none;">
-                          <label class="muted-label">Agent</label>
-                          <div id="agentModeDropdown" class="custom-dropdown-wrapper"></div>
-                        </div>
                       </div>
                     </div>
                     <div class="col-5">
@@ -2221,7 +2217,7 @@
                     <label class="settings-label">Project Allowlist</label>
                     <div class="list-group" id="taskProjectAllowlistList"></div>
                     <small class="text-muted d-block mt-2">
-                      Star recent projects to allow Discord tasks to run in them.
+                      Star recent projects to pin them. Click a starred project to configure its workspace scripts.
                     </small>
                   </div>
                 </div>
@@ -2420,6 +2416,79 @@
           </div>
         </div>
       </section>
+
+      <!-- Project Scripts Modal -->
+      <div
+        class="modal fade mt-5"
+        id="projectScriptsModal"
+        tabindex="-1"
+        role="dialog"
+        aria-labelledby="projectScriptsModalLabel"
+        aria-hidden="true"
+      >
+        <div class="modal-dialog mt-5" role="document">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="projectScriptsModalLabel">
+                Project Scripts
+              </h5>
+              <button
+                type="button"
+                class="close"
+                data-dismiss="modal"
+                aria-label="Close"
+              >
+                <span aria-hidden="true"><i class="fal fa-times"></i></span>
+              </button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted mb-3" id="projectScriptsModalPath" style="font-size: 12px; word-break: break-all;"></p>
+              <div class="form-group mb-3">
+                <label class="settings-label" for="projectScriptsSetupInput">Setup Script</label>
+                <input
+                  type="text"
+                  class="form-control"
+                  id="projectScriptsSetupInput"
+                  placeholder="./setup.sh"
+                />
+                <small class="text-muted d-block mt-1">
+                  Runs from the task worktree. Use <code>{workspace}</code> for the absolute path.<br>
+                  Example: <code>./setup.sh</code> or <code>pnpm install</code>.
+                </small>
+              </div>
+              <div class="form-group mb-2">
+                <label class="settings-label" for="projectScriptsRunInput">Run Script</label>
+                <input
+                  type="text"
+                  class="form-control"
+                  id="projectScriptsRunInput"
+                  placeholder="./run.sh"
+                />
+                <small class="text-muted d-block mt-1">
+                  Used by the chat view play button for one-click runs.<br>
+                  Example: <code>./run.sh</code> or <code>pnpm dev</code>.
+                </small>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button
+                type="button"
+                class="btn btn-sm btn-secondary"
+                data-dismiss="modal"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                class="btn btn-sm btn-brand"
+                id="projectScriptsSaveBtn"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div
         class="modal fade mt-5"

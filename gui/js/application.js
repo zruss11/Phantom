@@ -36,6 +36,8 @@ const AGENT_NOTIFICATION_TIMEOUT_OPTIONS = [
   { value: '30', name: '30 seconds' },
   { value: '60', name: '1 minute' }
 ];
+const DEFAULT_WORKSPACE_SETUP_SCRIPT = "./setup.sh";
+const DEFAULT_WORKSPACE_RUN_SCRIPT = "./run.sh";
 
 function escapeHtml(text) {
   if (text === null || text === undefined) return "";
@@ -51,7 +53,6 @@ function escapeHtml(text) {
 let permissionDropdown = null;
 let execModelDropdown = null;
 let reasoningEffortDropdown = null;
-let agentModeDropdown = null;
 let baseBranchDropdown = null;
 let contextDropdown = null;
 let agentNotificationTimeoutDropdown = null;
@@ -93,7 +94,6 @@ function initCustomDropdowns() {
   const permContainer = document.getElementById('permissionModeDropdown');
   const execContainer = document.getElementById('execModelDropdown');
   const reasoningContainer = document.getElementById('reasoningEffortDropdown');
-  const modeContainer = document.getElementById('agentModeDropdown');
   const baseBranchContainer = document.getElementById('baseBranchDropdown');
   const contextContainer = document.getElementById('contextDropdown');
   const agentNotificationTimeoutContainer = document.getElementById('agentNotificationTimeoutDropdown');
@@ -142,23 +142,6 @@ function initCustomDropdowns() {
       }
     });
     window.reasoningEffortDropdown = reasoningEffortDropdown;
-  }
-
-  if (modeContainer && window.CustomDropdown) {
-    agentModeDropdown = new window.CustomDropdown({
-      container: modeContainer,
-      items: [{ value: 'default', name: 'Use default', description: '' }],
-      placeholder: 'Agent Mode',
-      defaultValue: 'default',
-      onChange: function(value) {
-        console.log('[Harness] Agent mode changed:', value);
-        // Don't save during restoration to avoid overwriting saved preferences
-        if (!isRestoringSettings) {
-          saveTaskSettings();
-        }
-      }
-    });
-    window.agentModeDropdown = agentModeDropdown;
   }
 
   if (baseBranchContainer && window.CustomDropdown) {
@@ -543,6 +526,38 @@ function getProjectAllowlist() {
     : [];
 }
 
+function getProjectScriptsMap() {
+  return currentSettings.taskProjectScripts && typeof currentSettings.taskProjectScripts === "object"
+    ? currentSettings.taskProjectScripts
+    : {};
+}
+
+function getProjectScripts(projectPath) {
+  const map = getProjectScriptsMap();
+  return map[projectPath] || { setup: "", run: "" };
+}
+
+function saveProjectScripts(projectPath, setup, run) {
+  if (!projectPath) return;
+  const map = getProjectScriptsMap();
+  map[projectPath] = {
+    setup: (setup || "").trim(),
+    run: (run || "").trim(),
+  };
+  currentSettings.taskProjectScripts = map;
+  saveSettingsFromUi();
+}
+
+function openProjectScriptsModal(projectPath) {
+  const scripts = getProjectScripts(projectPath);
+  $("#projectScriptsModalLabel").text(projectPathLabel(projectPath) + " — Scripts");
+  $("#projectScriptsModalPath").text(projectPath);
+  $("#projectScriptsSetupInput").val(scripts.setup || "");
+  $("#projectScriptsRunInput").val(scripts.run || "");
+  $("#projectScriptsSaveBtn").data("path", projectPath);
+  $("#projectScriptsModal").modal("show");
+}
+
 function addRecentProjectPath(path) {
   const trimmed = (path || "").trim();
   if (!trimmed) return;
@@ -588,22 +603,56 @@ function renderProjectAllowlist() {
   entries.forEach((entry) => {
     const name = projectPathLabel(entry.path);
     const starClass = entry.starred ? "fas" : "fal";
+    const scripts = entry.starred ? getProjectScripts(entry.path) : null;
+    const hasScripts = scripts && (scripts.setup || scripts.run);
     const item = $(
       '<div class="list-group-item project-allowlist-item d-flex align-items-center justify-content-between"></div>',
     );
-    const label = $("<div></div>")
+    const labelWrap = $("<div></div>").addClass("d-flex align-items-center text-truncate").css("gap", "8px");
+    const label = $("<span></span>")
       .addClass("text-truncate")
       .text(name)
       .attr("title", entry.path);
-    const button = $(
+    labelWrap.append(label);
+    if (entry.starred && hasScripts) {
+      labelWrap.append('<i class="fal fa-terminal" style="opacity:0.4; font-size:11px;" title="Scripts configured"></i>');
+    }
+    const buttons = $('<div class="d-flex" style="gap:4px;"></div>');
+    if (entry.starred) {
+      const editBtn = $(
+        '<button type="button" class="btn btn-sm btn-outline-secondary project-scripts-edit" title="Configure scripts"><i class="fal fa-cog"></i></button>',
+      );
+      editBtn.data("path", entry.path);
+      buttons.append(editBtn);
+    }
+    const starBtn = $(
       '<button type="button" class="btn btn-sm btn-outline-secondary project-allowlist-star"></button>',
     );
-    button.data("path", entry.path);
-    button.append(`<i class="${starClass} fa-star"></i>`);
-    item.append(label, button);
+    starBtn.data("path", entry.path);
+    starBtn.append(`<i class="${starClass} fa-star"></i>`);
+    buttons.append(starBtn);
+    item.append(labelWrap, buttons);
     container.append(item);
   });
 }
+
+// Open modal when clicking the gear icon on a starred project
+$(document).on("click", ".project-scripts-edit", function () {
+  const path = $(this).data("path");
+  if (path) openProjectScriptsModal(path);
+});
+
+// Save button in the project scripts modal
+$(document).on("click", "#projectScriptsSaveBtn", function () {
+  const path = $(this).data("path");
+  if (!path) return;
+  const setup = ($("#projectScriptsSetupInput").val() || "").toString().trim();
+  const run = ($("#projectScriptsRunInput").val() || "").toString().trim();
+  saveProjectScripts(path, setup, run);
+  $("#projectScriptsModal").modal("hide");
+  renderProjectAllowlist();
+  sendNotification("Project scripts saved", "green");
+});
 
 function updateProjectAllowlist(nextAllowlist) {
   currentSettings.taskProjectAllowlist = nextAllowlist;
@@ -664,6 +713,7 @@ async function saveSettingsFromUi() {
       codexFeatureUnifiedExec: $("#codexFeatureUnifiedExec").is(":checked"),
       codexFeatureCollab: $("#codexFeatureCollab").is(":checked"),
       codexFeatureApps: $("#codexFeatureApps").is(":checked"),
+      taskProjectScripts: getProjectScriptsMap(),
     },
     collectAuthInputs(),
   );
@@ -2785,6 +2835,13 @@ async function getSettings() {
   } else {
     currentSettings.taskProjectAllowlist = [];
   }
+  // Load per-project scripts map
+  if (settingsPayload.taskProjectScripts && typeof settingsPayload.taskProjectScripts === "object") {
+    currentSettings.taskProjectScripts = settingsPayload.taskProjectScripts;
+  } else {
+    currentSettings.taskProjectScripts = {};
+  }
+
   renderProjectAllowlist();
 
 
@@ -2975,7 +3032,7 @@ async function saveTaskSettingsCore(agentIdOverride) {
   const permMode = permissionDropdown ? permissionDropdown.getValue() : "default";
   const execVal = execModelDropdown ? execModelDropdown.getValue() : "default";
   const reasoningEffortVal = reasoningEffortDropdown ? reasoningEffortDropdown.getValue() : "default";
-  const agentModeVal = agentModeDropdown ? agentModeDropdown.getValue() : "default";
+  const planModeVal = $("#planModeToggle").is(":checked");
   console.log(
     "[Harness] Saving settings for",
     agentId,
@@ -2985,16 +3042,15 @@ async function saveTaskSettingsCore(agentIdOverride) {
     execVal,
     "reasoningEffort:",
     reasoningEffortVal,
-    "agentMode:",
-    agentModeVal,
+    "planMode:",
+    planModeVal,
   );
 
-  // Save current agent's settings (permission mode + model + reasoning effort + agent mode)
+  // Save current agent's settings (permission mode + model + reasoning effort)
   agentModels[agentId] = {
     permissionMode: permMode,
     execModel: execVal,
     reasoningEffort: reasoningEffortVal,
-    agentMode: agentModeVal,
   };
 
   const baseBranchValue = baseBranchDropdown ? baseBranchDropdown.getValue() : "default";
@@ -3006,15 +3062,22 @@ async function saveTaskSettingsCore(agentIdOverride) {
     contextValue && contextValue !== "none" && contextValue !== "__new__"
       ? contextValue
       : null;
+  const projectPath = getProjectPath();
+  const projectScripts = getProjectScripts(projectPath);
+  const workspaceSetupScript = projectScripts.setup || null;
+  const workspaceRunScript = projectScripts.run || null;
 
   const taskSettings = {
-    taskProjectPath: getProjectPath(),
-    taskPlanMode: $("#planModeToggle").is(":checked"),
+    taskProjectPath: projectPath,
+    taskPlanMode: planModeVal,
     taskUseWorktree: $("#useWorktreeToggle").is(":checked"),
     taskBaseBranch: baseBranch,
     taskContextId: contextId,
     taskLastAgent: agentId,
     taskAgentModels: agentModels,
+    taskWorkspaceSetupScript: workspaceSetupScript,
+    taskWorkspaceRunScript: workspaceRunScript,
+    taskProjectScripts: getProjectScriptsMap(),
     taskClaudeRuntime: (() => {
       const runtimeToggle = document.getElementById("claudeDockerToggle");
       if (!runtimeToggle) return "native";
@@ -3099,23 +3162,6 @@ function restoreAgentModelSelections(agentId) {
       if (hasReasoningOption) {
         reasoningEffortDropdown.setValue(prefs.reasoningEffort);
         console.log("[Harness] Set reasoningEffortDropdown to:", reasoningEffortDropdown.getValue());
-      }
-    }
-
-    // Restore agent mode (for Codex and OpenCode)
-    const agentsWithModes = ["codex", "opencode"];
-    if (agentsWithModes.includes(agentId) && prefs.agentMode && agentModeDropdown) {
-      const modeOptions = agentModeDropdown.items.map(item => item.value);
-      const hasModeOption = modeOptions.includes(prefs.agentMode);
-      console.log(
-        "[Harness] Restore agentMode:",
-        prefs.agentMode,
-        "exists:",
-        hasModeOption,
-      );
-      if (hasModeOption) {
-        agentModeDropdown.setValue(prefs.agentMode);
-        console.log("[Harness] Set agentModeDropdown to:", agentModeDropdown.getValue());
       }
     }
   } else {
@@ -3381,7 +3427,6 @@ init();
   function updateMultiAgentUiVisibility() {
     const multi = selectedAgentIds.size > 1;
     const permissionModeGroup = document.getElementById("permissionModeGroup");
-    const agentModeGroup = document.getElementById("agentModeGroup");
     const reasoningEffortGroup = document.getElementById("reasoningEffortGroup");
     const modelGroup = execModelDropdown && execModelDropdown.container
       ? execModelDropdown.container.closest(".form-group")
@@ -3389,9 +3434,6 @@ init();
 
     if (permissionModeGroup) {
       permissionModeGroup.classList.toggle("multi-agent-hidden", multi);
-    }
-    if (agentModeGroup) {
-      agentModeGroup.classList.toggle("multi-agent-hidden", multi);
     }
     if (reasoningEffortGroup) {
       reasoningEffortGroup.classList.toggle("multi-agent-hidden", multi);
@@ -3469,140 +3511,6 @@ init();
 
   // Model cache for instant switching (populated from SQLite on startup)
   const modelCache = {};
-
-  // Mode cache for agents that expose modes
-  const modeCache = {};
-
-  // Load all cached modes from SQLite on startup (instant)
-  async function loadCachedModesFromDb() {
-    console.log("[Harness] loadCachedModesFromDb starting...");
-    try {
-      const allCached = await ipcRenderer.invoke("getAllCachedModes");
-      console.log("[Harness] getAllCachedModes returned:", allCached);
-      if (allCached && typeof allCached === "object") {
-        for (const [agentId, modes] of Object.entries(allCached)) {
-          if (Array.isArray(modes) && modes.length > 0) {
-            modeCache[agentId] = modes;
-            console.log(
-              "[Harness] Loaded",
-              modes.length,
-              "cached modes for",
-              agentId,
-            );
-          }
-        }
-      }
-    } catch (err) {
-      console.error("[Harness] Failed to load cached modes from DB:", err);
-    }
-    console.log(
-      "[Harness] loadCachedModesFromDb done. Cache:",
-      Object.keys(modeCache),
-    );
-  }
-
-  // Refresh modes from agent in background (slow, updates cache)
-  async function refreshModesInBackground(agentId) {
-    try {
-      console.log("[Harness] Background mode refresh for", agentId);
-      const freshModes = await ipcRenderer.invoke("refreshAgentModes", agentId);
-      if (freshModes && freshModes.length > 0) {
-        const oldModes = modeCache[agentId] || [];
-        const changed = JSON.stringify(freshModes) !== JSON.stringify(oldModes);
-
-        modeCache[agentId] = freshModes;
-        console.log(
-          "[Harness] Background mode refresh got",
-          freshModes.length,
-          "modes for",
-          agentId,
-          "changed:",
-          changed,
-        );
-
-        // If this is the active agent and modes changed, update UI
-        if (changed && activeAgentId === agentId) {
-          console.log("[Harness] Updating UI with fresh modes for", agentId);
-          if (agentModeDropdown) {
-            setModeOptions(agentModeDropdown, freshModes);
-          }
-        }
-      }
-    } catch (err) {
-      console.warn("[Harness] Background mode refresh failed for", agentId, err);
-    }
-  }
-
-  // Load modes for an agent (from cache or fetch)
-  async function loadModes(agentId) {
-    console.log(
-      "[Harness] loadModes called for:",
-      agentId,
-      "cache has:",
-      Object.keys(modeCache),
-    );
-    // Return cached immediately if available (instant UX)
-    if (modeCache[agentId] && modeCache[agentId].length > 0) {
-      console.log(
-        "[Harness] Using cached modes for:",
-        agentId,
-        "(",
-        modeCache[agentId].length,
-        "modes)",
-      );
-      // Trigger background refresh for freshness
-      setTimeout(() => refreshModesInBackground(agentId), 0);
-      return modeCache[agentId];
-    }
-
-    // No cache - must wait for fresh fetch
-    console.log(
-      "[Harness] No cached modes for",
-      agentId,
-      "- calling refreshAgentModes...",
-    );
-    try {
-      const modes = await ipcRenderer.invoke("refreshAgentModes", agentId);
-      console.log("[Harness] refreshAgentModes returned:", modes?.length || 0, "modes");
-      if (modes && modes.length > 0) {
-        modeCache[agentId] = modes;
-      }
-      return modes || [];
-    } catch (err) {
-      console.error("[Harness] refreshAgentModes failed for", agentId, ":", err);
-      return [];
-    }
-  }
-
-  // Set mode options on a custom dropdown
-  function setModeOptions(dropdown, modes) {
-    if (!dropdown) {
-      console.warn("[Harness] setModeOptions called with null dropdown");
-      return;
-    }
-    const currentValue = dropdown.getValue();
-
-    // Build items array for CustomDropdown
-    const items = [{ value: 'default', name: 'Use default', description: '' }];
-
-    if (Array.isArray(modes)) {
-      modes.forEach((mode) => {
-        items.push({
-          value: mode.value,
-          name: mode.name || mode.value,
-          description: mode.description || ''
-        });
-      });
-    }
-
-    console.log("[Harness] Setting", items.length - 1, "mode options");
-    dropdown.setOptions(items);
-
-    // Restore previous value if it still exists
-    if (currentValue && items.some(item => item.value === currentValue)) {
-      dropdown.setValue(currentValue);
-    }
-  }
 
   // Fetch enriched models (with reasoning effort data) for Codex
   async function loadEnrichedModels(agentId) {
@@ -3904,45 +3812,6 @@ init();
       }
     }
 
-    // Handle agent mode dropdown (visible for Codex and OpenCode)
-    const agentModeGroup = document.getElementById("agentModeGroup");
-    const agentsWithModes = ["codex", "opencode"];
-    if (agentsWithModes.includes(agentId)) {
-      // Show the agent mode dropdown
-      if (agentModeGroup) {
-        agentModeGroup.style.display = "";
-      }
-
-      if (agentId === "opencode") {
-        // OpenCode has static agent modes: build, plan, general, explore
-        const opencodeModes = [
-          { value: "build", name: "Build", description: "Default agent with full tool access" },
-          { value: "plan", name: "Plan", description: "Planning and analysis without modifications" },
-          { value: "general", name: "General", description: "Multipurpose for complex tasks" },
-          { value: "explore", name: "Explore", description: "Fast read-only codebase exploration" }
-        ];
-        if (agentModeDropdown) {
-          setModeOptions(agentModeDropdown, opencodeModes);
-          console.log("[Harness] Populated agent mode dropdown with OpenCode agents");
-        }
-      } else {
-        // Load modes dynamically for Codex
-        const modes = await loadModes(agentId);
-        if (agentModeDropdown && modes.length > 0) {
-          setModeOptions(agentModeDropdown, modes);
-          console.log("[Harness] Populated agent mode dropdown with", modes.length, "modes for", agentId);
-        }
-      }
-    } else {
-      // Hide the agent mode dropdown for other agents
-      if (agentModeGroup) {
-        agentModeGroup.style.display = "none";
-      }
-      if (agentModeDropdown) {
-        agentModeDropdown.setValue("default");
-      }
-    }
-
     // Handle reasoning effort dropdown (only visible for Codex)
     const reasoningEffortGroup = document.getElementById("reasoningEffortGroup");
     if (agentId === "codex") {
@@ -4145,17 +4014,13 @@ init();
     });
   });
 
-  // Initial agent selection - wait for settings AND cached models/modes to load first
+  // Initial agent selection - wait for settings and cached models to load first
   window.initAgentSelection = async function () {
-    // Load cached models and modes from SQLite first (instant)
-    await Promise.all([loadCachedModelsFromDb(), loadCachedModesFromDb()]);
+    // Load cached models from SQLite first (instant)
+    await loadCachedModelsFromDb();
     console.log(
       "[Harness] Model cache populated from SQLite:",
       Object.keys(modelCache),
-    );
-    console.log(
-      "[Harness] Mode cache populated from SQLite:",
-      Object.keys(modeCache),
     );
 
     // ALWAYS ensure settings are fully loaded (fixes race condition with init())
@@ -4195,19 +4060,6 @@ init();
         await loadEnrichedModels(initialAgentId);
         updateReasoningEffortDropdown(execModelDropdown.getValue());
         restoreReasoningEffort(initialAgentId);
-        // Also restore agent mode for Codex
-        const modes = await loadModes('codex');
-        if (agentModeDropdown && modes.length > 0) {
-          setModeOptions(agentModeDropdown, modes);
-          // Restore saved agent mode
-          const prefs = (currentSettings.taskAgentModels || {})['codex'];
-          if (prefs && prefs.agentMode) {
-            const modeOptions = agentModeDropdown.items.map(item => item.value);
-            if (modeOptions.includes(prefs.agentMode)) {
-              agentModeDropdown.setValue(prefs.agentMode);
-            }
-          }
-        }
       }
       isRestoringSettings = false;
       didCacheRestore = true;
@@ -4226,20 +4078,15 @@ init();
       console.log("[Harness] Skipping onAgentSelected (already restored from cache)");
       // Still need to handle agent-specific UI visibility
       const permissionModeGroup = document.getElementById("permissionModeGroup");
-      const agentModeGroup = document.getElementById("agentModeGroup");
       const reasoningEffortGroup = document.getElementById("reasoningEffortGroup");
 
       // Hide permission dropdown for agents that use their own mechanisms
       const hidePermissionDropdown = ["codex", "claude-code", "droid", "factory-droid", "amp", "opencode"].includes(initialAgentId);
-      const showAgentModeDropdown = ["codex", "opencode"].includes(initialAgentId);
       if (hidePermissionDropdown) {
         if (permissionModeGroup) permissionModeGroup.style.display = "none";
-        // Agent mode visible for Codex and OpenCode
-        if (agentModeGroup) agentModeGroup.style.display = showAgentModeDropdown ? "" : "none";
         // reasoningEffortGroup visibility handled by updateReasoningEffortDropdown
       } else {
         if (permissionModeGroup) permissionModeGroup.style.display = "";
-        if (agentModeGroup) agentModeGroup.style.display = "none";
         if (reasoningEffortGroup) reasoningEffortGroup.style.display = "none";
       }
 
@@ -4264,7 +4111,7 @@ init();
   $("#useWorktreeToggle").on("change", saveTaskSettings);
   $("#claudeDockerToggle").on("change", saveTaskSettings);
 
-  // Note: Permission mode, model, and agent mode dropdown changes are handled
+  // Note: Permission mode and model dropdown changes are handled
   // by the onChange callbacks in initCustomDropdowns()
 
   // Save settings when project path changes
@@ -4353,9 +4200,9 @@ init();
       const prefs = agentModels[agentId] || {};
       const execModel = prefs.execModel || "default";
       const reasoningEffort = agentId === "codex" ? (prefs.reasoningEffort || "default") : null;
-      const agentMode = agentId === "opencode" ? (prefs.agentMode || "build") : null;
+      const agentMode = agentId === "opencode" ? (planMode ? "plan" : "build") : null;
       const codexMode = agentId === "codex"
-        ? (planMode ? "plan" : (prefs.agentMode || "default"))
+        ? (planMode ? "plan" : "default")
         : null;
       const permissionMode = agentId === "codex"
         ? codexAccessMode
