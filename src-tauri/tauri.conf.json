@@ -21,6 +21,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
+      "minimumSystemVersion": "10.15",
       "dmg": {
         "background": "./icons/dmg-background.png",
         "windowSize": {
